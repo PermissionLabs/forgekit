@@ -1,0 +1,48 @@
+{
+  "version": 2,
+  "task": "feat/example-fullstack-feature",
+  "phase": "review",
+  "docs_change": "docs/changes/example-fullstack-feature.md",
+  "pr_url": null,
+  "tracks": {
+    "server": "completed",
+    "deploy": "skipped:no deploy change",
+    "frontend": "skipped:no web change",
+    "app": "in_progress",
+    "shared_contracts": "completed",
+    "docs": "pending"
+  },
+  "reviews": [
+    {
+      "id": "r1",
+      "type": "code+security",
+      "status": "fixing",
+      "open": 1,
+      "doc": "docs/audits/example-fullstack-feature-review.md"
+    }
+  ],
+  "human_qa": {
+    "status": "waiting_for_human",
+    "handoff": "Run the app against localhost API and test onboarding -> checkout",
+    "open": 0
+  },
+  "residuals": [
+    {
+      "id": "r1-f1",
+      "source": "security-review",
+      "status": "fixed",
+      "note": "Moved token handling server-side"
+    }
+  ],
+  "verification": {
+    "passed": ["server tests", "app typecheck"],
+    "pending": ["human QA"],
+    "skipped": []
+  },
+  "compound_capture": {
+    "needed": true,
+    "doc": "docs/solutions/token-handling-checkout.md"
+  },
+  "updated_at": null
+}
+

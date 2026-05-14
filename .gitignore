@@ -1,0 +1,4 @@
+.context/
+!templates/.context/
+!templates/.context/**
+
