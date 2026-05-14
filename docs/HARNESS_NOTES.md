@@ -39,4 +39,3 @@ Add notes here when an idea was tested and did not improve real development.
 ## Project-Only Rules
 
 Add notes here when a rule is useful locally but should not be upstreamed.
-

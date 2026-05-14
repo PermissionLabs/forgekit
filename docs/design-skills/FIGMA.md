@@ -95,4 +95,3 @@ Project-specific Figma rules belong in `docs/PROJECT_CONTEXT.md`, for example:
 - required screenshot tooling
 - platform-specific safe area or status bar rules
 - command names such as `/figma`
-

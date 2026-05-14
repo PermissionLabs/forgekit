@@ -8,4 +8,3 @@ scratch.
 
 Use `docs/HARNESS_NOTES.md` instead when the learning may improve ForgeKit
 itself rather than this project.
-

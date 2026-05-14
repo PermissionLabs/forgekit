@@ -138,7 +138,7 @@ The submodule stores the source templates and future tooling. The root project f
 ForgeKit v0.1 is document-first. The default workflow is:
 
 ```text
-plan -> implement -> review -> merge -> post_merge
+plan -> implement -> review -> human_qa -> merge -> post_merge -> compound_capture
 ```
 
 For full-stack work, `implement`, `review`, and `human_qa` may repeat in a fix

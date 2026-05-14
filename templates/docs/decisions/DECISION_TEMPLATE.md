@@ -25,4 +25,3 @@ State the chosen approach plainly.
 
 - Alternative: TBD
 - Reason rejected: TBD
-

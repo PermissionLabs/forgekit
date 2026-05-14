@@ -29,7 +29,7 @@ implementation and load or invoke the host's Figma/design skill when available.
 For production-level code or documentation changes, follow:
 
 ```text
-plan -> implement -> review -> merge -> post_merge
+plan -> implement -> review -> human_qa -> merge -> post_merge -> compound_capture
 ```
 
 For every non-trivial task, read or create `.context/workflow-state.json` or an

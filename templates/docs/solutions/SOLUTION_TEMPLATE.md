@@ -42,4 +42,3 @@ and whether any project rule should be updated.
 - Change doc: TBD
 - Review/audit doc: TBD
 - Follow-up: TBD
-
