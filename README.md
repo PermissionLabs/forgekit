@@ -53,25 +53,29 @@ docs/
 
 ## Quick Start
 
-Until a CLI exists, copy the template files into the target product repository:
+In your product repo, ask your agent:
+
+> "Bootstrap ForgeKit into this repo. Follow `docs/BOOTSTRAP.md` from
+> &lt;path-or-url-to-forgekit&gt;."
+
+Or run the script directly from a local checkout of forgekit:
 
 ```bash
-cp -R templates/AGENTS.md templates/CLAUDE.md templates/docs product-repo/
-mkdir -p product-repo/.context
-cp templates/.context/workflow-state.compact.example.json product-repo/.context/workflow-state.json
+./scripts/bootstrap.sh /path/to/product-repo
 ```
 
-Then fill in:
+The script copies `AGENTS.md`, `CLAUDE.md`, `docs/`, seeds
+`.context/workflow-state.json`, and adds `.context/` to the target's
+`.gitignore`. It refuses to overwrite without `--force`, and never overwrites
+`docs/PROJECT_CONTEXT.md`.
 
-- `docs/PROJECT_CONTEXT.md` with stack, commands, important paths, local rules, and documentation map
-- `docs/WORKFLOW.md` only if the project needs stricter local workflow details
-- `docs/HARNESS_NOTES.md` as reusable workflow issues appear
-- `.gitignore` with `.context/` so runtime agent state stays local
+See `docs/BOOTSTRAP.md` for the full procedure (used by agents and humans),
+including a manual fallback when the script can't run.
 
-For a non-trivial PR, create a task note from `docs/changes/CHANGE_TEMPLATE.md` and keep it updated during the work. Agents may use `.context/workflow-state.json` for local progress tracking, based on `templates/.context/workflow-state.compact.example.json`.
-
-Use the compact workflow-state format for live work. Keep details in
-`docs/changes/*.md`, `docs/audits/*.md`, or `docs/solutions/*.md`.
+After bootstrap, fill in `docs/PROJECT_CONTEXT.md` (stack, commands, important
+paths, local rules, documentation map). For a non-trivial PR, create a task
+note from `docs/changes/CHANGE_TEMPLATE.md` and keep
+`.context/workflow-state.json` up to date.
 
 ## Repository Layout
 
