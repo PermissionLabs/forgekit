@@ -32,6 +32,19 @@ Suggested format:
 - Candidate ForgeKit change:
 ```
 
+### 2026-05-14 - bootstrap entry point
+
+- Source project: forgekit itself
+- Problem repeated: New repos miss `.context/` or `.gitignore` step when
+  applying templates manually; agents re-derive the procedure from README each
+  time.
+- Local fix tried: Added `docs/BOOTSTRAP.md` (agent-facing primary procedure)
+  and `scripts/bootstrap.sh` (deterministic shortcut). README Quick Start now
+  points at both.
+- Evidence it helped: Pending — first downstream application.
+- Candidate ForgeKit change: Already in this repo; promote pattern (doc + thin
+  script) to any future spin-off harnesses.
+
 ## Rejected Ideas
 
 Add notes here when an idea was tested and did not improve real development.
