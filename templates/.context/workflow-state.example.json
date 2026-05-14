@@ -1,0 +1,149 @@
+{
+  "version": 2,
+  "task": {
+    "id": "example-fullstack-feature",
+    "title": "Add a full-stack feature with server, deploy, and app changes",
+    "branch": "feat/example-fullstack-feature",
+    "base": "origin/main",
+    "docs_change": "docs/changes/example-fullstack-feature.md",
+    "pr_url": null,
+    "started_at": null,
+    "updated_at": null
+  },
+  "phases": {
+    "plan": {
+      "status": "pending",
+      "started_at": null,
+      "completed_at": null,
+      "notes": ""
+    },
+    "implement": {
+      "status": "pending",
+      "started_at": null,
+      "completed_at": null,
+      "notes": ""
+    },
+    "review": {
+      "status": "pending",
+      "started_at": null,
+      "completed_at": null,
+      "notes": ""
+    },
+    "human_qa": {
+      "status": "pending",
+      "started_at": null,
+      "completed_at": null,
+      "notes": ""
+    },
+    "merge": {
+      "status": "pending",
+      "started_at": null,
+      "completed_at": null,
+      "notes": ""
+    },
+    "post_merge": {
+      "status": "pending",
+      "started_at": null,
+      "completed_at": null,
+      "notes": ""
+    },
+    "compound_capture": {
+      "status": "pending",
+      "started_at": null,
+      "completed_at": null,
+      "notes": ""
+    }
+  },
+  "tracks": {
+    "server": {
+      "status": "pending",
+      "owner": "agent",
+      "changed_paths": [],
+      "verification": [],
+      "risks": [],
+      "skip_reason": null
+    },
+    "deploy": {
+      "status": "pending",
+      "owner": "agent",
+      "changed_paths": [],
+      "verification": [],
+      "risks": [],
+      "skip_reason": null
+    },
+    "frontend": {
+      "status": "pending",
+      "owner": "agent",
+      "changed_paths": [],
+      "verification": [],
+      "risks": [],
+      "skip_reason": null
+    },
+    "app": {
+      "status": "pending",
+      "owner": "agent",
+      "changed_paths": [],
+      "verification": [],
+      "risks": [],
+      "skip_reason": null
+    },
+    "shared_contracts": {
+      "status": "pending",
+      "owner": "agent",
+      "changed_paths": [],
+      "verification": [],
+      "risks": [],
+      "skip_reason": null
+    },
+    "docs": {
+      "status": "pending",
+      "owner": "agent",
+      "changed_paths": [],
+      "verification": [],
+      "risks": [],
+      "skip_reason": null
+    }
+  },
+  "review_cycles": [
+    {
+      "id": "review-1",
+      "status": "pending",
+      "types": ["code", "security"],
+      "started_at": null,
+      "completed_at": null,
+      "findings": [],
+      "summary": ""
+    }
+  ],
+  "human_qa_cycles": [
+    {
+      "id": "qa-1",
+      "status": "pending",
+      "handoff": {
+        "url": null,
+        "build": null,
+        "instructions": ""
+      },
+      "reported_issues": [],
+      "accepted_at": null,
+      "summary": ""
+    }
+  ],
+  "residuals": [],
+  "documents": {
+    "updated": [],
+    "not_needed_reason": ""
+  },
+  "verification": {
+    "commands": [],
+    "manual_checks": [],
+    "skipped": []
+  },
+  "compound_capture": {
+    "needed": null,
+    "solution_doc": null,
+    "skip_reason": ""
+  },
+  "risks": [],
+  "followups": []
+}

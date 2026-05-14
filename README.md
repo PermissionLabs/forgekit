@@ -26,29 +26,89 @@ AGENTS.md
 CLAUDE.md
 docs/
   AGENT_GUIDE.md
+  WORKFLOW.md
   PROJECT_CONTEXT.md
   HARNESS_NOTES.md
+  design-skills/
+    FIGMA.md
+  solutions/
+    README.md
+.context/
+  workflow-state.json        # compact local runtime state, gitignored
 ```
 
 `AGENTS.md` and `CLAUDE.md` point agents to `docs/AGENT_GUIDE.md`.
+
+`docs/WORKFLOW.md` defines the Plan -> Implement -> Review -> Merge -> Post-merge workflow, phase statuses, progress-state expectations, and human review gates.
 
 `docs/PROJECT_CONTEXT.md` holds project-specific commands, stack notes, product context, and local rules.
 
 `docs/HARNESS_NOTES.md` captures improvements that may belong upstream in ForgeKit.
 
+`docs/design-skills/FIGMA.md` tells agents what to do when a task includes a Figma link, node ID, or design QA request.
+
+`docs/solutions/*.md` captures reusable solved problems and workflow lessons so future agents do not rediscover them from chat history.
+
+`docs/changes/*.md` is the shared PR/task memory. `.context/` is local agent state and should stay gitignored.
+
+## Quick Start
+
+Until a CLI exists, copy the template files into the target product repository:
+
+```bash
+cp -R templates/AGENTS.md templates/CLAUDE.md templates/docs product-repo/
+mkdir -p product-repo/.context
+cp templates/.context/workflow-state.compact.example.json product-repo/.context/workflow-state.json
+```
+
+Then fill in:
+
+- `docs/PROJECT_CONTEXT.md` with stack, commands, important paths, local rules, and documentation map
+- `docs/WORKFLOW.md` only if the project needs stricter local workflow details
+- `docs/HARNESS_NOTES.md` as reusable workflow issues appear
+- `.gitignore` with `.context/` so runtime agent state stays local
+
+For a non-trivial PR, create a task note from `docs/changes/CHANGE_TEMPLATE.md` and keep it updated during the work. Agents may use `.context/workflow-state.json` for local progress tracking, based on `templates/.context/workflow-state.compact.example.json`.
+
+Use the compact workflow-state format for live work. Keep details in
+`docs/changes/*.md`, `docs/audits/*.md`, or `docs/solutions/*.md`.
+
 ## Repository Layout
 
 ```text
 templates/
+  .context/
+    workflow-state.compact.example.json
+    workflow-state.example.json
   AGENTS.md
   CLAUDE.md
   docs/
     AGENT_GUIDE.md
+    WORKFLOW.md
     PROJECT_CONTEXT.md
     HARNESS_NOTES.md
+    design-skills/
+      FIGMA.md
+    solutions/
+      README.md
+      SOLUTION_TEMPLATE.md
+    changes/
+      CHANGE_TEMPLATE.md
+    decisions/
+      DECISION_TEMPLATE.md
+    audits/
+      REVIEW_TEMPLATE.md
+docs/
+  AGENT_GUIDE.md
+  WORKFLOW.md
+  PROJECT_CONTEXT.md
+  HARNESS_NOTES.md
+  EXTERNAL_TOOLS.md
+  design-skills/
+    FIGMA.md
 ```
 
-This repo also has its own `AGENTS.md`, `CLAUDE.md`, and `docs/AGENT_GUIDE.md` so agents can work on ForgeKit itself.
+This repo also has its own `AGENTS.md`, `CLAUDE.md`, and `docs/` files so agents can work on ForgeKit itself.
 
 ## Intended Project Setup
 
@@ -60,11 +120,41 @@ product-repo/
   AGENTS.md                   # copied/synced from templates
   CLAUDE.md                   # copied/synced from templates
   docs/AGENT_GUIDE.md         # copied/synced from templates
+  docs/WORKFLOW.md            # copied/synced from templates
   docs/PROJECT_CONTEXT.md     # project-local
   docs/HARNESS_NOTES.md       # upstream candidates
+  docs/design-skills/FIGMA.md # Figma/design workflow
+  docs/solutions/*.md         # solved problems and reusable project lessons
+  docs/changes/*.md           # PR/task records
+  docs/decisions/*.md         # durable decisions
+  docs/audits/*.md            # review records
+  .context/workflow-state.json # compact local state, gitignored
 ```
 
 The submodule stores the source templates and future tooling. The root project files remain normal files so Claude Code, Codex, OpenCode, and other agents can discover them naturally.
+
+## Workflow Contract
+
+ForgeKit v0.1 is document-first. The default workflow is:
+
+```text
+plan -> implement -> review -> human_qa -> merge -> post_merge -> compound_capture
+```
+
+For full-stack work, `implement`, `review`, and `human_qa` may repeat in a fix
+loop until automated checks, agent review, and human QA are accepted.
+
+Supported phase statuses are:
+
+```text
+pending
+in_progress
+blocked
+completed
+skipped
+```
+
+Agents should report progress at phase transitions and before final response. Humans own product direction and merge decisions.
 
 ## Evolution Loop
 
@@ -76,4 +166,4 @@ The submodule stores the source templates and future tooling. The root project f
 
 ## Current Status
 
-Pre-v0.1. No CLI yet. The first version is intentionally document-first.
+Pre-v0.1. No CLI yet. The first version is intentionally document-first, with a portable JSON progress-state contract and optional external tool guidance.

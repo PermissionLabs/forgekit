@@ -1,6 +1,7 @@
 # Harness Notes
 
-Use this file to capture possible improvements to the shared agent harness discovered while working in this project.
+Use this file to capture possible improvements to ForgeKit discovered while
+working in real projects.
 
 ## Compound Loop
 
@@ -13,7 +14,7 @@ up:
 1. Fix the local project workflow first.
 2. Record the pattern here.
 3. Note whether it helped in practice.
-4. Promote only the smallest reusable version into the shared harness.
+4. Promote only the smallest reusable version into `templates/`.
 
 ## Upstream Candidates
 
