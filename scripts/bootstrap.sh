@@ -54,6 +54,7 @@ check_paths=(
   "docs/WORKFLOW.md"
   "docs/HARNESS_NOTES.md"
   "docs/design-skills"
+  "docs/review-skills"
   "docs/solutions"
   "docs/changes"
   "docs/decisions"

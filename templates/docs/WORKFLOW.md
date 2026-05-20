@@ -61,10 +61,20 @@ findings do not live only in chat.
 
 ## Review and QA Gates
 
-For production-facing work, run code review and security review unless the
-change is clearly documentation-only or mechanical. Add focused reviews when the
-diff warrants them, such as API contract, data migration, performance,
-accessibility, design QA, or deployment review.
+For production-facing work, run the `code-review` and `security-review` skills
+(see `docs/review-skills/`) unless the change is clearly documentation-only or
+mechanical. Add focused reviews from the same directory when the diff warrants
+them — `api-contract-review` for public API surface changes,
+`data-migration-review` for schema/backfill/destructive-data work,
+`deployment-review` for rollout/infra/env changes. The skill files define the
+checklist; the host (Claude Code, Codex CLI, etc.) chooses how to invoke them
+(subagent, slash command, prompt). `docs/review-skills/README.md` lists
+non-binding invocation hints.
+
+Findings from every cycle must end up in the change record's "Review Cycles"
+table with a disposition — see the disposition vocabulary in *Residual
+findings* below. A clean review with zero findings is valid, but the cycle
+still gets recorded.
 
 Human QA is a first-class gate when the human can run or inspect the product.
 The agent should hand off a testable build, local URL, preview URL, app flow, or
