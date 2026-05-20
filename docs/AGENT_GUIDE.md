@@ -98,6 +98,7 @@ Use:
 - `docs/decisions/*.md` for durable decisions
 - `docs/audits/*.md` for review and audit records
 - `docs/design-skills/*.md` for design-tool-specific workflow rules
+- `docs/review-skills/*.md` for review checklists invoked during the `review` phase
 - `docs/solutions/*.md` for solved problems and reusable lessons
 - `docs/HARNESS_NOTES.md` for reusable harness improvements
 

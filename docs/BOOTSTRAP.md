@@ -60,6 +60,7 @@ Copy these files from forgekit into the target, preserving paths:
 | `templates/docs/PROJECT_CONTEXT.md`                          | `docs/PROJECT_CONTEXT.md` (skip if exists) |
 | `templates/docs/HARNESS_NOTES.md`                            | `docs/HARNESS_NOTES.md`               |
 | `templates/docs/design-skills/*`                             | `docs/design-skills/*`                |
+| `templates/docs/review-skills/*`                             | `docs/review-skills/*`                |
 | `templates/docs/solutions/*`                                 | `docs/solutions/*`                    |
 | `templates/docs/changes/*`                                   | `docs/changes/*`                      |
 | `templates/docs/decisions/*`                                 | `docs/decisions/*`                    |
