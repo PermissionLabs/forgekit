@@ -38,7 +38,7 @@ recorded.
 
 | Trigger | Required |
 | --- | --- |
-| Any production-facing code or doc change | `code-review`, `security-review` |
+| Any production-facing code change | `code-review`, `security-review` |
 | Public API surface change | `api-contract-review` |
 | DB schema, data backfill, or destructive data op | `data-migration-review` |
 | Deploy config, env, or rollout strategy change | `deployment-review` |
