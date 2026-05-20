@@ -149,6 +149,12 @@ reason inline. Example for a Markdown file:
 instead of failing. Use sparingly — every override is a long-term maintenance
 debt and a place where downstream agents can diverge from the harness contract.
 
+The same marker also exempts **project-local extensions** — for example, a
+custom `docs/review-skills/team-policy-review.md` that templates do not ship.
+Without the marker, the sync check flags any file in a harness-owned
+directory that templates no longer has as `STALE` (so renamed or removed
+upstream files cannot quietly linger in the target).
+
 ## Refusal cases
 
 Stop and ask the user before continuing if:

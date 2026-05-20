@@ -135,6 +135,27 @@ check_exact() {
   fi
 }
 
+# Flag downstream files in a harness-owned directory that no longer
+# exist in templates/. These are stale rules — templates renamed or
+# removed the file, but the downstream copy survives and agents may
+# still read it. Project-local extensions can be exempted with a
+# forgekit-override marker.
+check_no_stale_in_dir() {
+  local target_dir="$1" template_dir="$2" label_prefix="$3"
+  [ -d "$target_dir" ] || return
+  while IFS= read -r target_file; do
+    rel="${target_file#$target_dir/}"
+    if [ -f "$template_dir/$rel" ]; then
+      continue
+    fi
+    if has_override "$target_file"; then
+      echo "skip:  $label_prefix/$rel (project extension, forgekit-override)"
+    else
+      note_drift "STALE: $label_prefix/$rel (file not present in templates)"
+    fi
+  done < <(find "$target_dir" -type f -name '*.md')
+}
+
 if [ -n "$mode_internal" ]; then
   echo "ForgeKit internal parity check (root vs templates):"
   check_title_only "$forgekit_root/AGENTS.md" "$templates/AGENTS.md" "AGENTS.md"
@@ -150,7 +171,8 @@ else
   check_exact "$mode_target/docs/AGENT_GUIDE.md" "$templates/docs/AGENT_GUIDE.md" "docs/AGENT_GUIDE.md"
   check_exact "$mode_target/docs/WORKFLOW.md" "$templates/docs/WORKFLOW.md" "docs/WORKFLOW.md"
 
-  # Skill files — exact match for every file the template ships.
+  # Skill files — exact match for every file the template ships, and
+  # nothing in the downstream skill dirs that templates no longer has.
   for skill_dir in design-skills review-skills; do
     if [ -d "$templates/docs/$skill_dir" ]; then
       while IFS= read -r src; do
@@ -158,15 +180,32 @@ else
         check_exact "$mode_target/$rel" "$src" "$rel"
       done < <(find "$templates/docs/$skill_dir" -type f -name '*.md')
     fi
+    check_no_stale_in_dir \
+      "$mode_target/docs/$skill_dir" \
+      "$templates/docs/$skill_dir" \
+      "docs/$skill_dir"
   done
 
   # Template files — should stay byte-identical so downstream forks have
   # the same starting point. Auto-discovered to avoid the same drift
-  # class this script exists to prevent.
+  # class this script exists to prevent. Also check for *_TEMPLATE.md
+  # files in the target that templates no longer ships (renames/removes).
   while IFS= read -r src; do
     rel="${src#$templates/}"
     check_exact "$mode_target/$rel" "$src" "$rel"
   done < <(find "$templates/docs" -type f -name '*_TEMPLATE.md')
+
+  while IFS= read -r target_file; do
+    rel="${target_file#$mode_target/}"
+    if [ -f "$templates/$rel" ]; then
+      continue
+    fi
+    if has_override "$target_file"; then
+      echo "skip:  $rel (project extension, forgekit-override)"
+    else
+      note_drift "STALE: $rel (template file not present in templates/)"
+    fi
+  done < <(find "$mode_target/docs" -type f -name '*_TEMPLATE.md' 2>/dev/null)
 fi
 
 echo ""
