@@ -21,9 +21,9 @@ shape changes to long-lived files / blobs.
   noticed.
 
 **Locking and downtime**
-- Long-running migrations on hot tables use online / non-blocking
-  variants where the engine supports them (e.g. Postgres
-  `CREATE INDEX CONCURRENTLY`).
+- Long-running migrations on hot tables use the engine's documented
+  online / non-blocking construct where one exists (Postgres
+  `CREATE INDEX CONCURRENTLY`, MySQL `ALGORITHM=INPLACE, LOCK=NONE`, etc.).
 - Estimated lock duration is documented; the maintenance window (if any)
   is stated.
 

@@ -22,7 +22,7 @@ surrounding context to reason about callers, callees, and shared state.
 
 **Naming and structure**
 - Names match what the thing does *now*, not what it once did.
-- New abstractions earn their weight (≥3 real call sites or a forced boundary).
+- New abstractions justify their weight beyond ad-hoc inline use.
 - No half-finished implementations or commented-out code left behind.
 
 **Tests / verification**

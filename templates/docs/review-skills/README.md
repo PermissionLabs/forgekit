@@ -12,7 +12,7 @@ host owns invocation; ForgeKit owns the contract.
 ## Skills
 
 - `code-review.md` — logic, edge cases, error handling, naming, structure.
-- `security-review.md` — authn/authz, secrets, injection, RLS, OWASP-style classes.
+- `security-review.md` — authn/authz, secrets, injection, RLS, data exposure, race conditions, dependencies.
 - `api-contract-review.md` — schema, versioning, breaking changes, deprecation.
 - `data-migration-review.md` — backfill, locking, rollback, downtime, idempotency.
 - `deployment-review.md` — env vars, secrets, rollout, observability, rollback.
@@ -52,11 +52,12 @@ Reviews can be run in any order; record each as a separate cycle in
 These are examples, not requirements. Different hosts will pick different
 mechanisms.
 
-- **Claude Code:** load the skill file as the system prompt for a
-  `general-purpose` subagent, or wire a slash command that opens the file
-  and runs the review against the current diff.
-- **Codex CLI:** invoke the `codex-rescue` skill or a project-local
-  `codex review` skill with the skill file's content as the brief.
+- **Claude Code:** load the skill file into a subagent (a custom
+  `.claude/agents/<name>.md` or `general-purpose` via the Agent tool) and
+  run the review against the current diff. A project-local slash command
+  that opens the file works equally well.
+- **Codex CLI:** pass the skill file's content as the brief to a review
+  skill or direct prompt invocation against the current diff.
 - **Other hosts:** read the skill file and run the equivalent of "review
   the current diff against this checklist; report findings".
 

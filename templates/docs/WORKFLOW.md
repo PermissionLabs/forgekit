@@ -72,9 +72,9 @@ checklist; the host (Claude Code, Codex CLI, etc.) chooses how to invoke them
 non-binding invocation hints.
 
 Findings from every cycle must end up in the change record's "Review Cycles"
-table with a disposition (`fixed`, `filed_followup`, `accepted_with_reason`, or
-`blocked`). A clean review with zero findings is valid, but the cycle still
-gets recorded.
+table with a disposition — see the disposition vocabulary in *Residual
+findings* below. A clean review with zero findings is valid, but the cycle
+still gets recorded.
 
 Human QA is a first-class gate when the human can run or inspect the product.
 The agent should hand off a testable build, local URL, preview URL, app flow, or
