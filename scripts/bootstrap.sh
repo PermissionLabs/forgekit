@@ -111,22 +111,31 @@ if ! grep -qxF ".context/" "$gitignore"; then
   echo ".context/" >> "$gitignore"
 fi
 
-# Parity check before declaring success.
+# Parity check before declaring success — AGENTS.md and CLAUDE.md must
+# both exist; deeper byte-identical verification is done by
+# scripts/check-harness-sync.sh below.
 if [ ! -f "$target/AGENTS.md" ] || [ ! -f "$target/CLAUDE.md" ]; then
   echo "error: parity check failed — AGENTS.md or CLAUDE.md missing in target" >&2
   exit 4
 fi
-diff_lines="$(diff "$target/AGENTS.md" "$target/CLAUDE.md" | wc -l | tr -d ' ')"
-# Expected diff: "1c1\n< # Codex Entry Point\n---\n> # Claude Entry Point\n" => 4 lines.
-if [ "$diff_lines" -gt 4 ]; then
-  echo "warn: AGENTS.md and CLAUDE.md differ by more than the title line. Verify both files." >&2
+
+# Harness sync verification — confirms every harness-owned file in the
+# target is byte-identical to templates/. Surfaces silent drift early.
+echo ""
+echo "Verifying harness sync..."
+if ! "$forgekit_root/scripts/check-harness-sync.sh" "$target"; then
+  echo "warn: harness sync check reported drift after bootstrap. This usually" >&2
+  echo "      means --force overwrote a file the user had locally modified;" >&2
+  echo "      review the diff above before continuing." >&2
 fi
 
 cat <<EOF
+
 ForgeKit bootstrapped into: $target
 
 Next steps (see docs/BOOTSTRAP.md "Post-bootstrap checklist"):
   - Fill in $target/docs/PROJECT_CONTEXT.md (stack, commands, paths, local rules).
   - Remove unused placeholder dirs under docs/ if they don't apply yet.
   - Suggested first commit: chore: bootstrap forgekit harness
+  - Re-run scripts/check-harness-sync.sh "$target" any time to verify sync.
 EOF

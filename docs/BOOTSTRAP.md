@@ -84,6 +84,12 @@ Before handing back to the user, verify:
 - `.context/` appears in `.gitignore`.
 - `docs/PROJECT_CONTEXT.md` still has TBD placeholders the user must fill in
   (stack, commands, important paths, local rules, documentation map).
+- The harness sync check passes:
+  ```bash
+  "$FORGEKIT_ROOT"/scripts/check-harness-sync.sh "$TARGET"
+  ```
+  `scripts/bootstrap.sh` runs this automatically at the end. Re-run it any
+  time to verify the target has not drifted from the harness.
 
 Then suggest to the user:
 
@@ -107,9 +113,41 @@ pushing to `main`. Pair it with repo-level enforcement on the target:
 - **Local `pre-push` hook** that refuses pushes to `main`/`master` unless an
   override env var is set. Useful when the agent runs locally with full git
   credentials.
+- **Harness sync check in CI.** `scripts/check-harness-sync.sh` exits non-zero
+  if any harness-owned file has drifted from the templates. Wire it into the
+  target repo's CI so silent drift becomes a failing build instead of a
+  late-discovered incident. Minimal GitHub Actions example:
+  ```yaml
+  jobs:
+    harness-sync:
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
+          with: { submodules: recursive }   # if forgekit is a submodule
+        - run: .harness/forgekit/scripts/check-harness-sync.sh .
+  ```
+  Adjust the script path to wherever the target tracks forgekit (submodule,
+  vendored copy, or a pinned tag).
 
 If the target repo is missing branch protection at bootstrap time, surface it
 as a setup risk in your handback message rather than silently proceeding.
+
+## Intentional deviation (forgekit-override)
+
+If the project legitimately needs to deviate from a harness file, add the
+marker `forgekit-override:` to one of the file's first 5 lines and record the
+reason inline. Example for a Markdown file:
+
+```markdown
+# Workflow
+<!-- forgekit-override: project uses a release-train workflow incompatible
+     with the default phase loop; see docs/decisions/0007-release-train.md -->
+...
+```
+
+`check-harness-sync.sh` skips files carrying the marker with a `skip:` note
+instead of failing. Use sparingly — every override is a long-term maintenance
+debt and a place where downstream agents can diverge from the harness contract.
 
 ## Refusal cases
 
