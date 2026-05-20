@@ -83,6 +83,26 @@ Record what the human tested and what they reported.
 - Fixes applied: TBD
 - Accepted by human: TBD
 
+## Branch & Merge Evidence
+
+Fill the branch fields during `implement`. Merge is human-owned: `merge` and
+`post_merge` may not be marked complete until every gate field below also has a
+real value (not TBD).
+
+Known at implement time:
+
+- Working branch: TBD
+- Target branch: TBD
+- PR URL: TBD
+
+Required before marking `merge` / `post_merge` complete:
+
+- Human review accepted by: TBD
+- Human QA accepted by: TBD
+- Merge SHA (or merged PR link): TBD
+- Post-merge sync command + result: TBD
+- Residual risks acknowledged: TBD
+
 ## Residuals
 
 Every finding must end as `fixed`, `filed_followup`,

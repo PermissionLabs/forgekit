@@ -1,12 +1,11 @@
 # Codex Entry Point
 
-Before making changes in this repository, read and follow `docs/AGENT_GUIDE.md`.
+**REQUIRED:** you must read `docs/AGENT_GUIDE.md` before making any change in
+this repository. It routes you to the workflow contract, project context, and
+review/merge rules — do not skip it.
 
-Also read `docs/PROJECT_CONTEXT.md` when the task depends on stack, product,
-domain, deployment, or local workflow details.
-
-Read `docs/WORKFLOW.md` when the task involves a code change, documentation
-change, PR, review, merge, or post-merge follow-up.
-
-The shared guide is the source of truth for agent behavior. Project-specific
-context belongs in `docs/PROJECT_CONTEXT.md`.
+**Non-negotiable git rule (applies even before you read anything else):** do
+not commit or push on `main` (or the default branch) unless the human
+explicitly asked for direct-main work in the current task. Every other git,
+review, and merge rule lives in `docs/WORKFLOW.md`, which `docs/AGENT_GUIDE.md`
+requires you to read before any git write op.

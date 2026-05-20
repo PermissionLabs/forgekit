@@ -123,11 +123,24 @@ Useful documentation locations:
 - `docs/solutions/*.md` for solved problems and reusable workflow or debugging lessons
 - `docs/HARNESS_NOTES.md` for reusable harness improvements
 
-## Worktree Discipline
+## Git Write Discipline
+
+Before any commit, push, merge, or post-merge work, run `git status` and
+`git branch --show-current`. Confirm you are on a non-default branch unless the
+human explicitly asked for direct-main work in the current task.
 
 Code changes should happen on a branch or isolated worktree when the host
-supports it. Do not commit directly to `main` unless the human explicitly asks
-for that workflow.
+supports it. Do not commit or push on `main` (or the default branch) without
+an explicit human request in the current task. This rule is also pinned in the
+agent entrypoints (`AGENTS.md`, `CLAUDE.md`); the entrypoint version is
+authoritative if the two ever disagree.
+
+Never run destructive ops against the default branch (`git push --force`,
+`git push --force-with-lease`, `git reset --hard origin/main`, history
+rewrites) without explicit human approval in the current task.
+
+If branch protection is missing on the default branch, report it as a setup
+risk and recommend enabling it before any push to the default branch.
 
 After merge, sync the working copy with the target branch before starting the
 next task. If a worktree was used, clean it up only after the PR is merged or
@@ -145,6 +158,10 @@ human-owned. Before asking for merge approval, the agent should report:
 - residual findings and their disposition
 - known risks or skipped checks
 - remaining follow-ups
+
+`merge` and `post_merge` may not be marked complete without a PR URL, recorded
+human acceptance, and the merged target-branch state. See the `Branch & Merge
+Evidence` section of `docs/changes/CHANGE_TEMPLATE.md` for the required fields.
 
 ## Compound Capture
 
