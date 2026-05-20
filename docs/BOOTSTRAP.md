@@ -94,6 +94,22 @@ Then suggest to the user:
   chore: bootstrap forgekit harness
   ```
 
+## Repo-level enforcement (recommended)
+
+The git write hard gate in `AGENTS.md` and `CLAUDE.md` is a *soft* enforcement:
+it tells the agent what not to do, but cannot prevent a misbehaving session from
+pushing to `main`. Pair it with repo-level enforcement on the target:
+
+- **GitHub branch protection** on the default branch — require pull requests,
+  block direct pushes, and require status checks before merge. Set this up
+  immediately after the first push.
+- **Local `pre-push` hook** that refuses pushes to `main`/`master` unless an
+  override env var is set. Useful when the agent runs locally with full git
+  credentials.
+
+If the target repo is missing branch protection at bootstrap time, surface it
+as a setup risk in your handback message rather than silently proceeding.
+
 ## Refusal cases
 
 Stop and ask the user before continuing if:
