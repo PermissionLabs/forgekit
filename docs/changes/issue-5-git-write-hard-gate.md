@@ -117,14 +117,16 @@ flowchart TD
 - Fixes applied: TBD
 - Accepted by human: TBD
 
-## Merge Evidence
+## Branch & Merge Evidence
 
-Merge is human-owned. `merge` and `post_merge` may not be marked complete until
-every field below is filled with a real value (not TBD).
+Known at implement time:
 
 - Working branch: `feature/issue-5-git-write-hard-gate`
 - Target branch: `main`
-- PR URL: TBD
+- PR URL: https://github.com/PermissionLabs/forgekit/pull/6
+
+Required before marking `merge` / `post_merge` complete:
+
 - Human review accepted by: TBD
 - Human QA accepted by: TBD
 - Merge SHA (or merged PR link): TBD

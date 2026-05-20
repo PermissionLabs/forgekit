@@ -4,10 +4,10 @@
 
 These rules apply even if no other doc has been read yet:
 
-- Before commit, push, merge, or post-merge work, check the current branch and workflow state.
+- Before commit, push, merge, or post-merge work, run `git status` and `git branch --show-current`. Confirm you are on a non-default branch (unless the human explicitly asked for direct-main work in the current task).
 - Do not commit or push on `main` (or the default branch) unless the human explicitly requested direct-main work in the current task. Default to a branch or isolated worktree.
 - Merge is human-owned. Do not mark `merge` or `post_merge` complete without a PR URL, recorded human acceptance, and the merged target-branch state.
-- If branch protection is missing on the default branch, report it as a setup risk and recommend enabling it before proceeding.
+- If branch protection is missing on the default branch, report it as a setup risk and recommend enabling it before any push to the default branch.
 
 ## Reading Order
 
