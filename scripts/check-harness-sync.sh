@@ -78,7 +78,11 @@ note_drift() {
 
 has_override() {
   local f="$1"
-  [ -f "$f" ] && head -n 5 "$f" 2>/dev/null | grep -qE 'forgekit-override:'
+  # Require a comment prefix so that prose documenting the marker
+  # (e.g. BOOTSTRAP.md, a future runbook template) cannot accidentally
+  # bypass the check by mentioning the literal string.
+  [ -f "$f" ] && head -n 5 "$f" 2>/dev/null \
+    | grep -qE '(<!--|#|//)[[:space:]]*forgekit-override:'
 }
 
 # Diff that ignores the first line (used for entrypoints where only the
@@ -157,14 +161,12 @@ else
   done
 
   # Template files — should stay byte-identical so downstream forks have
-  # the same starting point.
-  for tmpl in \
-    docs/changes/CHANGE_TEMPLATE.md \
-    docs/decisions/DECISION_TEMPLATE.md \
-    docs/audits/REVIEW_TEMPLATE.md
-  do
-    check_exact "$mode_target/$tmpl" "$templates/$tmpl" "$tmpl"
-  done
+  # the same starting point. Auto-discovered to avoid the same drift
+  # class this script exists to prevent.
+  while IFS= read -r src; do
+    rel="${src#$templates/}"
+    check_exact "$mode_target/$rel" "$src" "$rel"
+  done < <(find "$templates/docs" -type f -name '*_TEMPLATE.md')
 fi
 
 echo ""
