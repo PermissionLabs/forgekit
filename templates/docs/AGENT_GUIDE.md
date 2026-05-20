@@ -1,5 +1,10 @@
 # Agent Guide
 
+**REQUIRED:** before any code change, documentation change, commit, push, PR,
+review, or merge in this repository, you must read `docs/WORKFLOW.md` and
+follow the phase rules there. Do not start work, do not write code, and do not
+run git write commands until you have read it.
+
 This file is the shared entry point for coding agents working in this repository.
 
 ## Operating Principle

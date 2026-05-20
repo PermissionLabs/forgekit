@@ -59,25 +59,39 @@ Before this change:
 ```mermaid
 flowchart TD
   A[Agent session starts] --> B[Read entrypoint AGENTS.md / CLAUDE.md]
-  B --> C{Git Write Hard Gate}
-  C -->|on main, no explicit ask| D[Stop. Create branch or worktree.]
-  C -->|on branch or explicit| E[Continue to Reading Order]
-  E --> F[docs/AGENT_GUIDE.md, WORKFLOW.md, ...]
+  B --> C{On main without explicit ask?}
+  C -->|yes| D[Stop. Create branch or worktree.]
+  C -->|no| E[REQUIRED: read docs/AGENT_GUIDE.md]
+  E --> F[REQUIRED: read docs/WORKFLOW.md]
+  F --> G[Follow Git Write Discipline + phase rules]
 ```
 
 ## Implementation Notes
 
-- Placed the hard gate as the first section of both entrypoints so it is read
-  before the reading list. This is deliberate: if the agent stops at the
-  entrypoint for any reason, the rule still applies.
-- Mirrored the gate to the forgekit root `AGENTS.md` / `CLAUDE.md` so forgekit
-  agents are bound by the same rule when they work on forgekit itself.
-- Added a "Merge Evidence" section to `CHANGE_TEMPLATE.md` rather than
-  modifying the existing "Human QA" section. The evidence required (working
-  branch, target branch, PR URL, merge SHA, post-merge sync) belongs to the
-  merge gate, not QA.
-- Added a "Repo-level enforcement (recommended)" section to `BOOTSTRAP.md`
-  acknowledging that the entrypoint gate is a soft enforcement and pairing it
+- **Entrypoint design (revised after review):** entrypoints are kept thin and
+  act as a strong-language router. They contain only one inline rule — the
+  single highest-risk rule (no direct commit/push on `main`) — and use
+  **REQUIRED** language to force the agent to read `docs/AGENT_GUIDE.md`. All
+  other git, review, and merge rules live in `docs/WORKFLOW.md`.
+- `docs/AGENT_GUIDE.md` (root and template) opens with a **REQUIRED** line
+  that the agent must read `docs/WORKFLOW.md` before any code change, doc
+  change, or git write op. This makes the routing chain mandatory:
+  `entrypoint -> AGENT_GUIDE -> WORKFLOW`.
+- `docs/WORKFLOW.md` (root and template) absorbs the rules that previously
+  lived inline in the entrypoint. The `Worktree Discipline` section was
+  renamed `Git Write Discipline` and now covers branch check commands,
+  direct-main ban, destructive-op ban, and branch protection setup. The
+  `Human Review Gate` section gained a line forbidding the agent from marking
+  `merge` / `post_merge` complete without PR URL + human acceptance + merged
+  target-branch state.
+- Mirrored entrypoint and guide changes to the forgekit root files so
+  forgekit agents are bound by the same routing when they work on forgekit
+  itself.
+- Added a `Branch & Merge Evidence` section (was `Merge Evidence`) to
+  `CHANGE_TEMPLATE.md`, split into "known at implement time" and "required
+  before merge/post_merge" fields.
+- Added a `Repo-level enforcement (recommended)` section to `BOOTSTRAP.md`
+  acknowledging the entrypoint gate is a soft enforcement and pairing it
   with GitHub branch protection + local pre-push hook as the durable fix.
 
 ### Interaction with sibling issues
@@ -93,10 +107,12 @@ flowchart TD
 ## Documentation Updates
 
 - Updated docs: `CLAUDE.md`, `AGENTS.md`, `templates/CLAUDE.md`,
-  `templates/AGENTS.md`, `templates/docs/changes/CHANGE_TEMPLATE.md`,
-  `docs/BOOTSTRAP.md`.
-- No update needed in `docs/WORKFLOW.md` — the worktree discipline already
-  matches the new gate; the gate just promotes it to the entrypoint.
+  `templates/AGENTS.md`, `docs/AGENT_GUIDE.md`, `templates/docs/AGENT_GUIDE.md`,
+  `docs/WORKFLOW.md`, `templates/docs/WORKFLOW.md`,
+  `templates/docs/changes/CHANGE_TEMPLATE.md`, `docs/BOOTSTRAP.md`.
+- `WORKFLOW.md` is now the single source of truth for git/review/merge rules.
+  Entrypoints route via `AGENT_GUIDE.md` to `WORKFLOW.md` and only inline the
+  highest-risk rule (no direct-main commit/push).
 
 ## Verification
 
