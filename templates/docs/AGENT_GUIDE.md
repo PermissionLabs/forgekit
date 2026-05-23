@@ -78,7 +78,10 @@ A good plan identifies:
 - Do not add frameworks, services, or dependencies without clear need.
 - Do not solve adjacent problems unless they block the requested work.
 - Preserve user changes and avoid reverting work you did not make.
-- Use a branch or isolated worktree for code changes when the host supports it.
+- Use an isolated worktree for code changes (e.g.
+  `git worktree add ../<repo>-<task> -b <branch>`). Plain branch checkout in
+  the primary working tree leaks untracked files across branch switches. See
+  `docs/WORKFLOW.md` Git Write Discipline.
 
 ## Documentation
 

@@ -139,10 +139,18 @@ Before any commit, push, merge, or post-merge work, run `git status` and
 `git branch --show-current`. Confirm you are on a non-default branch unless the
 human explicitly asked for direct-main work in the current task.
 
-Code changes should happen on a branch or isolated worktree when the host
-supports it. Do not commit or push on `main` (or the default branch) without
-an explicit human request in the current task. This rule is also pinned in the
-agent entrypoints (`AGENTS.md`, `CLAUDE.md`); the entrypoint version is
+Code changes MUST happen on an isolated worktree (e.g.
+`git worktree add ../<repo>-<task> -b <branch>`). Plain branch checkout in the
+primary working tree is insufficient — untracked files leak across branch
+switches.
+
+Each task gets its own worktree. Multiple agents collaborating on the same
+task may share that task's worktree, but the primary working tree is reserved
+for reads, inspection, and switching between tasks — not for committing code.
+
+Do not commit or push on `main` (or the default branch) without an explicit
+human request in the current task. This rule is also pinned in the agent
+entrypoints (`AGENTS.md`, `CLAUDE.md`); the entrypoint version is
 authoritative if the two ever disagree.
 
 Never run destructive ops against the default branch (`git push --force`,
@@ -153,8 +161,8 @@ If branch protection is missing on the default branch, report it as a setup
 risk and recommend enabling it before any push to the default branch.
 
 After merge, sync the working copy with the target branch before starting the
-next task. If a worktree was used, clean it up only after the PR is merged or
-the human confirms it is no longer needed.
+next task. Clean up the task's worktree only after the PR is merged or the
+human confirms it is no longer needed.
 
 ## Human Review Gate
 
