@@ -9,7 +9,8 @@ usage() {
 usage: scripts/bootstrap.sh <target-repo-path> [--force]
 
 Copies AGENTS.md, CLAUDE.md, docs/, and seeds .context/workflow-state.json
-into <target-repo-path>. Adds .context/ to the target's .gitignore.
+into <target-repo-path>. Copies scripts/worktree-add.sh. Adds .context/ to the
+target's .gitignore.
 
 Refuses to overwrite existing harness files unless --force is passed.
 docs/PROJECT_CONTEXT.md is never overwritten (project-local content).
@@ -50,6 +51,7 @@ conflicts=()
 check_paths=(
   "AGENTS.md"
   "CLAUDE.md"
+  "scripts/worktree-add.sh"
   "docs/AGENT_GUIDE.md"
   "docs/WORKFLOW.md"
   "docs/HARNESS_NOTES.md"
@@ -84,6 +86,10 @@ copy_file() {
 # Top-level entry points (both — Codex reads AGENTS.md, Claude reads CLAUDE.md).
 copy_file "$templates/AGENTS.md" "$target/AGENTS.md"
 copy_file "$templates/CLAUDE.md" "$target/CLAUDE.md"
+
+# Optional helper scripts.
+copy_file "$forgekit_root/scripts/worktree-add.sh" "$target/scripts/worktree-add.sh"
+chmod +x "$target/scripts/worktree-add.sh"
 
 # Shared docs. Walk templates/docs and copy each file, but never overwrite
 # PROJECT_CONTEXT.md if it already exists in the target.
