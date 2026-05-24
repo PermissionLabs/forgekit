@@ -65,9 +65,9 @@ Or run the script directly from a local checkout of forgekit:
 ```
 
 The script copies `AGENTS.md`, `CLAUDE.md`, `docs/`, seeds
-`.context/workflow-state.json`, and adds `.context/` to the target's
-`.gitignore`. It refuses to overwrite without `--force`, and never overwrites
-`docs/PROJECT_CONTEXT.md`.
+`.context/workflow-state.json`, copies `scripts/worktree-add.sh`, and adds
+`.context/` to the target's `.gitignore`. It refuses to overwrite without
+`--force`, and never overwrites `docs/PROJECT_CONTEXT.md`.
 
 See `docs/BOOTSTRAP.md` for the full procedure (used by agents and humans),
 including a manual fallback when the script can't run.
@@ -76,6 +76,16 @@ After bootstrap, fill in `docs/PROJECT_CONTEXT.md` (stack, commands, important
 paths, local rules, documentation map). For a non-trivial PR, create a task
 note from `docs/changes/CHANGE_TEMPLATE.md` and keep
 `.context/workflow-state.json` up to date.
+
+For code or documentation changes, prefer the worktree helper:
+
+```bash
+scripts/worktree-add.sh ../product-repo-task -b feat/task origin/main
+```
+
+It creates the git worktree and seeds the worktree-local
+`.context/workflow-state.json`. Raw `git worktree add` does not copy ignored
+runtime state.
 
 ## Repository Layout
 
@@ -102,6 +112,8 @@ templates/
       DECISION_TEMPLATE.md
     audits/
       REVIEW_TEMPLATE.md
+scripts/
+  worktree-add.sh
 docs/
   AGENT_GUIDE.md
   WORKFLOW.md

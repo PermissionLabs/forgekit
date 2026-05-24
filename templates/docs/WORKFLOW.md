@@ -144,6 +144,17 @@ Code changes MUST happen on an isolated worktree (e.g.
 primary working tree is insufficient — untracked files leak across branch
 switches.
 
+If you use ForgeKit's helper, prefer:
+
+```bash
+scripts/worktree-add.sh ../<repo>-<task> -b <branch> origin/main
+```
+
+The helper runs `git worktree add` and seeds the worktree's gitignored
+`.context/workflow-state.json`. Raw `git worktree add` does not copy ignored
+runtime state such as `.context/`, so agents must create that file manually
+when they do not use the helper.
+
 Each task gets its own worktree. Multiple agents collaborating on the same
 task may share that task's worktree, but the primary working tree is reserved
 for reads, inspection, and switching between tasks — not for committing code.

@@ -9,6 +9,7 @@
 #
 # What gets checked
 #   Entrypoints (AGENTS.md, CLAUDE.md): only the title line may differ.
+#   Helper scripts (scripts/worktree-add.sh): byte-identical.
 #   Core docs (AGENT_GUIDE.md, WORKFLOW.md): byte-identical.
 #   Skill files (design-skills/*, review-skills/*): byte-identical.
 #   Template files (CHANGE_TEMPLATE.md, DECISION_TEMPLATE.md,
@@ -166,6 +167,9 @@ else
   # Entrypoints — title-line diff allowed.
   check_title_only "$mode_target/AGENTS.md" "$templates/AGENTS.md" "AGENTS.md"
   check_title_only "$mode_target/CLAUDE.md" "$templates/CLAUDE.md" "CLAUDE.md"
+
+  # Helper scripts — exact match.
+  check_exact "$mode_target/scripts/worktree-add.sh" "$forgekit_root/scripts/worktree-add.sh" "scripts/worktree-add.sh"
 
   # Core docs — exact match.
   check_exact "$mode_target/docs/AGENT_GUIDE.md" "$templates/docs/AGENT_GUIDE.md" "docs/AGENT_GUIDE.md"

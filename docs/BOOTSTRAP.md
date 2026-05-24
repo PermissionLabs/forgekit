@@ -38,9 +38,10 @@ If a local checkout of forgekit is available, run:
 "$FORGEKIT_ROOT"/scripts/bootstrap.sh "$TARGET"
 ```
 
-This copies entry points + `docs/` + seeds `.context/workflow-state.json` and
-adds `.context/` to the target's `.gitignore`. It refuses to overwrite without
-`--force`. `docs/PROJECT_CONTEXT.md` is never overwritten.
+This copies entry points + `docs/`, copies `scripts/worktree-add.sh`, seeds
+`.context/workflow-state.json`, and adds `.context/` to the target's
+`.gitignore`. It refuses to overwrite without `--force`.
+`docs/PROJECT_CONTEXT.md` is never overwritten.
 
 Skip ahead to **Post-bootstrap checklist**.
 
@@ -55,6 +56,7 @@ Copy these files from forgekit into the target, preserving paths:
 | ------------------------------------------------------------ | ------------------------------------- |
 | `templates/AGENTS.md`                                        | `AGENTS.md`                           |
 | `templates/CLAUDE.md`                                        | `CLAUDE.md`                           |
+| `scripts/worktree-add.sh`                                    | `scripts/worktree-add.sh`             |
 | `templates/docs/AGENT_GUIDE.md`                              | `docs/AGENT_GUIDE.md`                 |
 | `templates/docs/WORKFLOW.md`                                 | `docs/WORKFLOW.md`                    |
 | `templates/docs/PROJECT_CONTEXT.md`                          | `docs/PROJECT_CONTEXT.md` (skip if exists) |
@@ -79,6 +81,7 @@ grep -qxF ".context/" "$TARGET/.gitignore" 2>/dev/null \
 Before handing back to the user, verify:
 
 - `AGENTS.md` and `CLAUDE.md` both exist at the target root.
+- `scripts/worktree-add.sh` exists and is executable.
 - `docs/AGENT_GUIDE.md`, `docs/WORKFLOW.md`, `docs/PROJECT_CONTEXT.md` exist.
 - `.context/workflow-state.json` exists.
 - `.context/` appears in `.gitignore`.
