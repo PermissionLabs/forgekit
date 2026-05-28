@@ -132,9 +132,11 @@ or command injects them.
 
 - Handoff URL/build/instructions: Read the changed docs and generated state
   shape; no runtime app exists.
-- Human-reported issues: Pending
-- Fixes applied: Pending
-- Accepted by human: Pending
+- Human-reported issues: Claude migration review found entrypoint/title,
+  worktree-target, and preflight safety issues.
+- Fixes applied: Updated `scripts/update-harness.sh` and recorded the migration
+  verification scenarios above.
+- Accepted by human: 2026-05-28, user confirmed merge/post-merge may proceed.
 
 ## Branch & Merge Evidence
 
@@ -144,11 +146,12 @@ or command injects them.
 
 Required before marking `merge` / `post_merge` complete:
 
-- Human review accepted by: TBD
-- Human QA accepted by: TBD
-- Merge SHA (or merged PR link): TBD
-- Post-merge sync command + result: TBD
-- Residual risks acknowledged: TBD
+- Human review accepted by: 2026-05-28, user confirmation in chat
+- Human QA accepted by: 2026-05-28, user confirmation in chat
+- Merge SHA (or merged PR link): Pending merge of PR #13
+- Post-merge sync command + result: Pending after PR #13 merge
+- Residual risks acknowledged: Runtime enforcement remains out of scope; future
+  helper/hook automation is tracked in follow-ups.
 
 ## Residuals
 
