@@ -98,7 +98,7 @@ The compact seed uses string paths only. The expanded example shows optional
 
 - Working branch: `codex/phase-refs`
 - Target branch: `main`
-- PR URL: TBD
+- PR URL: https://github.com/PermissionLabs/forgekit/pull/13
 
 Required before marking `merge` / `post_merge` complete:
 
