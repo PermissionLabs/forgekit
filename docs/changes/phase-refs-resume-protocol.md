@@ -7,8 +7,8 @@ review skill documents, after extended work or context compaction.
 
 Success criteria:
 
-- New workflow states point agents to phase-specific documents without embedding
-  long checklist text.
+- New workflow states point agents to a tracked phase refs source without
+  embedding long checklist text or static routing tables.
 - Agents read phase references on task start, resume, phase transition, and
   gate entry, not every chat turn.
 - Review entry clearly reloads `docs/review-skills/README.md` plus applicable
@@ -16,8 +16,8 @@ Success criteria:
 
 ## Scope
 
-- In scope: workflow-state examples, worktree state seed, agent/workflow docs,
-  and a short README note.
+- In scope: tracked phase refs, workflow-state examples, worktree state seed,
+  agent/workflow docs, bootstrap/sync docs, and a short README note.
 - Out of scope: CLI automation, mandatory host plugins, or runtime enforcement.
 
 ## Current State
@@ -41,29 +41,33 @@ lose that context unless the agent manually reopens the files.
 
 | Track | Status | Changed paths | Verification | Risks |
 | --- | --- | --- | --- | --- |
-| Shared contracts | Completed | `templates/.context/*.json`, `scripts/worktree-add.sh` | JSON validation and seed check passed | Existing worktrees can retain stale `phase_refs` if harness refs change later |
-| Docs | Completed | `README.md`, `docs/AGENT_GUIDE.md`, `docs/WORKFLOW.md`, template docs | `git diff --check`; manual root/template parity check | Agents still need to honor the protocol |
+| Shared contracts | Completed | `docs/PHASE_REFS.json`, `templates/docs/PHASE_REFS.json`, `templates/.context/*.json`, `scripts/worktree-add.sh`, `scripts/bootstrap.sh` | JSON validation and seed check passed | Agents still need to honor the protocol |
+| Docs | Completed | `README.md`, `docs/AGENT_GUIDE.md`, `docs/WORKFLOW.md`, `docs/BOOTSTRAP.md`, `docs/PROJECT_CONTEXT.md`, template docs | `git diff --check`; sync check for tracked phase refs | Enforcement remains future automation |
+| Sync tooling | Completed | `scripts/check-harness-sync.sh` | `--forgekit` parity check and syntax checks passed | Broader root/template parity remains a follow-up |
 
 ## Implementation Notes
 
-Added two state fields:
+Added a tracked phase refs file and a compact state pointer:
 
 - `resume_protocol`: when to reread `.context/workflow-state.json`.
-- `phase_refs`: compact paths to load when entering a phase.
+- `resume_protocol.phase_refs_source`: where to find the tracked phase routing
+  table.
+- `docs/PHASE_REFS.json`: required and conditional refs to load on phase entry.
 
-The compact seed uses string paths only. The expanded example shows optional
-`path` and `reason` objects for teams that want more detail.
+The compact state no longer embeds the static routing table. It only carries the
+current phase and the tracked source path. This keeps repeated state reads small
+while preserving a single tracked source of truth for review/design/QA routing.
 
-Tradeoff: `phase_refs` is static routing metadata copied into each gitignored
-worktree state file. That makes the current phase self-rehydrating, but existing
-worktrees will not automatically receive later review-skill additions or path
-renames. Agents should treat stale refs as a resume aid, not as a replacement
-for the tracked workflow and review-skill docs.
+Tradeoff: this is still a contract and nudge, not runtime enforcement. It makes
+the phase-entry reload path more explicit and easier to automate later, but an
+agent must still read the state file and phase refs source unless a future hook
+or command injects them.
 
 ## Documentation Updates
 
-- Updated docs: `README.md`, `docs/AGENT_GUIDE.md`, `docs/WORKFLOW.md`, and the
-  downstream templates for guide/workflow.
+- Updated docs: `README.md`, `docs/AGENT_GUIDE.md`, `docs/WORKFLOW.md`,
+  `docs/BOOTSTRAP.md`, `docs/PROJECT_CONTEXT.md`, `docs/PHASE_REFS.json`, and
+  downstream templates.
 - No additional product docs needed because this is a harness contract change.
 
 ## Verification
@@ -71,24 +75,30 @@ for the tracked workflow and review-skill docs.
 - Commands run:
   - `jq . templates/.context/workflow-state.compact.example.json`
   - `jq . templates/.context/workflow-state.example.json`
+  - `jq . docs/PHASE_REFS.json`
+  - `jq . templates/docs/PHASE_REFS.json`
   - `jq . .context/workflow-state.json`
   - `bash -n scripts/worktree-add.sh`
+  - `bash -n scripts/bootstrap.sh`
+  - `bash -n scripts/check-harness-sync.sh`
   - `git diff --check`
   - `scripts/check-harness-sync.sh --forgekit`
   - `scripts/worktree-add.sh /private/tmp/forgekit-seed-check -b codex/seed-check-phase-refs origin/main`
   - `jq . .context/workflow-state.json` in the generated seed-check worktree
 - Manual checks:
-  - Confirmed the generated state contains `resume_protocol` and `phase_refs`.
-  - Confirmed compact example size is 2,417 bytes after the added refs.
+  - Confirmed the generated state contains `resume_protocol.phase_refs_source`
+    and does not embed the static phase refs table.
+  - Confirmed compact example size is reduced after moving refs to
+    `docs/PHASE_REFS.json`.
   - Manually compared the new root docs changes with the matching
     `templates/docs/` changes.
 - Not run:
   - Full downstream sync check against ForgeKit root is not applicable; that
     mode treats ForgeKit itself as a bootstrapped product repo and reports
     existing root/template differences plus missing downstream template files.
-  - `scripts/check-harness-sync.sh --forgekit` was run, but it only verifies
-    root entrypoint parity and does not cover the root docs or script changes
-    made in this PR.
+  - `scripts/check-harness-sync.sh --forgekit` was run, but it verifies only
+    root entrypoint parity plus `docs/PHASE_REFS.json`; it still does not cover
+    the root docs or script changes made in this PR.
 
 ## Review Cycles
 
@@ -96,7 +106,10 @@ for the tracked workflow and review-skill docs.
 | --- | --- | --- | --- |
 | 1 | Code + security | 0 findings | Clean; reviewed script-generated JSON, path handling, and doc contract scope |
 | 2 | Code + security | Change note review and verification state was stale | Fixed in this document |
-| 3 | Claude review | Static `phase_refs` may become stale in existing worktrees; `--forgekit` validation scope was overstated | Documented staleness tradeoff and narrowed validation claim; captured sync-check gap in `docs/HARNESS_NOTES.md` |
+| 3 | Claude review | Static `phase_refs` may become stale in existing worktrees; `--forgekit` validation scope was overstated | Moved routing table to tracked `docs/PHASE_REFS.json`; narrowed validation claim and captured remaining sync-check gap |
+| 4 | Design revision | Static routing table in runtime state increased token cost and was only a nudge | Moved routing table to tracked `docs/PHASE_REFS.json`; state now stores only `phase_refs_source` |
+| 5 | Code review | JSON harness files could not use the existing comment-based `forgekit-override` marker | Added JSON key marker support to `scripts/check-harness-sync.sh` and documented it in `docs/BOOTSTRAP.md` |
+| 6 | Code review | `scripts/bootstrap.sh` conflict check did not include new tracked `docs/PHASE_REFS.json` | Added `docs/PHASE_REFS.json` to the conflict list |
 
 ## Human QA
 
@@ -125,8 +138,11 @@ Required before marking `merge` / `post_merge` complete:
 | Source | Finding | Disposition | Link/reason |
 | --- | --- | --- | --- |
 | code-review | Stale review/verification status in this change note | fixed | Updated plan, tracks, and review cycle rows |
-| Claude review | Static `phase_refs` copied into gitignored worktree state can become stale | accepted_with_reason | Accepted for v0.1 as a compact resume aid; documented tradeoff and source-of-truth limitation |
-| Claude review | `scripts/check-harness-sync.sh --forgekit` does not verify changed root docs/scripts | fixed | Narrowed validation language and recorded tool gap in `docs/HARNESS_NOTES.md` |
+| Claude review | Static `phase_refs` copied into gitignored worktree state can become stale | fixed | Moved routing table to tracked `docs/PHASE_REFS.json`; state stores only the source path |
+| Claude review | `scripts/check-harness-sync.sh --forgekit` did not verify changed root docs/scripts | fixed | Added exact `docs/PHASE_REFS.json` parity check, narrowed validation language, and recorded remaining tool gap in `docs/HARNESS_NOTES.md` |
+| design review | Runtime state grew with static route metadata despite token-saving goal | fixed | Removed embedded route table from state examples and seed script |
+| code-review | JSON harness files need an override path for intentional downstream drift | fixed | Added support for a top-level `"forgekit-override"` key |
+| code-review | Bootstrap could overwrite an existing downstream `docs/PHASE_REFS.json` without `--force` | fixed | Added the file to `scripts/bootstrap.sh` conflict detection |
 
 ## Compound Capture
 
@@ -137,4 +153,6 @@ Required before marking `merge` / `post_merge` complete:
 ## Follow-ups
 
 - Consider a future helper command that prints the current phase refs from
-  `.context/workflow-state.json`.
+  `docs/PHASE_REFS.json` for the phase in `.context/workflow-state.json`.
+- Consider a future hook or slash command that injects current phase refs on
+  phase transition.

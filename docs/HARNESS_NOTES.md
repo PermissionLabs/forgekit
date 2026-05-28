@@ -48,15 +48,16 @@ Suggested format:
 ### 2026-05-28 - internal sync check coverage
 
 - Source project: forgekit itself, PR #13 review.
-- Problem repeated: `scripts/check-harness-sync.sh --forgekit` currently checks
-  only root entrypoint parity. It does not verify that root docs or helper
-  scripts changed in a PR match the corresponding templates.
-- Local fix tried: Manual root/template comparison during review.
+- Problem repeated: `scripts/check-harness-sync.sh --forgekit` did not verify
+  that root docs or helper scripts changed in a PR match the corresponding
+  templates.
+- Local fix tried: Manual root/template comparison during review; added exact
+  sync checks for tracked `docs/PHASE_REFS.json`.
 - Evidence it helped: Caught that the PR validation language overstated what
   the `--forgekit` command proves.
-- Candidate ForgeKit change: Extend `--forgekit` mode to verify root docs and
-  helper script parity where a one-to-one template mapping exists, while keeping
-  known intentional root/template differences explicit.
+- Candidate ForgeKit change: Extend `--forgekit` mode further to verify root
+  docs and helper script parity where a one-to-one template mapping exists,
+  while keeping known intentional root/template differences explicit.
 
 ## Rejected Ideas
 

@@ -11,7 +11,8 @@ ForgeKit", or equivalent into a repo, follow this file step by step.
 Use this when a repo does not yet have:
 
 - `AGENTS.md` and `CLAUDE.md` at the root
-- `docs/AGENT_GUIDE.md`, `docs/WORKFLOW.md`, `docs/PROJECT_CONTEXT.md`
+- `docs/AGENT_GUIDE.md`, `docs/WORKFLOW.md`, `docs/PHASE_REFS.json`,
+  `docs/PROJECT_CONTEXT.md`
 - a gitignored `.context/workflow-state.json`
 
 If the target already has any of these, treat it as already bootstrapped and
@@ -59,6 +60,7 @@ Copy these files from forgekit into the target, preserving paths:
 | `scripts/worktree-add.sh`                                    | `scripts/worktree-add.sh`             |
 | `templates/docs/AGENT_GUIDE.md`                              | `docs/AGENT_GUIDE.md`                 |
 | `templates/docs/WORKFLOW.md`                                 | `docs/WORKFLOW.md`                    |
+| `templates/docs/PHASE_REFS.json`                              | `docs/PHASE_REFS.json`                |
 | `templates/docs/PROJECT_CONTEXT.md`                          | `docs/PROJECT_CONTEXT.md` (skip if exists) |
 | `templates/docs/HARNESS_NOTES.md`                            | `docs/HARNESS_NOTES.md`               |
 | `templates/docs/design-skills/*`                             | `docs/design-skills/*`                |
@@ -82,7 +84,8 @@ Before handing back to the user, verify:
 
 - `AGENTS.md` and `CLAUDE.md` both exist at the target root.
 - `scripts/worktree-add.sh` exists and is executable.
-- `docs/AGENT_GUIDE.md`, `docs/WORKFLOW.md`, `docs/PROJECT_CONTEXT.md` exist.
+- `docs/AGENT_GUIDE.md`, `docs/WORKFLOW.md`, `docs/PHASE_REFS.json`,
+  `docs/PROJECT_CONTEXT.md` exist.
 - `.context/workflow-state.json` exists.
 - `.context/` appears in `.gitignore`.
 - `docs/PROJECT_CONTEXT.md` still has TBD placeholders the user must fill in
@@ -158,6 +161,9 @@ Without the marker, the sync check flags any file in a harness-owned
 directory that templates no longer has as `STALE` (so renamed or removed
 upstream files cannot quietly linger in the target).
 
+For JSON harness files such as `docs/PHASE_REFS.json`, use a top-level
+`"forgekit-override"` key instead of a comment marker.
+
 ## Refusal cases
 
 Stop and ask the user before continuing if:
@@ -184,6 +190,7 @@ diff "$TARGET/AGENTS.md" "$TARGET/CLAUDE.md"
 test -f "$TARGET/docs/AGENT_GUIDE.md"
 test -f "$TARGET/docs/PROJECT_CONTEXT.md"
 test -f "$TARGET/docs/WORKFLOW.md"
+test -f "$TARGET/docs/PHASE_REFS.json"
 ```
 
 If any check fails, fix it before reporting bootstrap as complete.

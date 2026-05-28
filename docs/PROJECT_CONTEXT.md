@@ -33,6 +33,7 @@ runtime automation yet.
 - `AGENTS.md` and `CLAUDE.md`: thin host-specific entry points
 - `docs/AGENT_GUIDE.md`: shared behavior contract for this repository
 - `docs/WORKFLOW.md`: phase, progress, review, and documentation rules
+- `docs/PHASE_REFS.json`: tracked phase-entry document routing table
 - `docs/design-skills/FIGMA.md`: Figma link and design implementation workflow
 - `docs/solutions/`: solved problems and reusable project lessons
 - `docs/EXTERNAL_TOOLS.md`: policy for Superpowers, gstack, and Compound

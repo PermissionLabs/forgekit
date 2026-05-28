@@ -54,6 +54,7 @@ check_paths=(
   "scripts/worktree-add.sh"
   "docs/AGENT_GUIDE.md"
   "docs/WORKFLOW.md"
+  "docs/PHASE_REFS.json"
   "docs/HARNESS_NOTES.md"
   "docs/design-skills"
   "docs/review-skills"

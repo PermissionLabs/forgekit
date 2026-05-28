@@ -45,10 +45,10 @@ used for a non-trivial task, state why.
 Use the state file as the task resume anchor, not as a per-message checklist.
 Read it when starting a task, resuming after a context break, entering a new
 phase, and before the final response. If it contains `resume_protocol`, follow
-that protocol. If it contains `phase_refs`, load the current phase's required
-and applicable conditional documents when entering that phase. Do not reread
-phase references on every chat turn unless the user asks for a status refresh
-or the phase has changed.
+that protocol. If it contains `phase_refs_source`, read that tracked source
+file and load the current phase's required and applicable conditional documents
+when entering that phase. Do not reread phase references on every chat turn
+unless the user asks for a status refresh or the phase has changed.
 
 Keep runtime state compact. Store statuses, counts, links, and short notes in
 JSON; store detailed plans, review findings, QA notes, and rationale in

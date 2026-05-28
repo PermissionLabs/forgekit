@@ -33,6 +33,7 @@ when agents work in this repository.
 - Database migrations: TBD
 - Deployment/infra: TBD
 - Product and architecture docs: TBD
+- Phase-entry refs: `docs/PHASE_REFS.json`
 - Design skills and Figma workflow: `docs/design-skills/FIGMA.md`
 - Solved problems and reusable lessons: `docs/solutions/`
 

@@ -10,14 +10,15 @@
 # What gets checked
 #   Entrypoints (AGENTS.md, CLAUDE.md): only the title line may differ.
 #   Helper scripts (scripts/worktree-add.sh): byte-identical.
-#   Core docs (AGENT_GUIDE.md, WORKFLOW.md): byte-identical.
+#   Core docs (AGENT_GUIDE.md, WORKFLOW.md, PHASE_REFS.json): byte-identical.
 #   Skill files (design-skills/*, review-skills/*): byte-identical.
 #   Template files (CHANGE_TEMPLATE.md, DECISION_TEMPLATE.md,
 #                   REVIEW_TEMPLATE.md): byte-identical.
 #
 # Escape hatch
 #   Files containing the marker `forgekit-override:` in their first 5
-#   lines are skipped with a note. Use this for intentional local
+#   lines are skipped with a note. JSON files may use a top-level
+#   `"forgekit-override"` key instead. Use this for intentional local
 #   deviation and record the reason inline.
 #
 # Exit codes
@@ -79,11 +80,11 @@ note_drift() {
 
 has_override() {
   local f="$1"
-  # Require a comment prefix so that prose documenting the marker
-  # (e.g. BOOTSTRAP.md, a future runbook template) cannot accidentally
-  # bypass the check by mentioning the literal string.
+  # Require a comment prefix, or a JSON key for JSON files, so that prose
+  # documenting the marker (e.g. BOOTSTRAP.md, a future runbook template)
+  # cannot accidentally bypass the check by mentioning the literal string.
   [ -f "$f" ] && head -n 5 "$f" 2>/dev/null \
-    | grep -qE '(<!--|#|//)[[:space:]]*forgekit-override:'
+    | grep -qE '(<!--|#|//)[[:space:]]*forgekit-override:|"forgekit-override"[[:space:]]*:'
 }
 
 # Diff that ignores the first line (used for entrypoints where only the
@@ -161,6 +162,7 @@ if [ -n "$mode_internal" ]; then
   echo "ForgeKit internal parity check (root vs templates):"
   check_title_only "$forgekit_root/AGENTS.md" "$templates/AGENTS.md" "AGENTS.md"
   check_title_only "$forgekit_root/CLAUDE.md" "$templates/CLAUDE.md" "CLAUDE.md"
+  check_exact "$forgekit_root/docs/PHASE_REFS.json" "$templates/docs/PHASE_REFS.json" "docs/PHASE_REFS.json"
 else
   echo "Downstream harness sync check: $mode_target"
 
@@ -174,6 +176,7 @@ else
   # Core docs — exact match.
   check_exact "$mode_target/docs/AGENT_GUIDE.md" "$templates/docs/AGENT_GUIDE.md" "docs/AGENT_GUIDE.md"
   check_exact "$mode_target/docs/WORKFLOW.md" "$templates/docs/WORKFLOW.md" "docs/WORKFLOW.md"
+  check_exact "$mode_target/docs/PHASE_REFS.json" "$templates/docs/PHASE_REFS.json" "docs/PHASE_REFS.json"
 
   # Skill files — exact match for every file the template ships, and
   # nothing in the downstream skill dirs that templates no longer has.

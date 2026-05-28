@@ -27,6 +27,7 @@ CLAUDE.md
 docs/
   AGENT_GUIDE.md
   WORKFLOW.md
+  PHASE_REFS.json
   PROJECT_CONTEXT.md
   HARNESS_NOTES.md
   design-skills/
@@ -50,8 +51,9 @@ docs/
 `docs/solutions/*.md` captures reusable solved problems and workflow lessons so future agents do not rediscover them from chat history.
 
 `docs/changes/*.md` is the shared PR/task memory. `.context/` is local agent state and should stay gitignored.
-The compact state can include phase-specific document refs so agents reload the
-right review, QA, merge, or design guidance only when entering that phase.
+`docs/PHASE_REFS.json` is the tracked phase-routing table; compact state files
+point to it so agents reload the right review, QA, merge, or design guidance
+only when entering that phase.
 
 ## Quick Start
 
@@ -101,6 +103,7 @@ templates/
   docs/
     AGENT_GUIDE.md
     WORKFLOW.md
+    PHASE_REFS.json
     PROJECT_CONTEXT.md
     HARNESS_NOTES.md
     design-skills/
@@ -119,6 +122,7 @@ scripts/
 docs/
   AGENT_GUIDE.md
   WORKFLOW.md
+  PHASE_REFS.json
   PROJECT_CONTEXT.md
   HARNESS_NOTES.md
   EXTERNAL_TOOLS.md
@@ -139,6 +143,7 @@ product-repo/
   CLAUDE.md                   # copied/synced from templates
   docs/AGENT_GUIDE.md         # copied/synced from templates
   docs/WORKFLOW.md            # copied/synced from templates
+  docs/PHASE_REFS.json        # copied/synced from templates
   docs/PROJECT_CONTEXT.md     # project-local
   docs/HARNESS_NOTES.md       # upstream candidates
   docs/design-skills/FIGMA.md # Figma/design workflow
