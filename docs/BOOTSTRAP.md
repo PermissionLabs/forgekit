@@ -59,7 +59,7 @@ From a local ForgeKit checkout, run:
 ```
 
 If the target has drifted harness-owned files, the update helper stops before
-overwriting them and reports each drifted path. Review the diff, then choose
+changing files and reports each drifted path. Review the diff, then choose
 one:
 
 - Re-run with `--force` when the target should match ForgeKit templates:

@@ -90,6 +90,10 @@ or command injects them.
   - `scripts/worktree-add.sh /private/tmp/forgekit-seed-check -b codex/seed-check-phase-refs origin/main`
   - `jq . .context/workflow-state.json` in the generated seed-check worktree
   - `scripts/update-harness.sh /private/tmp/forgekit-update-check --force`
+  - `scripts/update-harness.sh /private/tmp/forgekit-entrypoint-check`
+  - `scripts/update-harness.sh /private/tmp/forgekit-entrypoint-force-check --force`
+  - `scripts/update-harness.sh /private/tmp/forgekit-preflight-check`
+  - `scripts/update-harness.sh /private/tmp/forgekit-gitfile-wt`
 - Manual checks:
   - Confirmed the generated state contains `resume_protocol.phase_refs_source`
     and does not embed the static phase refs table.
@@ -99,6 +103,9 @@ or command injects them.
     `templates/docs/` changes.
   - Confirmed existing-repo update preserves `docs/PROJECT_CONTEXT.md` and adds
     `resume_protocol.phase_refs_source` to existing workflow state.
+  - Confirmed existing-repo update allows entrypoint title-line differences,
+    preserves custom entrypoint titles under `--force`, preflights drift before
+    changing files, and accepts Git worktree targets.
 - Not run:
   - Full downstream sync check against ForgeKit root is not applicable; that
     mode treats ForgeKit itself as a bootstrapped product repo and reports
@@ -119,6 +126,7 @@ or command injects them.
 | 6 | Code review | `scripts/bootstrap.sh` conflict check did not include new tracked `docs/PHASE_REFS.json` | Added `docs/PHASE_REFS.json` to the conflict list |
 | 7 | Claude review | JSON override regex matched prose containing `"forgekit-override":`; conditional keys were undefined | Anchored JSON key matching to line start; added condition definitions to `docs/PHASE_REFS.json` |
 | 8 | Migration review | Existing ForgeKit repos lacked a clear update path for the new tracked phase refs contract | Added `scripts/update-harness.sh` and documented existing-repo update flow/collisions |
+| 9 | Claude migration review | `update-harness.sh` byte-compared entrypoint titles, rejected Git worktrees, and could partially mutate targets before drift exit | Aligned entrypoint updates with sync policy, accepted gitfile worktrees, and added a preflight pass before file writes |
 
 ## Human QA
 
@@ -155,6 +163,9 @@ Required before marking `merge` / `post_merge` complete:
 | Claude review | JSON override regex could false-positive on prose mentions | fixed | Anchored JSON key matching to line start with optional whitespace |
 | Claude review | Conditional phase ref keys lacked trigger definitions | fixed | Added `conditions` definitions to `docs/PHASE_REFS.json` and template copy |
 | migration review | Existing downstream repos needed a safer update path than full re-bootstrap | fixed | Added `scripts/update-harness.sh` and documented expected collisions |
+| Claude migration review | Entrypoint byte comparison blocked normal downstream custom titles and `--force` could overwrite them | fixed | `update-harness.sh` now ignores title-line drift and preserves existing titles when updating entrypoint bodies |
+| code-review | Existing repo update rejected Git worktree targets because `.git` is a file, not a directory | fixed | Replaced `.git` directory test with `git -C "$target" rev-parse --is-inside-work-tree` |
+| code-review | Non-`--force` update could copy earlier files before reporting later drift | fixed | Added a preflight drift pass that exits before changing files |
 
 ## Compound Capture
 

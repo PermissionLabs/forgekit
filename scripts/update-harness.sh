@@ -9,7 +9,8 @@ usage() {
 usage: scripts/update-harness.sh <target-repo-path> [--force]
 
 Updates ForgeKit-owned files in <target-repo-path> from this checkout's
-templates/. Refuses to overwrite drifted files unless --force is passed.
+templates/. Refuses to change files when drift is present unless --force is
+passed.
 
 Always preserves:
   - docs/PROJECT_CONTEXT.md
@@ -49,7 +50,7 @@ fi
 
 target="$(cd "$target" && pwd)"
 
-if [ ! -d "$target/.git" ]; then
+if ! git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "error: target is not a git repository: $target" >&2
   exit 1
 fi
@@ -66,10 +67,60 @@ copy_file() {
   cp "$src" "$dst"
 }
 
+same_entrypoint_body() {
+  diff <(tail -n +2 "$1") <(tail -n +2 "$2") >/dev/null
+}
+
+copy_entrypoint_preserving_title() {
+  local src="$1" dst="$2" tmp
+  mkdir -p "$(dirname "$dst")"
+  if [ ! -e "$dst" ]; then
+    cp "$src" "$dst"
+    return
+  fi
+  tmp="$dst.tmp.$$"
+  {
+    head -n 1 "$dst"
+    tail -n +2 "$src"
+  } > "$tmp"
+  mv "$tmp" "$dst"
+}
+
+would_update_file() {
+  local src="$1"
+  local rel="$2"
+  local mode="${3:-exact}"
+  local dst="$target/$rel"
+
+  if [ "$rel" = "docs/PROJECT_CONTEXT.md" ] && [ -e "$dst" ]; then
+    return 0
+  fi
+
+  if [ -e "$dst" ]; then
+    if has_override "$dst"; then
+      return 0
+    fi
+    if [ "$mode" = "entrypoint" ] && same_entrypoint_body "$src" "$dst"; then
+      return 0
+    fi
+    if [ "$mode" = "exact" ] && cmp -s "$src" "$dst"; then
+      return 0
+    fi
+    if [ "$force" != "--force" ]; then
+      echo "DRIFT: $rel (re-run with --force to overwrite, or add forgekit-override)" >&2
+      return 1
+    fi
+  fi
+
+  return 0
+}
+
 update_file() {
   local src="$1"
   local rel="$2"
+  local mode="${3:-exact}"
   local dst="$target/$rel"
+  local existed=""
 
   if [ "$rel" = "docs/PROJECT_CONTEXT.md" ] && [ -e "$dst" ]; then
     echo "skip: $rel (project-local file preserved)"
@@ -81,39 +132,61 @@ update_file() {
       echo "skip: $rel (forgekit-override marker)"
       return 0
     fi
-    if cmp -s "$src" "$dst"; then
+    if [ "$mode" = "entrypoint" ] && same_entrypoint_body "$src" "$dst"; then
+      echo "ok:   $rel (title-line diff allowed)"
+      return 0
+    fi
+    if [ "$mode" = "exact" ] && cmp -s "$src" "$dst"; then
       echo "ok:   $rel"
       return 0
     fi
-    if [ "$force" != "--force" ]; then
-      echo "DRIFT: $rel (re-run with --force to overwrite, or add forgekit-override)" >&2
-      return 1
-    fi
   fi
 
-  copy_file "$src" "$dst"
-  echo "copy: $rel"
+  [ -e "$dst" ] && existed=1
+
+  if [ "$mode" = "entrypoint" ]; then
+    copy_entrypoint_preserving_title "$src" "$dst"
+    if [ -n "$existed" ]; then
+      echo "copy: $rel (body updated, title preserved)"
+    else
+      echo "copy: $rel"
+    fi
+  else
+    copy_file "$src" "$dst"
+    echo "copy: $rel"
+  fi
 }
 
 drift=0
 
 for rel in AGENTS.md CLAUDE.md; do
-  update_file "$templates/$rel" "$rel" || drift=1
+  would_update_file "$templates/$rel" "$rel" entrypoint || drift=1
 done
 
-update_file "$forgekit_root/scripts/worktree-add.sh" "scripts/worktree-add.sh" || drift=1
+would_update_file "$forgekit_root/scripts/worktree-add.sh" "scripts/worktree-add.sh" || drift=1
 
 while IFS= read -r src; do
   rel="${src#$templates/}"
-  update_file "$src" "$rel" || drift=1
+  would_update_file "$src" "$rel" || drift=1
 done < <(find "$templates/docs" -type f | sort)
 
 if [ "$drift" -ne 0 ]; then
   echo "" >&2
-  echo "update stopped before overwriting drifted files." >&2
+  echo "update stopped before changing files." >&2
   echo "Review the drift, then re-run with --force if those harness files should match ForgeKit." >&2
   exit 1
 fi
+
+for rel in AGENTS.md CLAUDE.md; do
+  update_file "$templates/$rel" "$rel" entrypoint
+done
+
+update_file "$forgekit_root/scripts/worktree-add.sh" "scripts/worktree-add.sh"
+
+while IFS= read -r src; do
+  rel="${src#$templates/}"
+  update_file "$src" "$rel"
+done < <(find "$templates/docs" -type f | sort)
 
 chmod +x "$target/scripts/worktree-add.sh"
 
@@ -137,8 +210,13 @@ elif command -v jq >/dev/null 2>&1; then
     | .resume_protocol.read_phase_refs = (.resume_protocol.read_phase_refs // "on_phase_entry_only")
     | .resume_protocol.phase_refs_source = (.resume_protocol.phase_refs_source // "docs/PHASE_REFS.json")
   ' "$state_file" > "$tmp"; then
-    mv "$tmp" "$state_file"
-    echo "update: .context/workflow-state.json resume_protocol"
+    if cmp -s "$tmp" "$state_file"; then
+      rm -f "$tmp"
+      echo "ok:   .context/workflow-state.json resume_protocol"
+    else
+      mv "$tmp" "$state_file"
+      echo "update: .context/workflow-state.json resume_protocol"
+    fi
   else
     rm -f "$tmp"
     echo "warn: could not update .context/workflow-state.json" >&2
@@ -159,7 +237,17 @@ fi
 
 echo ""
 echo "Verifying harness sync..."
-"$forgekit_root/scripts/check-harness-sync.sh" "$target"
+if ! "$forgekit_root/scripts/check-harness-sync.sh" "$target"; then
+  cat <<EOF >&2
+
+ForgeKit harness files were updated in: $target
+
+Harness sync still reports drift. Review the output above for stale files or
+intentional project overrides, then either remove stale harness files or add a
+forgekit-override marker where the target should diverge.
+EOF
+  exit 1
+fi
 
 cat <<EOF
 
