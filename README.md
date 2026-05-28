@@ -50,6 +50,8 @@ docs/
 `docs/solutions/*.md` captures reusable solved problems and workflow lessons so future agents do not rediscover them from chat history.
 
 `docs/changes/*.md` is the shared PR/task memory. `.context/` is local agent state and should stay gitignored.
+The compact state can include phase-specific document refs so agents reload the
+right review, QA, merge, or design guidance only when entering that phase.
 
 ## Quick Start
 

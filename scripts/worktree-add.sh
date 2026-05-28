@@ -87,6 +87,54 @@ else
         branch: $branch,
         verified_before_edit: true
       },
+      resume_protocol: {
+        read_this_file_on: [
+          "task_start",
+          "session_resume",
+          "context_compaction",
+          "phase_transition",
+          "before_final_response"
+        ],
+        read_phase_refs: "on_phase_entry_only"
+      },
+      phase_refs: {
+        implement: {
+          conditional: {
+            figma_or_design: ["docs/design-skills/FIGMA.md"]
+          }
+        },
+        review: {
+          required: [
+            "docs/WORKFLOW.md",
+            "docs/review-skills/README.md"
+          ],
+          conditional: {
+            production_code: [
+              "docs/review-skills/code-review.md",
+              "docs/review-skills/security-review.md"
+            ],
+            public_api: ["docs/review-skills/api-contract-review.md"],
+            data_migration: ["docs/review-skills/data-migration-review.md"],
+            deploy_change: ["docs/review-skills/deployment-review.md"],
+            figma_or_design: ["docs/design-skills/FIGMA.md"]
+          }
+        },
+        human_qa: {
+          required: ["docs/WORKFLOW.md"],
+          conditional: {
+            figma_or_design: ["docs/design-skills/FIGMA.md"]
+          }
+        },
+        merge: {
+          required: ["docs/WORKFLOW.md"]
+        },
+        post_merge: {
+          required: ["docs/WORKFLOW.md"]
+        },
+        compound_capture: {
+          required: ["docs/WORKFLOW.md"]
+        }
+      },
       tracks: {},
       reviews: [],
       reviews_open: 0,
