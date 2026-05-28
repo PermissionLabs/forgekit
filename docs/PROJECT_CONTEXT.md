@@ -39,6 +39,7 @@ runtime automation yet.
 - `docs/EXTERNAL_TOOLS.md`: policy for Superpowers, gstack, and Compound
 - `docs/HARNESS_NOTES.md`: reusable harness improvement candidates
 - `scripts/worktree-add.sh`: optional helper that creates a worktree and seeds worktree-local state
+- `scripts/update-harness.sh`: helper for updating existing downstream repos without re-bootstrap
 - `templates/`: files copied or synced into downstream product repositories
 - `templates/.context/workflow-state.compact.example.json`: recommended live progress state shape
 - `templates/.context/workflow-state.example.json`: expanded reference schema

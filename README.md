@@ -73,6 +73,17 @@ The script copies `AGENTS.md`, `CLAUDE.md`, `docs/`, seeds
 `.context/` to the target's `.gitignore`. It refuses to overwrite without
 `--force`, and never overwrites `docs/PROJECT_CONTEXT.md`.
 
+For a repo that already uses ForgeKit, run the update helper from this checkout
+instead of bootstrapping from scratch:
+
+```bash
+./scripts/update-harness.sh /path/to/product-repo --force
+```
+
+The update helper preserves `docs/PROJECT_CONTEXT.md` and existing task state,
+adds `docs/PHASE_REFS.json`, and updates `.context/workflow-state.json` with
+`resume_protocol.phase_refs_source` when `jq` is available.
+
 See `docs/BOOTSTRAP.md` for the full procedure (used by agents and humans),
 including a manual fallback when the script can't run.
 
@@ -119,6 +130,7 @@ templates/
       REVIEW_TEMPLATE.md
 scripts/
   worktree-add.sh
+  update-harness.sh
 docs/
   AGENT_GUIDE.md
   WORKFLOW.md

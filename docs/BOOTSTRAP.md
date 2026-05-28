@@ -46,6 +46,54 @@ This copies entry points + `docs/`, copies `scripts/worktree-add.sh`, seeds
 
 Skip ahead to **Post-bootstrap checklist**.
 
+## Existing repo update path
+
+Use this when a repo already has ForgeKit and should receive newer harness
+files. Do **not** use `bootstrap.sh` for routine upgrades; it is intentionally
+conservative and will stop on existing harness files.
+
+From a local ForgeKit checkout, run:
+
+```bash
+"$FORGEKIT_ROOT"/scripts/update-harness.sh "$TARGET"
+```
+
+If the target has drifted harness-owned files, the update helper stops before
+overwriting them and reports each drifted path. Review the diff, then choose
+one:
+
+- Re-run with `--force` when the target should match ForgeKit templates:
+  ```bash
+  "$FORGEKIT_ROOT"/scripts/update-harness.sh "$TARGET" --force
+  ```
+- Add a `forgekit-override` marker when the target intentionally diverges.
+- Merge the file manually when the target has project-specific edits that
+  should partly survive.
+
+The update helper:
+
+- preserves `docs/PROJECT_CONTEXT.md`
+- preserves existing `.context/workflow-state.json` task details
+- adds `resume_protocol.phase_refs_source` to existing workflow state when
+  `jq` is available
+- copies new harness files such as `docs/PHASE_REFS.json`
+- runs `scripts/check-harness-sync.sh "$TARGET"` at the end
+
+Expected PR contents in the target repo:
+
+- copied or updated harness-owned files
+- `.gitignore` containing `.context/`
+- no unrelated product code changes
+
+Known collision points:
+
+- `docs/PHASE_REFS.json` if the target already has a project-local file with
+  that name
+- locally edited `docs/AGENT_GUIDE.md` or `docs/WORKFLOW.md`
+- custom review/design skill files without a `forgekit-override` marker
+- in-progress worktrees whose gitignored `.context/workflow-state.json` must be
+  updated separately
+
 ## Fallback path: manual steps
 
 Use this when the script is unavailable (different machine, partial copy, or

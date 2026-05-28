@@ -41,7 +41,7 @@ lose that context unless the agent manually reopens the files.
 
 | Track | Status | Changed paths | Verification | Risks |
 | --- | --- | --- | --- | --- |
-| Shared contracts | Completed | `docs/PHASE_REFS.json`, `templates/docs/PHASE_REFS.json`, `templates/.context/*.json`, `scripts/worktree-add.sh`, `scripts/bootstrap.sh` | JSON validation and seed check passed | Agents still need to honor the protocol |
+| Shared contracts | Completed | `docs/PHASE_REFS.json`, `templates/docs/PHASE_REFS.json`, `templates/.context/*.json`, `scripts/worktree-add.sh`, `scripts/bootstrap.sh`, `scripts/update-harness.sh` | JSON validation and seed/update checks passed | Agents still need to honor the protocol |
 | Docs | Completed | `README.md`, `docs/AGENT_GUIDE.md`, `docs/WORKFLOW.md`, `docs/BOOTSTRAP.md`, `docs/PROJECT_CONTEXT.md`, template docs | `git diff --check`; sync check for tracked phase refs | Enforcement remains future automation |
 | Sync tooling | Completed | `scripts/check-harness-sync.sh` | `--forgekit` parity check and syntax checks passed | Broader root/template parity remains a follow-up |
 
@@ -83,11 +83,13 @@ or command injects them.
     cases
   - `bash -n scripts/worktree-add.sh`
   - `bash -n scripts/bootstrap.sh`
+  - `bash -n scripts/update-harness.sh`
   - `bash -n scripts/check-harness-sync.sh`
   - `git diff --check`
   - `scripts/check-harness-sync.sh --forgekit`
   - `scripts/worktree-add.sh /private/tmp/forgekit-seed-check -b codex/seed-check-phase-refs origin/main`
   - `jq . .context/workflow-state.json` in the generated seed-check worktree
+  - `scripts/update-harness.sh /private/tmp/forgekit-update-check --force`
 - Manual checks:
   - Confirmed the generated state contains `resume_protocol.phase_refs_source`
     and does not embed the static phase refs table.
@@ -95,6 +97,8 @@ or command injects them.
     `docs/PHASE_REFS.json`.
   - Manually compared the new root docs changes with the matching
     `templates/docs/` changes.
+  - Confirmed existing-repo update preserves `docs/PROJECT_CONTEXT.md` and adds
+    `resume_protocol.phase_refs_source` to existing workflow state.
 - Not run:
   - Full downstream sync check against ForgeKit root is not applicable; that
     mode treats ForgeKit itself as a bootstrapped product repo and reports
@@ -114,6 +118,7 @@ or command injects them.
 | 5 | Code review | JSON harness files could not use the existing comment-based `forgekit-override` marker | Added JSON key marker support to `scripts/check-harness-sync.sh` and documented it in `docs/BOOTSTRAP.md` |
 | 6 | Code review | `scripts/bootstrap.sh` conflict check did not include new tracked `docs/PHASE_REFS.json` | Added `docs/PHASE_REFS.json` to the conflict list |
 | 7 | Claude review | JSON override regex matched prose containing `"forgekit-override":`; conditional keys were undefined | Anchored JSON key matching to line start; added condition definitions to `docs/PHASE_REFS.json` |
+| 8 | Migration review | Existing ForgeKit repos lacked a clear update path for the new tracked phase refs contract | Added `scripts/update-harness.sh` and documented existing-repo update flow/collisions |
 
 ## Human QA
 
@@ -149,6 +154,7 @@ Required before marking `merge` / `post_merge` complete:
 | code-review | Bootstrap could overwrite an existing downstream `docs/PHASE_REFS.json` without `--force` | fixed | Added the file to `scripts/bootstrap.sh` conflict detection |
 | Claude review | JSON override regex could false-positive on prose mentions | fixed | Anchored JSON key matching to line start with optional whitespace |
 | Claude review | Conditional phase ref keys lacked trigger definitions | fixed | Added `conditions` definitions to `docs/PHASE_REFS.json` and template copy |
+| migration review | Existing downstream repos needed a safer update path than full re-bootstrap | fixed | Added `scripts/update-harness.sh` and documented expected collisions |
 
 ## Compound Capture
 
@@ -162,3 +168,5 @@ Required before marking `merge` / `post_merge` complete:
   `docs/PHASE_REFS.json` for the phase in `.context/workflow-state.json`.
 - Consider a future hook or slash command that injects current phase refs on
   phase transition.
+- Consider a future partial-update mode that updates only one harness file or
+  feature family when teams do not want a full harness refresh.
