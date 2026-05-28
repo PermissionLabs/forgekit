@@ -53,6 +53,7 @@ Added a tracked phase refs file and a compact state pointer:
 - `resume_protocol.phase_refs_source`: where to find the tracked phase routing
   table.
 - `docs/PHASE_REFS.json`: required and conditional refs to load on phase entry.
+  It also defines each conditional key so agents apply the same triggers.
 
 The compact state no longer embeds the static routing table. It only carries the
 current phase and the tracked source path. This keeps repeated state reads small
@@ -78,6 +79,8 @@ or command injects them.
   - `jq . docs/PHASE_REFS.json`
   - `jq . templates/docs/PHASE_REFS.json`
   - `jq . .context/workflow-state.json`
+  - Override regex smoke checks for anchored JSON keys and prose false-positive
+    cases
   - `bash -n scripts/worktree-add.sh`
   - `bash -n scripts/bootstrap.sh`
   - `bash -n scripts/check-harness-sync.sh`
@@ -110,6 +113,7 @@ or command injects them.
 | 4 | Design revision | Static routing table in runtime state increased token cost and was only a nudge | Moved routing table to tracked `docs/PHASE_REFS.json`; state now stores only `phase_refs_source` |
 | 5 | Code review | JSON harness files could not use the existing comment-based `forgekit-override` marker | Added JSON key marker support to `scripts/check-harness-sync.sh` and documented it in `docs/BOOTSTRAP.md` |
 | 6 | Code review | `scripts/bootstrap.sh` conflict check did not include new tracked `docs/PHASE_REFS.json` | Added `docs/PHASE_REFS.json` to the conflict list |
+| 7 | Claude review | JSON override regex matched prose containing `"forgekit-override":`; conditional keys were undefined | Anchored JSON key matching to line start; added condition definitions to `docs/PHASE_REFS.json` |
 
 ## Human QA
 
@@ -143,6 +147,8 @@ Required before marking `merge` / `post_merge` complete:
 | design review | Runtime state grew with static route metadata despite token-saving goal | fixed | Removed embedded route table from state examples and seed script |
 | code-review | JSON harness files need an override path for intentional downstream drift | fixed | Added support for a top-level `"forgekit-override"` key |
 | code-review | Bootstrap could overwrite an existing downstream `docs/PHASE_REFS.json` without `--force` | fixed | Added the file to `scripts/bootstrap.sh` conflict detection |
+| Claude review | JSON override regex could false-positive on prose mentions | fixed | Anchored JSON key matching to line start with optional whitespace |
+| Claude review | Conditional phase ref keys lacked trigger definitions | fixed | Added `conditions` definitions to `docs/PHASE_REFS.json` and template copy |
 
 ## Compound Capture
 

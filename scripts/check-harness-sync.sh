@@ -84,7 +84,7 @@ has_override() {
   # documenting the marker (e.g. BOOTSTRAP.md, a future runbook template)
   # cannot accidentally bypass the check by mentioning the literal string.
   [ -f "$f" ] && head -n 5 "$f" 2>/dev/null \
-    | grep -qE '(<!--|#|//)[[:space:]]*forgekit-override:|"forgekit-override"[[:space:]]*:'
+    | grep -qE '^[[:space:]]*((<!--|#|//)[[:space:]]*forgekit-override:|"forgekit-override"[[:space:]]*:)'
 }
 
 # Diff that ignores the first line (used for entrypoints where only the

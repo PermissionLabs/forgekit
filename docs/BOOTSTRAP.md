@@ -163,6 +163,9 @@ upstream files cannot quietly linger in the target).
 
 For JSON harness files such as `docs/PHASE_REFS.json`, use a top-level
 `"forgekit-override"` key instead of a comment marker.
+Avoid overriding `docs/PHASE_REFS.json` unless the project has a clear
+replacement review-routing policy; stale phase refs can cause agents to miss
+required review checklists.
 
 ## Refusal cases
 

@@ -114,7 +114,7 @@ rehydration pointer, not the routing table itself:
   `docs/PHASE_REFS.json`.
 - Required refs from that source are always read on phase entry.
 - Conditional refs from that source are read only when the current diff or task
-  matches the condition.
+  matches the condition definitions in that source.
 
 Do not load phase refs as a per-message checklist. The default state read
 points are task start, session resume or context compaction, phase transition,
