@@ -27,6 +27,7 @@ CLAUDE.md
 docs/
   AGENT_GUIDE.md
   WORKFLOW.md
+  PHASE_REFS.json
   PROJECT_CONTEXT.md
   HARNESS_NOTES.md
   design-skills/
@@ -50,6 +51,9 @@ docs/
 `docs/solutions/*.md` captures reusable solved problems and workflow lessons so future agents do not rediscover them from chat history.
 
 `docs/changes/*.md` is the shared PR/task memory. `.context/` is local agent state and should stay gitignored.
+`docs/PHASE_REFS.json` is the tracked phase-routing table; compact state files
+point to it so agents reload the right review, QA, merge, or design guidance
+only when entering that phase.
 
 ## Quick Start
 
@@ -68,6 +72,17 @@ The script copies `AGENTS.md`, `CLAUDE.md`, `docs/`, seeds
 `.context/workflow-state.json`, copies `scripts/worktree-add.sh`, and adds
 `.context/` to the target's `.gitignore`. It refuses to overwrite without
 `--force`, and never overwrites `docs/PROJECT_CONTEXT.md`.
+
+For a repo that already uses ForgeKit, run the update helper from this checkout
+instead of bootstrapping from scratch:
+
+```bash
+./scripts/update-harness.sh /path/to/product-repo --force
+```
+
+The update helper preserves `docs/PROJECT_CONTEXT.md` and existing task state,
+adds `docs/PHASE_REFS.json`, and updates `.context/workflow-state.json` with
+`resume_protocol.phase_refs_source` when `jq` is available.
 
 See `docs/BOOTSTRAP.md` for the full procedure (used by agents and humans),
 including a manual fallback when the script can't run.
@@ -99,6 +114,7 @@ templates/
   docs/
     AGENT_GUIDE.md
     WORKFLOW.md
+    PHASE_REFS.json
     PROJECT_CONTEXT.md
     HARNESS_NOTES.md
     design-skills/
@@ -114,9 +130,11 @@ templates/
       REVIEW_TEMPLATE.md
 scripts/
   worktree-add.sh
+  update-harness.sh
 docs/
   AGENT_GUIDE.md
   WORKFLOW.md
+  PHASE_REFS.json
   PROJECT_CONTEXT.md
   HARNESS_NOTES.md
   EXTERNAL_TOOLS.md
@@ -137,6 +155,7 @@ product-repo/
   CLAUDE.md                   # copied/synced from templates
   docs/AGENT_GUIDE.md         # copied/synced from templates
   docs/WORKFLOW.md            # copied/synced from templates
+  docs/PHASE_REFS.json        # copied/synced from templates
   docs/PROJECT_CONTEXT.md     # project-local
   docs/HARNESS_NOTES.md       # upstream candidates
   docs/design-skills/FIGMA.md # Figma/design workflow

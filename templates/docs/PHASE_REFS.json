@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "description": "Tracked phase-entry document refs for ForgeKit agents. Load only the current phase's required refs and matching conditional refs.",
+  "conditions": {
+    "production_code": "Production-facing code, scripts, templates, or runtime-facing configuration changed.",
+    "public_api": "External contract changed: HTTP/RPC API, SDK signature, CLI flag, event schema, or documented integration surface.",
+    "data_migration": "Database schema, backfill, migration, destructive data operation, or persisted data shape changed.",
+    "deploy_change": "Deployment, CI/CD, infrastructure, environment variable, secret, rollout, or observability configuration changed.",
+    "figma_or_design": "Task includes a Figma/design source, UI implementation from design, or design QA."
+  },
+  "phases": {
+    "implement": {
+      "required": [],
+      "conditional": {
+        "figma_or_design": ["docs/design-skills/FIGMA.md"]
+      }
+    },
+    "review": {
+      "required": [
+        "docs/WORKFLOW.md",
+        "docs/review-skills/README.md"
+      ],
+      "conditional": {
+        "production_code": [
+          "docs/review-skills/code-review.md",
+          "docs/review-skills/security-review.md"
+        ],
+        "public_api": ["docs/review-skills/api-contract-review.md"],
+        "data_migration": ["docs/review-skills/data-migration-review.md"],
+        "deploy_change": ["docs/review-skills/deployment-review.md"],
+        "figma_or_design": ["docs/design-skills/FIGMA.md"]
+      }
+    },
+    "human_qa": {
+      "required": ["docs/WORKFLOW.md"],
+      "conditional": {
+        "figma_or_design": ["docs/design-skills/FIGMA.md"]
+      }
+    },
+    "merge": {
+      "required": ["docs/WORKFLOW.md"],
+      "conditional": {}
+    },
+    "post_merge": {
+      "required": ["docs/WORKFLOW.md"],
+      "conditional": {}
+    },
+    "compound_capture": {
+      "required": ["docs/WORKFLOW.md"],
+      "conditional": {}
+    }
+  }
+}

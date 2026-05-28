@@ -4,6 +4,17 @@
   "phase": "review",
   "docs_change": "docs/changes/example-fullstack-feature.md",
   "pr_url": null,
+  "resume_protocol": {
+    "read_this_file_on": [
+      "task_start",
+      "session_resume",
+      "context_compaction",
+      "phase_transition",
+      "before_final_response"
+    ],
+    "read_phase_refs": "on_phase_entry_only",
+    "phase_refs_source": "docs/PHASE_REFS.json"
+  },
   "tracks": {
     "server": "completed",
     "deploy": "skipped:no deploy change",

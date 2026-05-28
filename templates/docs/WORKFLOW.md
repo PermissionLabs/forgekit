@@ -106,6 +106,21 @@ small enough to scan quickly: phase, active tracks, review/QA cycle status,
 residual counts, links to docs, and short notes. Put detailed plans, findings,
 screenshots, logs, and reasoning in the shared docs.
 
+The state file may include `resume_protocol.phase_refs_source`. This is a phase
+rehydration pointer, not the routing table itself:
+
+- `resume_protocol` defines when the agent should reread the state file.
+- `phase_refs_source` points to the tracked phase routing table, by default
+  `docs/PHASE_REFS.json`.
+- Required refs from that source are always read on phase entry.
+- Conditional refs from that source are read only when the current diff or task
+  matches the condition definitions in that source.
+
+Do not load phase refs as a per-message checklist. The default state read
+points are task start, session resume or context compaction, phase transition,
+explicit status refresh, and before the final response. The tracked phase refs
+source is loaded only on phase entry or explicit status refresh.
+
 The shared record for the work belongs in `docs/changes/*.md`. Use that file to
 record the task intent, plan, implementation notes, review findings, diagrams,
 verification, QA results, and follow-ups.
@@ -117,6 +132,12 @@ Agents should check and report progress:
 - before and after each review or QA cycle
 - before asking for human review or merge approval
 - before the final response
+
+At review entry, use the `review` entry in `docs/PHASE_REFS.json` as the source
+of truth for checklist reloads. For production-facing code, this means loading
+the review README plus the code and security review skill files before
+inspecting the diff. Add API contract, migration, deployment, or design refs
+when the diff warrants them.
 
 ## Documentation Rule
 

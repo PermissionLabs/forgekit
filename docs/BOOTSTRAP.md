@@ -11,7 +11,8 @@ ForgeKit", or equivalent into a repo, follow this file step by step.
 Use this when a repo does not yet have:
 
 - `AGENTS.md` and `CLAUDE.md` at the root
-- `docs/AGENT_GUIDE.md`, `docs/WORKFLOW.md`, `docs/PROJECT_CONTEXT.md`
+- `docs/AGENT_GUIDE.md`, `docs/WORKFLOW.md`, `docs/PHASE_REFS.json`,
+  `docs/PROJECT_CONTEXT.md`
 - a gitignored `.context/workflow-state.json`
 
 If the target already has any of these, treat it as already bootstrapped and
@@ -45,6 +46,54 @@ This copies entry points + `docs/`, copies `scripts/worktree-add.sh`, seeds
 
 Skip ahead to **Post-bootstrap checklist**.
 
+## Existing repo update path
+
+Use this when a repo already has ForgeKit and should receive newer harness
+files. Do **not** use `bootstrap.sh` for routine upgrades; it is intentionally
+conservative and will stop on existing harness files.
+
+From a local ForgeKit checkout, run:
+
+```bash
+"$FORGEKIT_ROOT"/scripts/update-harness.sh "$TARGET"
+```
+
+If the target has drifted harness-owned files, the update helper stops before
+changing files and reports each drifted path. Review the diff, then choose
+one:
+
+- Re-run with `--force` when the target should match ForgeKit templates:
+  ```bash
+  "$FORGEKIT_ROOT"/scripts/update-harness.sh "$TARGET" --force
+  ```
+- Add a `forgekit-override` marker when the target intentionally diverges.
+- Merge the file manually when the target has project-specific edits that
+  should partly survive.
+
+The update helper:
+
+- preserves `docs/PROJECT_CONTEXT.md`
+- preserves existing `.context/workflow-state.json` task details
+- adds `resume_protocol.phase_refs_source` to existing workflow state when
+  `jq` is available
+- copies new harness files such as `docs/PHASE_REFS.json`
+- runs `scripts/check-harness-sync.sh "$TARGET"` at the end
+
+Expected PR contents in the target repo:
+
+- copied or updated harness-owned files
+- `.gitignore` containing `.context/`
+- no unrelated product code changes
+
+Known collision points:
+
+- `docs/PHASE_REFS.json` if the target already has a project-local file with
+  that name
+- locally edited `docs/AGENT_GUIDE.md` or `docs/WORKFLOW.md`
+- custom review/design skill files without a `forgekit-override` marker
+- in-progress worktrees whose gitignored `.context/workflow-state.json` must be
+  updated separately
+
 ## Fallback path: manual steps
 
 Use this when the script is unavailable (different machine, partial copy, or
@@ -59,6 +108,7 @@ Copy these files from forgekit into the target, preserving paths:
 | `scripts/worktree-add.sh`                                    | `scripts/worktree-add.sh`             |
 | `templates/docs/AGENT_GUIDE.md`                              | `docs/AGENT_GUIDE.md`                 |
 | `templates/docs/WORKFLOW.md`                                 | `docs/WORKFLOW.md`                    |
+| `templates/docs/PHASE_REFS.json`                              | `docs/PHASE_REFS.json`                |
 | `templates/docs/PROJECT_CONTEXT.md`                          | `docs/PROJECT_CONTEXT.md` (skip if exists) |
 | `templates/docs/HARNESS_NOTES.md`                            | `docs/HARNESS_NOTES.md`               |
 | `templates/docs/design-skills/*`                             | `docs/design-skills/*`                |
@@ -82,7 +132,8 @@ Before handing back to the user, verify:
 
 - `AGENTS.md` and `CLAUDE.md` both exist at the target root.
 - `scripts/worktree-add.sh` exists and is executable.
-- `docs/AGENT_GUIDE.md`, `docs/WORKFLOW.md`, `docs/PROJECT_CONTEXT.md` exist.
+- `docs/AGENT_GUIDE.md`, `docs/WORKFLOW.md`, `docs/PHASE_REFS.json`,
+  `docs/PROJECT_CONTEXT.md` exist.
 - `.context/workflow-state.json` exists.
 - `.context/` appears in `.gitignore`.
 - `docs/PROJECT_CONTEXT.md` still has TBD placeholders the user must fill in
@@ -158,6 +209,12 @@ Without the marker, the sync check flags any file in a harness-owned
 directory that templates no longer has as `STALE` (so renamed or removed
 upstream files cannot quietly linger in the target).
 
+For JSON harness files such as `docs/PHASE_REFS.json`, use a top-level
+`"forgekit-override"` key instead of a comment marker.
+Avoid overriding `docs/PHASE_REFS.json` unless the project has a clear
+replacement review-routing policy; stale phase refs can cause agents to miss
+required review checklists.
+
 ## Refusal cases
 
 Stop and ask the user before continuing if:
@@ -184,6 +241,7 @@ diff "$TARGET/AGENTS.md" "$TARGET/CLAUDE.md"
 test -f "$TARGET/docs/AGENT_GUIDE.md"
 test -f "$TARGET/docs/PROJECT_CONTEXT.md"
 test -f "$TARGET/docs/WORKFLOW.md"
+test -f "$TARGET/docs/PHASE_REFS.json"
 ```
 
 If any check fails, fix it before reporting bootstrap as complete.

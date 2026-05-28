@@ -87,6 +87,17 @@ else
         branch: $branch,
         verified_before_edit: true
       },
+      resume_protocol: {
+        read_this_file_on: [
+          "task_start",
+          "session_resume",
+          "context_compaction",
+          "phase_transition",
+          "before_final_response"
+        ],
+        read_phase_refs: "on_phase_entry_only",
+        phase_refs_source: "docs/PHASE_REFS.json"
+      },
       tracks: {},
       reviews: [],
       reviews_open: 0,

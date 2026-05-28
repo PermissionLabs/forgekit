@@ -10,6 +10,18 @@
     "started_at": null,
     "updated_at": null
   },
+  "resume_protocol": {
+    "read_this_file_on": [
+      "task_start",
+      "session_resume",
+      "context_compaction",
+      "phase_transition",
+      "before_final_response"
+    ],
+    "read_phase_refs": "on_phase_entry_only",
+    "phase_refs_source": "docs/PHASE_REFS.json",
+    "notes": "Keep this file compact. Store long plans, findings, screenshots, and rationale in docs/changes, docs/audits, or docs/solutions."
+  },
   "phases": {
     "plan": {
       "status": "pending",
