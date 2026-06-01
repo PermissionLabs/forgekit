@@ -67,6 +67,12 @@ Required flow:
   system and document the source.
 - If Figma tools fail, check the URL/node ID and ask the human to open or grant
   access to the relevant file. Do not guess from memory.
+- Non-layout visual effects (blur, shadow, backdrop) are frequently dropped by
+  codegen/metadata, and their units rarely map 1:1 across target stacks — e.g. a
+  CSS `blur(24px)` is not a native blur "intensity" of 24. Read each effect value
+  explicitly from the design context and convert it using the project's
+  unit-mapping notes in `docs/PROJECT_CONTEXT.md`, instead of copying the raw
+  number across.
 
 ## Visual Verification
 
