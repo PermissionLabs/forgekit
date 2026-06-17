@@ -12,6 +12,8 @@
 #   Helper scripts (scripts/worktree-add.sh): byte-identical.
 #   Core docs (AGENT_GUIDE.md, WORKFLOW.md, PHASE_REFS.json): byte-identical.
 #   Skill files (design-skills/*, review-skills/*): byte-identical.
+#   Command-skill convention (command-skills/README.md): byte-identical.
+#     (Project command skills under command-skills/ are NOT checked.)
 #   Template files (CHANGE_TEMPLATE.md, DECISION_TEMPLATE.md,
 #                   REVIEW_TEMPLATE.md): byte-identical.
 #
@@ -192,6 +194,15 @@ else
       "$templates/docs/$skill_dir" \
       "docs/$skill_dir"
   done
+
+  # Command-skill convention README is harness-owned guidance. The command
+  # skills themselves are project-local (e.g. docs/command-skills/pick.md), so
+  # this dir is NOT stale-checked — only the README is held byte-identical.
+  # COMMAND_SKILL_TEMPLATE.md is covered by the *_TEMPLATE.md loop below.
+  check_exact \
+    "$mode_target/docs/command-skills/README.md" \
+    "$templates/docs/command-skills/README.md" \
+    "docs/command-skills/README.md"
 
   # Template files — should stay byte-identical so downstream forks have
   # the same starting point. Auto-discovered to avoid the same drift

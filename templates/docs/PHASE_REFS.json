@@ -6,13 +6,15 @@
     "public_api": "External contract changed: HTTP/RPC API, SDK signature, CLI flag, event schema, or documented integration surface.",
     "data_migration": "Database schema, backfill, migration, destructive data operation, or persisted data shape changed.",
     "deploy_change": "Deployment, CI/CD, infrastructure, environment variable, secret, rollout, or observability configuration changed.",
-    "figma_or_design": "Task includes a Figma/design source, UI implementation from design, or design QA."
+    "figma_or_design": "Task includes a Figma/design source, UI implementation from design, or design QA.",
+    "authoring_command_skill": "Task creates, changes, or ports a command skill (a named runnable procedure such as a slash command)."
   },
   "phases": {
     "implement": {
       "required": [],
       "conditional": {
-        "figma_or_design": ["docs/design-skills/FIGMA.md"]
+        "figma_or_design": ["docs/design-skills/FIGMA.md"],
+        "authoring_command_skill": ["docs/command-skills/README.md"]
       }
     },
     "review": {
