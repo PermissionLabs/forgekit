@@ -29,6 +29,10 @@ If the task includes a Figma URL, Figma node ID, design QA request, or asks to
 implement UI from a design, read `docs/design-skills/FIGMA.md` before
 implementation and load or invoke the host's Figma/design skill when available.
 
+If the task is to create, change, or port a command skill (a named runnable
+procedure such as a slash command), read `docs/command-skills/README.md` before
+implementation.
+
 ## Default Workflow
 
 For production-level code or documentation changes, follow:
@@ -110,6 +114,7 @@ Use:
 - `docs/audits/*.md` for review and audit records
 - `docs/design-skills/*.md` for design-tool-specific workflow rules
 - `docs/review-skills/*.md` for review checklists invoked during the `review` phase
+- `docs/command-skills/*.md` for executable command-skill conventions and per-host bindings
 - `docs/solutions/*.md` for solved problems and reusable lessons
 - `docs/HARNESS_NOTES.md` for reusable harness improvements
 

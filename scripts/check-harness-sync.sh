@@ -193,6 +193,15 @@ else
       "docs/$skill_dir"
   done
 
+  # Command-skill convention README is harness-owned guidance. The command
+  # skills themselves are project-local (e.g. docs/command-skills/pick.md), so
+  # this dir is NOT stale-checked — only the README is held byte-identical.
+  # COMMAND_SKILL_TEMPLATE.md is covered by the *_TEMPLATE.md loop below.
+  check_exact \
+    "$mode_target/docs/command-skills/README.md" \
+    "$templates/docs/command-skills/README.md" \
+    "docs/command-skills/README.md"
+
   # Template files — should stay byte-identical so downstream forks have
   # the same starting point. Auto-discovered to avoid the same drift
   # class this script exists to prevent. Also check for *_TEMPLATE.md

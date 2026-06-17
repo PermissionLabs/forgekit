@@ -58,6 +58,7 @@ check_paths=(
   "docs/HARNESS_NOTES.md"
   "docs/design-skills"
   "docs/review-skills"
+  "docs/command-skills"
   "docs/solutions"
   "docs/changes"
   "docs/decisions"
