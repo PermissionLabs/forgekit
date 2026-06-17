@@ -7,7 +7,8 @@ it, open a PR").
 
 A command skill is the **runner**. It does not restate the rules — it drives
 the existing ForgeKit phases (`docs/WORKFLOW.md`) and loads the relevant
-review/design checklists (`docs/PHASE_REFS.json`) at each step.
+review/design checklists via `docs/PHASE_REFS.json` at the phases that call
+for them.
 
 > ForgeKit ships this **convention and a template**, not concrete skills.
 > Real command skills carry project-specific detail (trackers, deploy
@@ -72,9 +73,9 @@ A command-skill doc (`docs/command-skills/<name>.md`) should contain:
    to `docs/WORKFLOW.md` and `AGENTS.md`/`CLAUDE.md` rather than restating
    the rule.
 6. **Tool / MCP requirements** — if the skill needs an MCP server (e.g. an
-   issue tracker), declare it. Shared MCP servers must be registered for
-   every host (`.mcp.json` for Claude, `.codex/config.toml` for Codex) per
-   the project's shared-MCP-registry rule.
+   issue tracker), declare it. A shared MCP server should be registered for
+   every supported host (e.g. `.mcp.json` for Claude, `.codex/config.toml`
+   for Codex), following whatever MCP-registration setup your project uses.
 7. **Termination / handoff** — what "done" means and what the skill hands
    back (PR URL, updated state, tracker status).
 
@@ -93,8 +94,7 @@ Keep the doc thin. It orchestrates; the rules live in `WORKFLOW.md`,
 
 ## Optional by default
 
-Command skills are **optional**, like the external tool packs in
-`docs/EXTERNAL_TOOLS.md`. A repo can run the pure document-first workflow
-with no command skill at all. But when a repo *does* build one, it MUST
-follow this convention so the skill stays multi-host instead of silently
-becoming Claude-only.
+Command skills are **optional**, the same way external tool packs are. A repo
+can run the pure document-first workflow with no command skill at all. But
+when a repo *does* build one, it MUST follow this convention so the skill
+stays multi-host instead of silently becoming Claude-only.

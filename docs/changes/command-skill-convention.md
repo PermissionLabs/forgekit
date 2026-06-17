@@ -98,12 +98,13 @@ Checked before implementing:
 | Cycle | Type | Findings | Resolution |
 | --- | --- | --- | --- |
 | 1 | Self-review (docs + shell) | (a) PHASE_REFS ref sits under `implement` only, not `plan` — `plan` has no PHASE_REFS entry and the AGENT_GUIDE trigger says "before implementation", so coverage holds. (b) No secrets / injection surface in the two static shell additions. | accepted_with_reason |
+| 2 | Code + security (Claude reviewer + Codex CLI, parallel) | F2 (medium): README pointed at `docs/EXTERNAL_TOOLS.md`, which is forgekit-only and never bootstrapped downstream → dangling ref. F1 (low): `check-harness-sync.sh` "What gets checked" header omitted the new command-skills README check. F3 (low): README phrased "shared-MCP-registry rule" as an established forgekit rule. F4 (low): README intro overclaimed "loads checklists at each step" vs PHASE_REFS implement-only. Shell stale-exemption design confirmed sound by both reviewers (project `pick.md` not flagged; no TEMPLATE double-coverage). | F2/F1/F3/F4 `fixed`; security clean |
 
 ## Branch & Merge Evidence
 
 - Working branch: `feat/command-skill-convention`
 - Target branch: `main`
-- PR URL: TBD
+- PR URL: https://github.com/PermissionLabs/forgekit/pull/16
 
 ## Follow-ups
 

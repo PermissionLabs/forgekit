@@ -12,6 +12,8 @@
 #   Helper scripts (scripts/worktree-add.sh): byte-identical.
 #   Core docs (AGENT_GUIDE.md, WORKFLOW.md, PHASE_REFS.json): byte-identical.
 #   Skill files (design-skills/*, review-skills/*): byte-identical.
+#   Command-skill convention (command-skills/README.md): byte-identical.
+#     (Project command skills under command-skills/ are NOT checked.)
 #   Template files (CHANGE_TEMPLATE.md, DECISION_TEMPLATE.md,
 #                   REVIEW_TEMPLATE.md): byte-identical.
 #
