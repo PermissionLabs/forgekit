@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forgekit.dev/schemas/docs-registry.json",
+  "title": "ForgeKit documentation registry",
+  "type": "object",
+  "required": ["version", "documents"],
+  "properties": {
+    "version": { "const": 1 },
+    "documents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "title",
+          "purpose",
+          "authority",
+          "status",
+          "owner",
+          "last_verified_at"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "pattern": "^docs/[A-Za-z0-9._/-]+\\.md$"
+          },
+          "title": { "type": "string", "minLength": 1 },
+          "purpose": { "type": "string", "minLength": 1 },
+          "authority": { "enum": ["primary", "secondary", "historical"] },
+          "status": { "enum": ["active", "superseded", "archived"] },
+          "owner": { "type": "string", "minLength": 1 },
+          "last_verified_at": { "type": "string", "format": "date" },
+          "supersedes": {
+            "type": "array",
+            "items": { "type": "string" },
+            "default": []
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}
