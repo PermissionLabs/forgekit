@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forgekit.dev/schemas/workflow-state-v3.json",
+  "title": "ForgeKit workflow state",
+  "type": "object",
+  "required": [
+    "version",
+    "task",
+    "phase",
+    "branch",
+    "tracking",
+    "isolation",
+    "tracks",
+    "reviews",
+    "verification",
+    "next_step",
+    "updated_at"
+  ],
+  "properties": {
+    "version": { "const": 3 },
+    "task": { "type": "string", "minLength": 1 },
+    "phase": {
+      "enum": [
+        "plan",
+        "implement",
+        "review",
+        "human_qa",
+        "merge",
+        "post_merge",
+        "compound_capture",
+        "done",
+        "closed",
+        "abandoned",
+        "archived"
+      ]
+    },
+    "branch": { "type": "string", "minLength": 1 },
+    "tracking": { "type": "boolean" },
+    "isolation": {
+      "type": "object",
+      "required": ["mode", "path", "branch", "verified_before_edit"],
+      "properties": {
+        "mode": { "enum": ["worktree", "checkout"] },
+        "path": { "type": "string", "minLength": 1 },
+        "branch": { "type": "string", "minLength": 1 },
+        "verified_before_edit": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "tracks": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["status", "note"],
+        "properties": {
+          "status": {
+            "enum": ["pending", "in_progress", "blocked", "completed", "skipped"]
+          },
+          "note": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "reviews": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "type", "status", "findings", "note"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "type": { "type": "string", "minLength": 1 },
+          "status": { "type": "string", "minLength": 1 },
+          "findings": { "type": "integer", "minimum": 0 },
+          "note": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "verification": {
+      "type": "object",
+      "required": ["passed", "pending", "skipped"],
+      "properties": {
+        "passed": { "type": "array", "items": { "type": "string" } },
+        "pending": { "type": "array", "items": { "type": "string" } },
+        "skipped": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "next_step": { "type": "string" },
+    "updated_at": { "type": "string", "format": "date-time" }
+  },
+  "additionalProperties": true,
+  "x-secret-deny-field-pattern": "(secret|token|password|credential|api[_-]?key|authorization)",
+  "x-secret-deny-value-pattern": "(^|[^A-Za-z0-9])sk-(proj-)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|sb_secret_[A-Za-z0-9_-]{16,}|xox[baprs]-[A-Za-z0-9-]{12,}|eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}"
+}

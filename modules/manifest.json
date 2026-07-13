@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "evidence": {
+    "source": "anonymized downstream evaluation",
+    "date": "2026-07-11",
+    "cases": 37,
+    "trials_per_host": 3,
+    "hosts": ["claude", "codex"],
+    "regression_pass_rate": 1,
+    "safety_outcome_parity": 1
+  },
+  "modules": {
+    "workflow-state": {
+      "decision": "promote",
+      "scope": "v3 schema, validation, secret field/value rejection, atomic same-directory writes, focused CLI"
+    },
+    "host-adapters": {
+      "decision": "promote",
+      "scope": "Codex output translation for host-neutral lifecycle hook cores plus contract fixtures"
+    },
+    "docs-index": {
+      "decision": "promote",
+      "scope": "typed registry validation and deterministic active-primary route index"
+    },
+    "quality": {
+      "decision": "promote",
+      "scope": "credential-independent, read-only, pinned-action fast CI template"
+    },
+    "command-skills": {
+      "decision": "already-upstream",
+      "scope": "canonical command-skill convention landed in ForgeKit ca2612a"
+    },
+    "mcp-inventory": {
+      "decision": "needs-evidence",
+      "scope": "not included until a second downstream validates the host projection schema"
+    }
+  },
+  "excluded": [
+    "project release lanes",
+    "product specifications",
+    "product data contracts",
+    "vendor-specific analytics policy",
+    "project approval language",
+    "downstream-only discovery and research tooling"
+  ]
+}

@@ -131,6 +131,12 @@ templates/
 scripts/
   worktree-add.sh
   update-harness.sh
+modules/
+  manifest.json
+  workflow-state/              # optional atomic state CLI + schema
+  host-adapters/               # optional host output adapters + fixtures
+  docs-index/                  # optional generated route index contract
+  quality/                     # optional fast CI template
 docs/
   AGENT_GUIDE.md
   WORKFLOW.md
@@ -201,4 +207,5 @@ Agents should report progress at phase transitions and before final response. Hu
 
 ## Current Status
 
-Pre-v0.1. No CLI yet. The first version is intentionally document-first, with a portable JSON progress-state contract and optional external tool guidance.
+Pre-v0.1. The base remains document-first. Evidence-backed automation is available as optional modules;
+none is silently installed into downstream repositories.

@@ -11,12 +11,12 @@ preserve human review gates.
 
 ## Status
 
-Pre-v0.1. The repository is intentionally document-first. There is no CLI or
-runtime automation yet.
+Pre-v0.1. The base repository remains document-first. Optional, evidence-backed
+CLI modules are available under `modules/` and are never installed implicitly.
 
 ## Stack
 
-- Runtime: none
+- Runtime: optional Bun modules; the base document harness remains runtime-free
 - Package manager: none
 - Primary artifacts: Markdown templates and JSON examples
 
@@ -25,7 +25,7 @@ runtime automation yet.
 - Install: not applicable
 - Dev: not applicable
 - Lint: not configured
-- Test: not configured
+- Test: `bash scripts/test-modules.sh`
 - Build: not configured
 
 ## Important Paths
@@ -41,6 +41,7 @@ runtime automation yet.
 - `scripts/worktree-add.sh`: optional helper that creates a worktree and seeds worktree-local state
 - `scripts/update-harness.sh`: helper for updating existing downstream repos without re-bootstrap
 - `templates/`: files copied or synced into downstream product repositories
+- `modules/`: optional evidence-backed state, host-adapter, docs-index, and CI building blocks
 - `templates/.context/workflow-state.compact.example.json`: recommended live progress state shape
 - `templates/.context/workflow-state.example.json`: expanded reference schema
 
@@ -52,8 +53,8 @@ runtime automation yet.
   `docs/AGENT_GUIDE.md`.
 - Keep project-specific downstream details out of shared templates unless they
   apply across multiple real repositories.
-- Prefer documentation and JSON contracts for v0.1. Add automation later as
-  optional adapters after the workflow proves useful.
+- Prefer documentation and JSON contracts for the base harness. Automation is
+  optional, independently adoptable, and must carry deterministic evidence.
 - When a task includes a Figma URL or Figma node ID, follow
   `docs/design-skills/FIGMA.md` and invoke the available host-specific Figma
   skill or command before implementation.
