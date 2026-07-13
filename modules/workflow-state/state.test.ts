@@ -85,6 +85,8 @@ describe("workflow-state core", () => {
     expect(validateState(parsed).valid).toBe(true);
     parsed.verification.pending.push(["sk", "proj", "abcdefghijklmnop"].join("-"));
     expect(validateState(parsed).valid).toBe(false);
+    parsed.verification.pending = [["xoxb", "1234567890123456"].join("-")];
+    expect(validateState(parsed).valid).toBe(false);
   });
 
   test("rejects duplicate reviews atomically", () => {

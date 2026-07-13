@@ -91,5 +91,5 @@
   },
   "additionalProperties": true,
   "x-secret-deny-field-pattern": "(secret|token|password|credential|api[_-]?key|authorization)",
-  "x-secret-deny-value-pattern": "(^|[^A-Za-z0-9])sk-(proj-)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|sb_secret_[A-Za-z0-9_-]{16,}|eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}"
+  "x-secret-deny-value-pattern": "(^|[^A-Za-z0-9])sk-(proj-)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|sb_secret_[A-Za-z0-9_-]{16,}|xox[baprs]-[A-Za-z0-9-]{12,}|eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}"
 }

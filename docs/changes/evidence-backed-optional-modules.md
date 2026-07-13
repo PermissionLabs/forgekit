@@ -43,6 +43,7 @@ bash scripts/check-harness-sync.sh /path/to/downstream
 | 3 | adversarial review | neutrality scan could silently skip when its scanner was unavailable; legacy command template still claimed procedure ownership | fixed with a portable baseline `grep -rE` scan and link-only synchronized migration stubs |
 | 4 | second-cycle security/publication review | docs symlink escape; credential-shaped values accepted; private downstream names embedded in public denylist | fixed with real-path containment, value-pattern validation, and a project-neutral scanner vocabulary |
 | 5 | Claude second-pass correction | `sk-` matched inside normal `task-`/`risk-` identifiers | fixed with a non-alphanumeric prefix boundary and positive/negative contrast tests |
+| 6 | third-cycle security review | Slack `xox*` credential values were not rejected by workflow-state | fixed with a project-neutral token-shape rule and negative fixture |
 
 Module tests cover workflow-state, docs-index, host-adapter event fixtures, JSON and shell syntax,
 workflow policy, and project-neutrality. No downstream repository name, path, policy, or private
