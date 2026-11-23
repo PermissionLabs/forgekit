@@ -16,6 +16,7 @@ The phase-mapped procedure is
 
 - Claude Code: `.claude/commands/<name>.md` forwards `$ARGUMENTS` to the canonical skill.
 - Codex: native discovery reads `.agents/skills/<name>/SKILL.md`.
+- Antigravity: native discovery reads `.agents/skills/<name>/SKILL.md`.
 - Other agents: `AGENTS.md` points to the same canonical skill.
 
 This file must not duplicate procedure steps. Remove it after the repository's

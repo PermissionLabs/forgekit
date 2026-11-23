@@ -1,4 +1,4 @@
-# Codex Entry Point
+# Agent Entry Point
 
 **REQUIRED:** you must read `docs/AGENT_GUIDE.md` before making any change in
 this repository. It routes you to the workflow contract, project context, and

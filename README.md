@@ -2,7 +2,7 @@
 
 ForgeKit is a lightweight agent harness for human-led product development.
 
-It gives Claude Code, Codex, OpenCode, and similar coding agents the same project entry points and workflow rules without turning the development process into a fully autonomous agent loop.
+It gives Claude Code, Codex, Antigravity, OpenCode, and similar coding agents the same project entry points and workflow rules without turning the development process into a fully autonomous agent loop.
 
 ## Why This Exists
 
@@ -14,7 +14,7 @@ The goal is simple:
 - make small, reviewable changes
 - preserve human product judgment
 - make agents review and verify their own work
-- keep Claude/Codex/OpenCode behavior consistent across projects
+- keep Claude/Codex/Antigravity/OpenCode behavior consistent across projects
 - improve the harness through real project usage
 
 ## Core Model
@@ -38,7 +38,7 @@ docs/
   workflow-state.json        # compact local runtime state, gitignored
 ```
 
-`AGENTS.md` and `CLAUDE.md` point agents to `docs/AGENT_GUIDE.md`.
+`AGENTS.md` (auto-loaded by Codex, Antigravity, OpenCode, and other `AGENTS.md`-compatible hosts) and `CLAUDE.md` (auto-loaded by Claude Code) stay ultra-thin and point agents to `docs/AGENT_GUIDE.md`. Keeping root entry points thin avoids prompt bloat and stays well under Antigravity's 24,000-byte per-file rule cap.
 
 `docs/WORKFLOW.md` defines the Plan -> Implement -> Review -> Merge -> Post-merge workflow, phase statuses, progress-state expectations, and human review gates.
 
@@ -172,7 +172,7 @@ product-repo/
   .context/workflow-state.json # compact local state, gitignored
 ```
 
-The submodule stores the source templates and future tooling. The root project files remain normal files so Claude Code, Codex, OpenCode, and other agents can discover them naturally.
+The submodule stores the source templates and future tooling. The root project files remain normal files so Claude Code, Codex, Antigravity, OpenCode, and other agents can discover them naturally.
 
 ## Workflow Contract
 

@@ -5,7 +5,7 @@ This file is local to ForgeKit itself.
 ## Product
 
 ForgeKit is a lightweight agent harness for human-led product development. It
-standardizes how Codex, Claude Code, OpenCode, and similar coding agents read
+standardizes how Codex, Claude Code, Antigravity, OpenCode, and similar coding agents read
 project instructions, track workflow progress, update documentation, and
 preserve human review gates.
 
@@ -47,8 +47,8 @@ CLI modules are available under `modules/` and are never installed implicitly.
 
 ## Local Rules
 
-- Keep ForgeKit host-neutral. Do not require Claude-only hooks or Codex-only
-  plugins in the core template.
+- Keep ForgeKit host-neutral. Do not require Claude-only hooks, Codex-only
+  plugins, or Antigravity-only workflows in the core template.
 - Keep root `AGENTS.md` and `CLAUDE.md` small. Shared behavior belongs in
   `docs/AGENT_GUIDE.md`.
 - Keep project-specific downstream details out of shared templates unless they

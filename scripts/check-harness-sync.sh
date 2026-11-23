@@ -8,7 +8,10 @@
 #   scripts/check-harness-sync.sh --forgekit
 #
 # What gets checked
-#   Entrypoints (AGENTS.md, CLAUDE.md): only the title line may differ.
+#   Entrypoints (AGENTS.md, CLAUDE.md, and optional GEMINI.md): only the title
+#     line may differ (GEMINI.md -> AGENTS.md symlink is accepted as-is).
+#     Entrypoints are also checked against Antigravity's 24,000-byte per-file
+#     rule cap and standalone Markdown format (no leading YAML frontmatter).
 #   Helper scripts (scripts/worktree-add.sh): byte-identical.
 #   Core docs (AGENT_GUIDE.md, WORKFLOW.md, PHASE_REFS.json): byte-identical.
 #   Skill files (design-skills/*, review-skills/*): byte-identical.
@@ -90,7 +93,7 @@ has_override() {
 }
 
 # Diff that ignores the first line (used for entrypoints where only the
-# title legitimately differs between Codex and Claude variants).
+# title legitimately differs between host variants).
 diff_ignore_title() {
   diff <(tail -n +2 "$1") <(tail -n +2 "$2")
 }
@@ -115,6 +118,49 @@ check_title_only() {
     note_drift "DRIFT: $label — diff beyond title line"
     diff_ignore_title "$target_file" "$template_file" >&2 || true
   fi
+}
+
+ANTIGRAVITY_RULE_MAX_BYTES=24000
+
+check_entrypoint_antigravity() {
+  local target_file="$1" label="$2"
+  [ -f "$target_file" ] || return
+  local size
+  size="$(wc -c < "$target_file" | tr -d '[:space:]')"
+  if [ "$size" -gt "$ANTIGRAVITY_RULE_MAX_BYTES" ]; then
+    if has_override "$target_file"; then
+      echo "warn:  $label is ${size} bytes (> ${ANTIGRAVITY_RULE_MAX_BYTES}-byte Antigravity cap; tail will be truncated — move detail into docs/)" >&2
+    else
+      note_drift "SIZE:  $label is ${size} bytes (> ${ANTIGRAVITY_RULE_MAX_BYTES}-byte Antigravity cap; move detail into docs/)"
+    fi
+  fi
+  if [ "$label" != "CLAUDE.md" ]; then
+    local first_line
+    first_line="$(head -n 1 "$target_file" 2>/dev/null || true)"
+    first_line="${first_line%$'\r'}"
+    if [ "$first_line" = "---" ]; then
+      if has_override "$target_file"; then
+        echo "warn:  $label starts with YAML frontmatter (---); Antigravity loads $label as standalone Markdown without frontmatter" >&2
+      else
+        note_drift "FORMAT: $label starts with YAML frontmatter (---); Antigravity expects standalone Markdown"
+      fi
+    fi
+  fi
+}
+
+check_optional_gemini_entrypoint() {
+  local target_dir="$1"
+  local gemini_file="$target_dir/GEMINI.md"
+  local agents_file="$target_dir/AGENTS.md"
+  if [ ! -e "$gemini_file" ] && [ ! -L "$gemini_file" ]; then
+    return
+  fi
+  if [ -L "$gemini_file" ] && [ -f "$agents_file" ] && [ "$gemini_file" -ef "$agents_file" ]; then
+    echo "ok:    GEMINI.md (symlink to AGENTS.md — deduplicated by Antigravity)"
+    return
+  fi
+  check_title_only "$gemini_file" "$templates/AGENTS.md" "GEMINI.md"
+  check_entrypoint_antigravity "$gemini_file" "GEMINI.md"
 }
 
 check_exact() {
@@ -163,14 +209,20 @@ check_no_stale_in_dir() {
 if [ -n "$mode_internal" ]; then
   echo "ForgeKit internal parity check (root vs templates):"
   check_title_only "$forgekit_root/AGENTS.md" "$templates/AGENTS.md" "AGENTS.md"
+  check_entrypoint_antigravity "$forgekit_root/AGENTS.md" "AGENTS.md"
   check_title_only "$forgekit_root/CLAUDE.md" "$templates/CLAUDE.md" "CLAUDE.md"
+  check_entrypoint_antigravity "$forgekit_root/CLAUDE.md" "CLAUDE.md"
+  check_optional_gemini_entrypoint "$forgekit_root"
   check_exact "$forgekit_root/docs/PHASE_REFS.json" "$templates/docs/PHASE_REFS.json" "docs/PHASE_REFS.json"
 else
   echo "Downstream harness sync check: $mode_target"
 
   # Entrypoints — title-line diff allowed.
   check_title_only "$mode_target/AGENTS.md" "$templates/AGENTS.md" "AGENTS.md"
+  check_entrypoint_antigravity "$mode_target/AGENTS.md" "AGENTS.md"
   check_title_only "$mode_target/CLAUDE.md" "$templates/CLAUDE.md" "CLAUDE.md"
+  check_entrypoint_antigravity "$mode_target/CLAUDE.md" "CLAUDE.md"
+  check_optional_gemini_entrypoint "$mode_target"
 
   # Helper scripts — exact match.
   check_exact "$mode_target/scripts/worktree-add.sh" "$forgekit_root/scripts/worktree-add.sh" "scripts/worktree-add.sh"

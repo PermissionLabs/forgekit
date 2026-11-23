@@ -67,7 +67,7 @@ mechanical. Add focused reviews from the same directory when the diff warrants
 them — `api-contract-review` for public API surface changes,
 `data-migration-review` for schema/backfill/destructive-data work,
 `deployment-review` for rollout/infra/env changes. The skill files define the
-checklist; the host (Claude Code, Codex CLI, etc.) chooses how to invoke them
+checklist; the host (Claude Code, Codex CLI, Antigravity, etc.) chooses how to invoke them
 (subagent, slash command, prompt). `docs/review-skills/README.md` lists
 non-binding invocation hints.
 

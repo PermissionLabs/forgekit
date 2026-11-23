@@ -18,6 +18,7 @@ run() {
 }
 
 run "internal template parity" bash "$ROOT/scripts/check-harness-sync.sh" --forgekit
+run "harness sync script contract" bash "$ROOT/scripts/test-check-harness-sync.sh"
 run "workflow-state tests" bun test "$ROOT/modules/workflow-state/state.test.ts"
 run "docs-index tests" bun test "$ROOT/modules/docs-index/docs-index.test.ts"
 run "Codex hook adapter contract" bash "$ROOT/modules/host-adapters/test-codex-hook-adapter.sh"
@@ -27,6 +28,11 @@ run "docs registry schema JSON" jq -e . "$ROOT/modules/docs-index/registry.schem
 run "module shell syntax" bash -n \
   "$ROOT/modules/host-adapters/codex-hook-adapter.sh" \
   "$ROOT/modules/host-adapters/test-codex-hook-adapter.sh" \
+  "$ROOT/scripts/bootstrap.sh" \
+  "$ROOT/scripts/check-harness-sync.sh" \
+  "$ROOT/scripts/test-check-harness-sync.sh" \
+  "$ROOT/scripts/update-harness.sh" \
+  "$ROOT/scripts/worktree-add.sh" \
   "$ROOT/scripts/test-modules.sh"
 
 if ! grep -E 'uses:' \

@@ -32,6 +32,23 @@ Suggested format:
 - Candidate ForgeKit change:
 ```
 
+### 2026-11-24 - Antigravity host support & entrypoint byte-cap guardrail
+
+- Source project: `t3code` + `router` (Antigravity ACP harness audit)
+- Problem repeated: Large monolithic `AGENTS.md` files (e.g. 28 KB in `router`) silently
+  truncate past Antigravity's 24,000-byte per-file rule cap, and ForgeKit docs/templates only
+  documented Claude Code and Codex bindings.
+- Local fix tried (promoted in this PR): Verified Antigravity (`localharness_external` 1.4.5 /
+  `agy` 1.5.x) discovers `AGENTS.md` and `GEMINI.md` walking `cwd` -> `.git` root (deduplicated
+  by realpath, standalone Markdown without YAML frontmatter, 24,000-byte per-file cap,
+  20,000-token aggregate budget) and natively discovers `.agents/skills/<name>/SKILL.md`.
+  Updated entry point title to host-neutral `# Agent Entry Point`, documented Antigravity across
+  bootstrap/command-skill/review-skill docs and templates, and added optional `GEMINI.md`
+  parity + 24,000-byte / frontmatter checks to `scripts/check-harness-sync.sh`.
+- Evidence it helped: Deterministic contract tests in `scripts/test-check-harness-sync.sh`
+  plus downstream migration of `router`'s 28 KB `AGENTS.md` to ForgeKit's thin entrypoint.
+- Candidate ForgeKit change: Promoted directly in this PR.
+
 ### 2026-06-06 - worktree-add refreshes root before branching
 
 - Source project: wildfolio-root (CBDF prototype)

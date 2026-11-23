@@ -5,7 +5,7 @@ phase of `docs/WORKFLOW.md`. Each file defines a focused review type —
 *what* to check and the expected output shape.
 
 ForgeKit is host-agnostic. Each skill file is plain Markdown so the agent's
-host (Claude Code, Codex CLI, another harness) can load it however it
+host (Claude Code, Codex CLI, Antigravity, another harness) can load it however it
 wants — a slash command, an agent prompt, a subagent system prompt. The
 host owns invocation; ForgeKit owns the contract.
 
@@ -58,6 +58,9 @@ mechanisms.
   that opens the file works equally well.
 - **Codex CLI:** pass the skill file's content as the brief to a review
   skill or direct prompt invocation against the current diff.
+- **Antigravity:** read the skill file (or pass it to a subagent via
+  `invoke_subagent`) and review the current diff against the checklist;
+  report findings.
 - **Other hosts:** read the skill file and run the equivalent of "review
   the current diff against this checklist; report findings".
 

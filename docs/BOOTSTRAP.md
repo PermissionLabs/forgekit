@@ -227,16 +227,36 @@ Stop and ask the user before continuing if:
 
 ## Agent parity check (required)
 
-Codex auto-loads `AGENTS.md`. Claude Code auto-loads `CLAUDE.md` (and, in some
-configurations, `AGENTS.md`). If only one of those files exists, that host's
-agent will not receive the shared `docs/AGENT_GUIDE.md` pointer.
+Codex, Antigravity, and OpenCode auto-load `AGENTS.md`. Claude Code auto-loads
+`CLAUDE.md` (and, in some configurations, `AGENTS.md`). If only one of those
+files exists, the other hosts will not receive the shared `docs/AGENT_GUIDE.md`
+pointer.
+
+### Antigravity constraints
+
+- Antigravity discovers `AGENTS.md` and `GEMINI.md` by walking from `cwd` up to
+  the `.git` root, and deduplicates them by resolved path. A separate
+  `GEMINI.md` is not required when `AGENTS.md` exists; if a repo keeps
+  `GEMINI.md` for compatibility, symlink `GEMINI.md -> AGENTS.md` or match the
+  thin entry-point body.
+- `AGENTS.md` and `GEMINI.md` must be standalone Markdown without leading YAML
+  frontmatter (`---`).
+- Antigravity enforces a **24,000-byte per-file cap** (truncating the tail on
+  a line boundary) and a **20,000-token aggregate always-on rule budget**.
+  Keep root entry points thin and put project-specific detail in
+  `docs/PROJECT_CONTEXT.md` and linked `docs/` files.
+- Skills under `.agents/skills/<name>/SKILL.md` are natively discovered by both
+  Codex and Antigravity.
 
 After bootstrap, verify:
 
 ```bash
 test -f "$TARGET/AGENTS.md" && test -f "$TARGET/CLAUDE.md"
 diff "$TARGET/AGENTS.md" "$TARGET/CLAUDE.md"
-# Expected: only the title line differs (e.g. "1c1 / # Codex Entry Point / # Claude Entry Point").
+# Expected: only the title line differs (e.g. "1c1 / # Agent Entry Point / # Claude Entry Point").
+# Entry points must stay well under Antigravity's 24,000-byte per-file cap.
+test "$(wc -c < "$TARGET/AGENTS.md")" -le 24000
+test "$(wc -c < "$TARGET/CLAUDE.md")" -le 24000
 
 test -f "$TARGET/docs/AGENT_GUIDE.md"
 test -f "$TARGET/docs/PROJECT_CONTEXT.md"

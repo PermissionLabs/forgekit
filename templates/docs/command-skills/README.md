@@ -21,6 +21,7 @@ steps into host bindings or entry files.
 | Host | Binding | Invocation |
 | --- | --- | --- |
 | Codex | native discovery from `.agents/skills/<name>/SKILL.md` | `$name args` or matching natural language |
+| Antigravity | native discovery from `.agents/skills/<name>/SKILL.md` | matching natural language or explicit skill reference |
 | Claude Code | `.claude/commands/<name>.md` compatibility stub | `/name args` |
 | Other agents | `AGENTS.md` skill table | read canonical `SKILL.md` |
 

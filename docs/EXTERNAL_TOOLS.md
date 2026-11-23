@@ -6,8 +6,8 @@ External tools can still be useful as optional accelerators.
 ## Policy
 
 - Core ForgeKit templates must stay host-neutral.
-- Do not require Claude-only hooks, Codex-only plugins, or one external skill
-  ecosystem for all users.
+- Do not require Claude-only hooks, Codex-only plugins, Antigravity-only
+  workflows, or one external skill ecosystem for all users.
 - Absorb durable workflow principles into `docs/AGENT_GUIDE.md` and
   `docs/WORKFLOW.md`.
 - Put optional tool recommendations here instead of hardcoding them into the

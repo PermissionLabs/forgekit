@@ -90,7 +90,7 @@ copy_file() {
   cp "$src" "$dst"
 }
 
-# Top-level entry points (both — Codex reads AGENTS.md, Claude reads CLAUDE.md).
+# Top-level entry points (Codex, Antigravity, and OpenCode read AGENTS.md; Claude reads CLAUDE.md).
 copy_file "$templates/AGENTS.md" "$target/AGENTS.md"
 copy_file "$templates/CLAUDE.md" "$target/CLAUDE.md"
 
