@@ -16,8 +16,7 @@
 #       with the template (warning only), but host load rules still apply.
 #     Each entrypoint must also satisfy the load rules of every host that
 #     auto-loads it (see ENTRYPOINT_HOST_RULES below: per-file byte cap,
-#     frontmatter). Entrypoints that are symlinks resolving outside the
-#     repository fail without their content being printed.
+#     frontmatter).
 #   Helper scripts (scripts/worktree-add.sh): byte-identical.
 #   Core docs (AGENT_GUIDE.md, WORKFLOW.md, PHASE_REFS.json): byte-identical.
 #   Skill files (design-skills/*, review-skills/*): byte-identical.
@@ -25,6 +24,9 @@
 #     (Project command skills under command-skills/ are NOT checked.)
 #   Template files (CHANGE_TEMPLATE.md, DECISION_TEMPLATE.md,
 #                   REVIEW_TEMPLATE.md): byte-identical.
+#   Any checked file that physically resolves outside the repository (a
+#   symlink, a symlinked parent directory, or `link/..` paths) fails as LINK
+#   drift before any comparison; its content is never printed.
 #
 # Escape hatch
 #   Files containing the marker `forgekit-override:` in their first 5
@@ -109,6 +111,13 @@ case "$1" in
     ;;
 esac
 
+# Root the outside-repository guard resolves against.
+if [ -n "$mode_internal" ]; then
+  repo_root="$forgekit_root"
+else
+  repo_root="$mode_target"
+fi
+
 drift=0
 template_drift=0
 host_rule_drift=0
@@ -154,6 +163,7 @@ check_title_only() {
     note_drift "template missing (forgekit bug): $template_file"
     return 0
   fi
+  guard_outside_repo "$target_file" "$label" && return 0
   if [ ! -f "$target_file" ]; then
     note_drift "MISSING: $label"
     return 0
@@ -170,35 +180,62 @@ check_title_only() {
   fi
 }
 
-# Print the physical path a (possibly symlinked) file resolves to. Fails on
-# loops or unresolvable parent directories. Portable to macOS bash 3.2
-# (no readlink -f / realpath dependency).
+# Print the physical path $1 resolves to. Symlinks are followed in the final
+# component and in every parent directory, and `..` is applied after the
+# link it follows is resolved (cd -P / pwd -P), so `link/../file` lands where
+# the kernel would open it. Fails on loops or unresolvable directories.
+# Portable to macOS bash 3.2 and BSD (no readlink -f / realpath).
 resolve_physical() {
-  local p="$1" link dir n=0
-  while [ -L "$p" ]; do
+  local p="$1" dir base link n=0
+  while :; do
+    dir="$(CDPATH='' cd -P "$(dirname "$p")" 2>/dev/null && pwd -P)" || return 1
+    base="$(basename "$p")"
+    case "$base" in
+      .|..)
+        (CDPATH='' cd -P "$dir/$base" 2>/dev/null && pwd -P)
+        return
+        ;;
+    esac
+    p="${dir%/}/$base"
+    [ -L "$p" ] || break
     n=$((n + 1))
     [ "$n" -le 40 ] || return 1
     link="$(readlink "$p")" || return 1
     case "$link" in
       /*) p="$link" ;;
-      *) p="$(dirname "$p")/$link" ;;
+      *) p="${dir%/}/$link" ;;
     esac
   done
-  dir="$(CDPATH='' cd "$(dirname "$p")" 2>/dev/null && pwd -P)" || return 1
-  printf '%s/%s\n' "$dir" "$(basename "$p")"
+  printf '%s\n' "$p"
 }
 
-# True when $1 is a symlink that resolves outside repo root $2 (or cannot be
-# resolved at all).
-symlink_escapes_repo() {
+# True when $1 exists (or is a dangling symlink) and physically resolves
+# outside repo root $2, through a symlink in the file itself or in any parent
+# directory, or cannot be resolved at all.
+path_escapes_repo() {
   local f="$1" root="$2" root_phys resolved
-  [ -L "$f" ] || return 1
-  root_phys="$(CDPATH='' cd "$root" && pwd -P)"
+  [ -e "$f" ] || [ -L "$f" ] || return 1
+  root_phys="$(CDPATH='' cd -P "$root" 2>/dev/null && pwd -P)" || return 0
   resolved="$(resolve_physical "$f")" || return 0
   case "$resolved" in
     "$root_phys"/*) return 1 ;;
     *) return 0 ;;
   esac
+}
+
+# Guard run before every content comparison. Returns 0 (and records LINK
+# drift) when $1 resolves outside the checked repository; the file is
+# reported by path only and its content is never read into a diff.
+guard_outside_repo() {
+  local f="$1" label="$2" via
+  path_escapes_repo "$f" "$repo_root" || return 1
+  if [ -L "$f" ]; then
+    via="symlink -> $(readlink "$f")"
+  else
+    via="through a symlinked parent directory"
+  fi
+  note_link_drift "LINK:  $label resolves outside the repository ($via); content not shown — replace it with a regular file inside the repository"
+  return 0
 }
 
 # Apply every ENTRYPOINT_HOST_RULES row whose file column is $2.
@@ -229,10 +266,8 @@ EOF
 check_template_entrypoint() {
   local root="$1" name="$2"
   local f="$root/$name"
-  if symlink_escapes_repo "$f" "$root"; then
-    note_link_drift "LINK:  $name is a symlink resolving outside the repository (-> $(readlink "$f")); content not shown — replace it with a regular file inside the repository"
-    return 0
-  fi
+  # Guarded here as well as in check_title_only so host rules are skipped too.
+  guard_outside_repo "$f" "$name" && return 0
   check_title_only "$f" "$templates/$name" "$name"
   [ -f "$f" ] || return 0
   check_host_rules "$f" "$name"
@@ -279,6 +314,7 @@ check_exact() {
     note_drift "template missing (forgekit bug): $template_file"
     return 0
   fi
+  guard_outside_repo "$target_file" "$label" && return 0
   if [ ! -f "$target_file" ]; then
     note_drift "MISSING: $label"
     return 0
@@ -400,7 +436,7 @@ if [ "$drift" -ne 0 ]; then
   fi
   if [ "$link_drift" -ne 0 ]; then
     echo "  - LINK: apply the fix named on each LINK line; update-harness.sh --force" >&2
-    echo "    does not repair entrypoint symlinks." >&2
+    echo "    does not repair symlinks." >&2
   fi
   exit 1
 fi

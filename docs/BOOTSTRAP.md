@@ -256,8 +256,9 @@ pointer.
   auto-loads (`AGENTS.md`, `GEMINI.md`), not to `CLAUDE.md`. A
   `forgekit-override` marker does not exempt them: a truncated rule file drops
   rules silently, so exceeding the cap is always drift.
-- Root entry points that are symlinks resolving outside the repository fail the
-  sync check; their content is not printed.
+- Any checked file (root entry points, docs, skills) that resolves outside the
+  repository through a symlink — its own or a parent directory's — fails the
+  sync check as `LINK`; its content is not printed.
 - Skills under `.agents/skills/<name>/SKILL.md` are natively discovered by both
   Codex and Antigravity.
 

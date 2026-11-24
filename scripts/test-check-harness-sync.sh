@@ -214,6 +214,54 @@ ln -s .harness/AGENTS.md "$repo/AGENTS.md"
 run_check "AGENTS.md symlink inside repository" "$repo"
 expect_rc 0
 
+# 13c. X3: an intermediate directory symlink plus `..` (redirect/../file)
+#      resolves physically outside the repository; the logical path looks
+#      in-repo. Must fail as LINK without printing the outside content.
+mkdir -p "$TMP_DIR/outside-x3/child"
+printf '# Agent Entry Point\nOUTSIDE_X3_MARK_b41c\n' > "$TMP_DIR/outside-x3/fixture.md"
+repo="$(new_repo outside-dotdot)"
+ln -s "../outside-x3/child" "$repo/redirect"
+rm -f "$repo/AGENTS.md"
+ln -s "redirect/../fixture.md" "$repo/AGENTS.md"
+run_check "AGENTS.md -> redirect/../fixture.md resolves outside" "$repo"
+expect_rc 1
+expect_has "LINK:  AGENTS.md"
+expect_lacks "OUTSIDE_X3_MARK_b41c"
+expect_no_line "DRIFT: AGENTS.md"
+
+# 13d. C7: docs and skill files compared by check_exact get the same guard —
+#      a direct symlink, a redirect/../ symlink, and a symlinked parent
+#      directory all fail as LINK and never diff the outside content.
+mkdir -p "$TMP_DIR/outside-c7/child" "$TMP_DIR/outside-c7/review-skills"
+printf 'OUTSIDE_DOC_MARK_9d2e\n' > "$TMP_DIR/outside-c7/doc.md"
+printf 'OUTSIDE_DOC_MARK_9d2e\n' > "$TMP_DIR/outside-c7/via.md"
+repo="$(new_repo outside-docs)"
+for f in "$repo"/docs/review-skills/*.md; do
+  cp "$f" "$TMP_DIR/outside-c7/review-skills/"
+  printf 'OUTSIDE_DOC_MARK_9d2e\n' >> "$TMP_DIR/outside-c7/review-skills/$(basename "$f")"
+done
+rm -f "$repo/docs/WORKFLOW.md" "$repo/docs/AGENT_GUIDE.md"
+ln -s "$TMP_DIR/outside-c7/doc.md" "$repo/docs/WORKFLOW.md"
+ln -s "../outside-c7/child" "$repo/redirect"
+ln -s "../redirect/../via.md" "$repo/docs/AGENT_GUIDE.md"
+rm -rf "$repo/docs/review-skills"
+ln -s "$TMP_DIR/outside-c7/review-skills" "$repo/docs/review-skills"
+run_check "docs/skill files resolving outside the repository" "$repo"
+expect_rc 1
+expect_has "LINK:  docs/WORKFLOW.md"
+expect_has "LINK:  docs/AGENT_GUIDE.md"
+expect_has "LINK:  docs/review-skills/README.md resolves outside the repository (through a symlinked parent directory)"
+expect_lacks "OUTSIDE_DOC_MARK_9d2e"
+expect_no_line "DRIFT: docs/"
+
+# 13e. Control: a docs file symlinked to an identical in-repo copy passes
+repo="$(new_repo docs-inside-symlink)"
+mkdir -p "$repo/.harness"
+mv "$repo/docs/WORKFLOW.md" "$repo/.harness/WORKFLOW.md"
+ln -s ../.harness/WORKFLOW.md "$repo/docs/WORKFLOW.md"
+run_check "docs file symlink inside repository" "$repo"
+expect_rc 0
+
 # 14. update-harness.sh pre-check blocks a GEMINI.md symlink that does not
 #     resolve to AGENTS.md, even with --force, before changing any file
 repo="$(new_repo update-gemini-bad)"
@@ -243,5 +291,34 @@ CASES=$((CASES + 1))
 capture bash "$ROOT/scripts/update-harness.sh" "$repo"
 expect_rc 0
 expect_has "warn: GEMINI.md is a project-managed standalone file"
+
+# 14c. X4: when the final sync check fails, update-harness.sh hints follow the
+#      drift class. SIZE (not exempted by forgekit-override) must not be told
+#      to add a forgekit-override marker.
+repo="$(new_repo update-size)"
+{
+  printf '# Agent Entry Point\n<!-- forgekit-override: test -->\n'
+  big_body s
+} > "$repo/AGENTS.md"
+LABEL="update-harness SIZE failure hint"
+CASES=$((CASES + 1))
+capture bash "$ROOT/scripts/update-harness.sh" "$repo"
+expect_rc 1
+expect_has "SIZE:  AGENTS.md"
+expect_has "hint: SIZE/FORMAT: shrink the entrypoint"
+expect_lacks "hint: DRIFT/MISSING/STALE:"
+expect_lacks "hint: LINK:"
+expect_lacks "forgekit-override marker where the target should diverge"
+
+# 14d. X4: a STALE file keeps the forgekit-override hint
+repo="$(new_repo update-stale)"
+printf '# Old skill\n' > "$repo/docs/review-skills/retired-skill.md"
+LABEL="update-harness STALE failure hint"
+CASES=$((CASES + 1))
+capture bash "$ROOT/scripts/update-harness.sh" "$repo"
+expect_rc 1
+expect_has "STALE: docs/review-skills/retired-skill.md"
+expect_has "hint: DRIFT/MISSING/STALE: remove stale harness files, or add a forgekit-override"
+expect_lacks "hint: SIZE/FORMAT:"
 
 echo "check-harness-sync contract tests passed ($CASES cases)"

@@ -88,8 +88,14 @@ The 24,000-byte cap and the no-frontmatter rule apply only to files
 Antigravity auto-loads (`AGENTS.md`, `GEMINI.md`), never to `CLAUDE.md`. A
 `forgekit-override` marker exempts only the template comparison: a file the
 host truncates loses rules silently, so `SIZE`/`FORMAT` are always drift.
-Root entrypoints that are symlinks resolving outside the repository are
-`LINK` drift and their content is never printed.
+Any checked file (root entrypoints, docs, skill and template files) that
+physically resolves outside the repository — through its own symlink, a
+symlinked parent directory, or a `link/../file` target — is `LINK` drift,
+reported by path before any comparison; its content is never printed. The
+resolver follows links with `cd -P` / `pwd -P` (portable to macOS bash 3.2,
+no `readlink -f` / `realpath`). When the final sync check inside
+`update-harness.sh` fails, its hints follow the checker's drift classes:
+only `DRIFT`/`MISSING`/`STALE` suggest a `forgekit-override` marker.
 
 ## Documentation Updates
 
@@ -108,14 +114,18 @@ Root entrypoints that are symlinks resolving outside the repository are
   `scripts/check-harness-sync.sh --forgekit`,
   `scripts/test-check-harness-sync.sh`, module tests, and per-file `bash -n`
   syntax checks), run with macOS `/bin/bash` 3.2 first on `PATH`.
-- Cycle 2: the `bun` module tests were not run locally (`bun` not installed);
-  CI runs them.
+- Cycles 2 and 3: the `bun` module tests were not run locally (`bun` not
+  installed); CI runs them.
 - Mutation checks (cycle 2): each mutation applied to a scratch copy made the
   contract tests fail — `-ef` forced true, `SIZE` or `FORMAT` downgraded to a
   warning, bare `return` restored after a missing entrypoint, the outside-repo
   symlink guard disabled, the cap applied to `CLAUDE.md`, template diff
   re-applied to a standalone `GEMINI.md`, the `update-harness.sh` `GEMINI.md`
   pre-check removed, and `bash -n "$@"` restored in `test-modules.sh`.
+- Mutation checks (cycle 3): `cd -P` replaced by a logical `cd` in the
+  physical-path resolver, the guard removed from `check_exact`, and the old
+  generic `update-harness.sh` failure hint restored each made the contract
+  tests fail.
 - Manual checks: Reviewed full `git diff` across root and `templates/`.
 
 ## Review Cycles
@@ -124,6 +134,7 @@ Root entrypoints that are symlinks resolving outside the repository are
 | --- | --- | --- | --- |
 | 1 | Code + security (self-review) | Verified shell quoting, `mktemp -d` cleanup trap, portable `wc -c` / `-ef` checks, no secret exposure, backward-compatible `forgekit-override` warning behavior. | Clean (0 residual findings) |
 | 2 | Cross-review (Codex + Claude) | X1 `bash -n` only parsed the first file; X2/C5 cap applied to `CLAUDE.md`, host logic hard-coded by file name; C1 missing entrypoint aborted the run under `set -e`; C2 standalone `GEMINI.md` forced to match the template, no `update-harness.sh` pre-check, wrong remediation text; C3 `SIZE`/`FORMAT` only warned under override; C4 tests did not catch mutations; C6 host tool names stated as the review binding; C7 outside-repo entrypoint symlinks diffed to stderr. | Fixed in the cycle-2 commit; C6 ships the contract paragraph only, contract and adapters follow up. |
+| 3 | Cross-review (Codex) | X3 the outside-repo guard normalised paths logically, so `redirect/../file` through a directory symlink escaped it and outside content was diffed; X4 the `update-harness.sh` final failure hint suggested `forgekit-override` for `SIZE`/`FORMAT`; C7 residual `check_exact` diffed docs/skill files resolving outside the repository. | Fixed in the cycle-3 commit: physical-path resolver, guard before every diff, cause-specific hints. |
 
 ## Branch & Merge Evidence
 
@@ -136,7 +147,6 @@ Root entrypoints that are symlinks resolving outside the repository are
 | Source | Finding | Disposition | Link/reason |
 | --- | --- | --- | --- |
 | Cycle 2 / C6 | Shared review contract and per-host review adapters are described but not implemented | `filed_followup` | `docs/review-skills/README.md` states the contract; adapters land in a follow-up change |
-| Cycle 2 | `check_exact` (docs/skill files) still diffs a symlinked file that resolves outside the repository; the outside-repo guard covers root entrypoints only | `filed_followup` | Outside the cycle-2 scope (entrypoints); the same guard can be reused |
 
 ## Compound Capture
 

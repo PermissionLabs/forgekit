@@ -277,15 +277,30 @@ fi
 
 echo ""
 echo "Verifying harness sync..."
-if ! "$forgekit_root/scripts/check-harness-sync.sh" "$target"; then
+if sync_out="$("$forgekit_root/scripts/check-harness-sync.sh" "$target" 2>&1)"; then
+  printf '%s\n' "$sync_out"
+else
+  printf '%s\n' "$sync_out" >&2
   cat <<EOF >&2
 
 ForgeKit harness files were updated in: $target
 
-Harness sync still reports drift. Review the output above for stale files or
-intentional project overrides, then either remove stale harness files or add a
-forgekit-override marker where the target should diverge.
+Harness sync still reports drift. Fix each cause listed above:
 EOF
+  # Hints follow the checker's drift classes; forgekit-override only helps
+  # template drift, never host load rules or symlinks.
+  if printf '%s\n' "$sync_out" | grep -Eq '^(DRIFT|MISSING|STALE):'; then
+    echo "hint: DRIFT/MISSING/STALE: remove stale harness files, or add a forgekit-override" >&2
+    echo "      marker where the target should intentionally diverge." >&2
+  fi
+  if printf '%s\n' "$sync_out" | grep -Eq '^(SIZE|FORMAT):'; then
+    echo "hint: SIZE/FORMAT: shrink the entrypoint (move detail into docs/) or remove its" >&2
+    echo "      leading YAML frontmatter; forgekit-override does not exempt host load rules." >&2
+  fi
+  if printf '%s\n' "$sync_out" | grep -Eq '^LINK:'; then
+    echo "hint: LINK: apply the fix named on each LINK line; forgekit-override and --force" >&2
+    echo "      do not repair symlinks." >&2
+  fi
   exit 1
 fi
 
