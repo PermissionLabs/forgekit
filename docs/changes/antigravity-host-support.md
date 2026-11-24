@@ -25,9 +25,10 @@ host-neutral (no mandatory third root entrypoint file).
     `docs/command-skills/COMMAND_SKILL_TEMPLATE.md` (+ template),
     `docs/review-skills/README.md` (+ template), `docs/EXTERNAL_TOOLS.md`,
     `docs/HARNESS_NOTES.md`, and `scripts/bootstrap.sh`.
-  - Optional `GEMINI.md` parity check (accepting `GEMINI.md -> AGENTS.md`
-    symlink) + 24,000-byte cap and YAML frontmatter checks in
-    `scripts/check-harness-sync.sh`.
+  - Optional `GEMINI.md` alias policy + 24,000-byte cap and YAML frontmatter
+    checks in `scripts/check-harness-sync.sh`, driven by one host→file→rule
+    table (`ENTRYPOINT_HOST_RULES`, `ENTRYPOINT_FILES`) at the top of the
+    script; `scripts/update-harness.sh` pre-checks `GEMINI.md` too.
   - Deterministic contract tests in `scripts/test-check-harness-sync.sh` wired
     into `scripts/test-modules.sh`.
 - Out of scope:
@@ -50,7 +51,7 @@ host-neutral (no mandatory third root entrypoint file).
 | Track | Status | Changed paths | Verification | Risks |
 | --- | --- | --- | --- | --- |
 | Docs & Templates | Completed | `AGENTS.md`, `README.md`, `docs/*`, `templates/*` | `scripts/check-harness-sync.sh --forgekit` | Low — title-line diff preserves downstream compatibility |
-| Sync & Tests | Completed | `scripts/check-harness-sync.sh`, `scripts/bootstrap.sh`, `scripts/test-check-harness-sync.sh`, `scripts/test-modules.sh` | `bash scripts/test-modules.sh` | Low — overridden >24 KB files warn rather than breaking existing opt-outs |
+| Sync & Tests | Completed | `scripts/check-harness-sync.sh`, `scripts/update-harness.sh`, `scripts/bootstrap.sh`, `scripts/test-check-harness-sync.sh`, `scripts/test-modules.sh` | `bash scripts/test-modules.sh` | Medium — downstream `AGENTS.md`/`GEMINI.md` over 24,000 bytes now fail even with a `forgekit-override` marker (intentional: truncation drops rules silently) |
 | Server / Frontend / App | Skipped | N/A | N/A | Harness docs/scripts repo only |
 
 ## Implementation Notes
@@ -65,6 +66,30 @@ host-neutral (no mandatory third root entrypoint file).
 - Rejected adding a mandatory `GEMINI.md` to `templates/` to avoid duplicating
   entrypoint files across every downstream repo when `AGENTS.md` already works
   natively.
+- The host→file→rule table lives at the top of `scripts/check-harness-sync.sh`
+  rather than under `modules/host-adapters/`: that module holds runtime hook
+  adapters (Codex lifecycle-hook translation), not entrypoint load rules, and
+  the sync script must stay usable without optional modules.
+
+### GEMINI.md policy
+
+- Absent: fine (recommended; Antigravity loads `AGENTS.md` natively).
+- Symlink: must resolve to `AGENTS.md` (`-ef`). A link to `CLAUDE.md`, any
+  other file, outside the repository, or a broken link is `LINK` drift;
+  `update-harness.sh` stops before changing files, even with `--force`,
+  because `--force` cannot repair it.
+- Regular file: project-managed. Its body is not compared with the
+  `AGENTS.md` template (warning only) and `update-harness.sh` never writes it,
+  but the Antigravity byte cap and frontmatter rule still apply.
+
+### Host load rules vs. forgekit-override
+
+The 24,000-byte cap and the no-frontmatter rule apply only to files
+Antigravity auto-loads (`AGENTS.md`, `GEMINI.md`), never to `CLAUDE.md`. A
+`forgekit-override` marker exempts only the template comparison: a file the
+host truncates loses rules silently, so `SIZE`/`FORMAT` are always drift.
+Root entrypoints that are symlinks resolving outside the repository are
+`LINK` drift and their content is never printed.
 
 ## Documentation Updates
 
@@ -81,8 +106,16 @@ host-neutral (no mandatory third root entrypoint file).
 
 - Commands run: `bash scripts/test-modules.sh` (includes
   `scripts/check-harness-sync.sh --forgekit`,
-  `scripts/test-check-harness-sync.sh`, module tests, and `bash -n` syntax
-  checks).
+  `scripts/test-check-harness-sync.sh`, module tests, and per-file `bash -n`
+  syntax checks), run with macOS `/bin/bash` 3.2 first on `PATH`.
+- Cycle 2: the `bun` module tests were not run locally (`bun` not installed);
+  CI runs them.
+- Mutation checks (cycle 2): each mutation applied to a scratch copy made the
+  contract tests fail — `-ef` forced true, `SIZE` or `FORMAT` downgraded to a
+  warning, bare `return` restored after a missing entrypoint, the outside-repo
+  symlink guard disabled, the cap applied to `CLAUDE.md`, template diff
+  re-applied to a standalone `GEMINI.md`, the `update-harness.sh` `GEMINI.md`
+  pre-check removed, and `bash -n "$@"` restored in `test-modules.sh`.
 - Manual checks: Reviewed full `git diff` across root and `templates/`.
 
 ## Review Cycles
@@ -90,6 +123,7 @@ host-neutral (no mandatory third root entrypoint file).
 | Cycle | Type | Findings | Resolution |
 | --- | --- | --- | --- |
 | 1 | Code + security (self-review) | Verified shell quoting, `mktemp -d` cleanup trap, portable `wc -c` / `-ef` checks, no secret exposure, backward-compatible `forgekit-override` warning behavior. | Clean (0 residual findings) |
+| 2 | Cross-review (Codex + Claude) | X1 `bash -n` only parsed the first file; X2/C5 cap applied to `CLAUDE.md`, host logic hard-coded by file name; C1 missing entrypoint aborted the run under `set -e`; C2 standalone `GEMINI.md` forced to match the template, no `update-harness.sh` pre-check, wrong remediation text; C3 `SIZE`/`FORMAT` only warned under override; C4 tests did not catch mutations; C6 host tool names stated as the review binding; C7 outside-repo entrypoint symlinks diffed to stderr. | Fixed in the cycle-2 commit; C6 ships the contract paragraph only, contract and adapters follow up. |
 
 ## Branch & Merge Evidence
 
@@ -101,7 +135,8 @@ host-neutral (no mandatory third root entrypoint file).
 
 | Source | Finding | Disposition | Link/reason |
 | --- | --- | --- | --- |
-| None | No open findings | N/A | Clean self-review |
+| Cycle 2 / C6 | Shared review contract and per-host review adapters are described but not implemented | `filed_followup` | `docs/review-skills/README.md` states the contract; adapters land in a follow-up change |
+| Cycle 2 | `check_exact` (docs/skill files) still diffs a symlinked file that resolves outside the repository; the outside-repo guard covers root entrypoints only | `filed_followup` | Outside the cycle-2 scope (entrypoints); the same guard can be reused |
 
 ## Compound Capture
 

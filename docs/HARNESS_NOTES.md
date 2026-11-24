@@ -43,8 +43,9 @@ Suggested format:
   by realpath, standalone Markdown without YAML frontmatter, 24,000-byte per-file cap,
   20,000-token aggregate budget) and natively discovers `.agents/skills/<name>/SKILL.md`.
   Updated entry point title to host-neutral `# Agent Entry Point`, documented Antigravity across
-  bootstrap/command-skill/review-skill docs and templates, and added optional `GEMINI.md`
-  parity + 24,000-byte / frontmatter checks to `scripts/check-harness-sync.sh`.
+  bootstrap/command-skill/review-skill docs and templates, and added an optional `GEMINI.md`
+  alias policy + 24,000-byte / frontmatter checks to `scripts/check-harness-sync.sh`
+  (host load rules are not exempted by `forgekit-override`).
 - Evidence it helped: Deterministic contract tests in `scripts/test-check-harness-sync.sh`
   plus downstream migration of `router`'s 28 KB `AGENTS.md` to ForgeKit's thin entrypoint.
 - Candidate ForgeKit change: Promoted directly in this PR.

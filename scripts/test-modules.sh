@@ -4,6 +4,8 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PASS=0
 FAIL=0
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
 
 run() {
   local label="$1"
@@ -25,7 +27,29 @@ run "Codex hook adapter contract" bash "$ROOT/modules/host-adapters/test-codex-h
 run "manifest JSON" jq -e . "$ROOT/modules/manifest.json" >/dev/null
 run "workflow-state schema JSON" jq -e . "$ROOT/modules/workflow-state/schema.json" >/dev/null
 run "docs registry schema JSON" jq -e . "$ROOT/modules/docs-index/registry.schema.json" >/dev/null
-run "module shell syntax" bash -n \
+# `bash -n a b c` only parses `a` (the rest become positional parameters),
+# so parse each file separately.
+syntax_check_each() {
+  local f rc=0
+  for f in "$@"; do
+    if ! bash -n "$f"; then
+      printf '  syntax error: %s\n' "$f" >&2
+      rc=1
+    fi
+  done
+  return "$rc"
+}
+
+# Self-test: a syntax error in a later file must still fail the check.
+syntax_check_catches_later_file() {
+  printf 'echo ok\n' > "$TMP_DIR/good.sh"
+  printf 'echo ok\nfi\n' > "$TMP_DIR/bad.sh"
+  syntax_check_each "$TMP_DIR/good.sh" "$TMP_DIR/good.sh" || return 1
+  ! syntax_check_each "$TMP_DIR/good.sh" "$TMP_DIR/bad.sh" 2>/dev/null
+}
+
+run "syntax check fails on a later file" syntax_check_catches_later_file
+run "module shell syntax" syntax_check_each \
   "$ROOT/modules/host-adapters/codex-hook-adapter.sh" \
   "$ROOT/modules/host-adapters/test-codex-hook-adapter.sh" \
   "$ROOT/scripts/bootstrap.sh" \

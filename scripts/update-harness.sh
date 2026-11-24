@@ -169,11 +169,37 @@ update_file() {
   fi
 }
 
+# GEMINI.md is an optional alias of AGENTS.md that this script never writes.
+# A symlink must resolve to AGENTS.md (--force cannot repair it, so this
+# blocks even with --force); a regular file is project-managed and only
+# warned about. Host load rules (byte cap, frontmatter) are enforced by the
+# final check-harness-sync.sh run.
+would_keep_gemini_alias() {
+  local f="$target/GEMINI.md" a="$target/AGENTS.md" link
+  if [ -L "$f" ]; then
+    if [ -e "$f" ] && [ -e "$a" ] && [ "$f" -ef "$a" ]; then
+      return 0
+    fi
+    link="$(readlink "$f")"
+    # AGENTS.md is about to be created; a relative link to it will resolve.
+    if [ ! -e "$a" ] && { [ "$link" = "AGENTS.md" ] || [ "$link" = "./AGENTS.md" ]; }; then
+      return 0
+    fi
+    echo "LINK: GEMINI.md is a symlink (-> $link) that does not resolve to AGENTS.md; --force does not fix this. Fix: (cd \"$target\" && ln -sfn AGENTS.md GEMINI.md), or remove it" >&2
+    return 1
+  fi
+  if [ -f "$f" ]; then
+    echo "warn: GEMINI.md is a project-managed standalone file; update-harness does not update it (prefer: ln -sfn AGENTS.md GEMINI.md)" >&2
+  fi
+  return 0
+}
+
 drift=0
 
 for rel in AGENTS.md CLAUDE.md; do
   would_update_file "$templates/$rel" "$rel" entrypoint || drift=1
 done
+would_keep_gemini_alias || drift=1
 
 would_update_file "$forgekit_root/scripts/worktree-add.sh" "scripts/worktree-add.sh" || drift=1
 
@@ -185,7 +211,8 @@ done < <(find "$templates/docs" -type f | sort)
 if [ "$drift" -ne 0 ]; then
   echo "" >&2
   echo "update stopped before changing files." >&2
-  echo "Review the drift, then re-run with --force if those harness files should match ForgeKit." >&2
+  echo "Review the drift. DRIFT lines: re-run with --force if those harness files should match ForgeKit." >&2
+  echo "LINK lines: apply the fix named on the line first (--force does not repair symlinks)." >&2
   exit 1
 fi
 

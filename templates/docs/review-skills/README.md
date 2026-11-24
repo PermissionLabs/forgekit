@@ -52,17 +52,27 @@ Reviews can be run in any order; record each as a separate cycle in
 These are examples, not requirements. Different hosts will pick different
 mechanisms.
 
-- **Claude Code:** load the skill file into a subagent (a custom
-  `.claude/agents/<name>.md` or `general-purpose` via the Agent tool) and
-  run the review against the current diff. A project-local slash command
-  that opens the file works equally well.
+Claude Code, Codex CLI, and Antigravity follow one shared review contract:
+the same input (the skill file plus the current diff), read-only execution,
+the same output schema, model and effort pinned by a policy file rather than
+chosen per run, and any failure to complete reported as `incomplete` instead
+of a clean result. The contract and the per-host adapters are added in a
+follow-up change; until then the hints below are the only binding.
+
+- **Claude Code:** load the skill file into a subagent and run the review
+  against the current diff. A project-local slash command that opens the
+  file works equally well.
 - **Codex CLI:** pass the skill file's content as the brief to a review
   skill or direct prompt invocation against the current diff.
-- **Antigravity:** read the skill file (or pass it to a subagent via
-  `invoke_subagent`) and review the current diff against the checklist;
-  report findings.
+- **Antigravity:** load the skill file into a subagent or the current
+  session and review the current diff against the checklist; report
+  findings.
 - **Other hosts:** read the skill file and run the equivalent of "review
   the current diff against this checklist; report findings".
+
+Adapter reference (host tool names, may change between host releases):
+Claude Code — a custom `.claude/agents/<name>.md` or `general-purpose` via
+the Agent tool; Antigravity — `invoke_subagent`.
 
 The skill content is the source of truth either way. If a host invocation
 shortcut drifts from the checklist, fix the host wrapper.

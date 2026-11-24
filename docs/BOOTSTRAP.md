@@ -236,15 +236,28 @@ pointer.
 
 - Antigravity discovers `AGENTS.md` and `GEMINI.md` by walking from `cwd` up to
   the `.git` root, and deduplicates them by resolved path. A separate
-  `GEMINI.md` is not required when `AGENTS.md` exists; if a repo keeps
-  `GEMINI.md` for compatibility, symlink `GEMINI.md -> AGENTS.md` or match the
-  thin entry-point body.
+  `GEMINI.md` is not required when `AGENTS.md` exists.
+- `GEMINI.md` policy (enforced by `scripts/check-harness-sync.sh`):
+  - absent: fine (recommended).
+  - symlink: it must resolve to `AGENTS.md` (`ln -sfn AGENTS.md GEMINI.md`).
+    A symlink to `CLAUDE.md`, another file, outside the repository, or a broken
+    link fails, and `update-harness.sh` refuses to run (even with `--force`)
+    until it is fixed or removed.
+  - regular file: project-managed. ForgeKit does not compare it with the
+    `AGENTS.md` template and `update-harness.sh` never writes it; the check
+    only warns, but the Antigravity load rules below still apply.
 - `AGENTS.md` and `GEMINI.md` must be standalone Markdown without leading YAML
   frontmatter (`---`).
 - Antigravity enforces a **24,000-byte per-file cap** (truncating the tail on
   a line boundary) and a **20,000-token aggregate always-on rule budget**.
   Keep root entry points thin and put project-specific detail in
   `docs/PROJECT_CONTEXT.md` and linked `docs/` files.
+- The byte cap and the frontmatter rule apply only to files Antigravity
+  auto-loads (`AGENTS.md`, `GEMINI.md`), not to `CLAUDE.md`. A
+  `forgekit-override` marker does not exempt them: a truncated rule file drops
+  rules silently, so exceeding the cap is always drift.
+- Root entry points that are symlinks resolving outside the repository fail the
+  sync check; their content is not printed.
 - Skills under `.agents/skills/<name>/SKILL.md` are natively discovered by both
   Codex and Antigravity.
 
@@ -254,9 +267,12 @@ After bootstrap, verify:
 test -f "$TARGET/AGENTS.md" && test -f "$TARGET/CLAUDE.md"
 diff "$TARGET/AGENTS.md" "$TARGET/CLAUDE.md"
 # Expected: only the title line differs (e.g. "1c1 / # Agent Entry Point / # Claude Entry Point").
-# Entry points must stay well under Antigravity's 24,000-byte per-file cap.
+# Files Antigravity auto-loads (AGENTS.md, and GEMINI.md if it is a regular
+# file) must stay under its 24,000-byte per-file cap. CLAUDE.md has no such cap.
 test "$(wc -c < "$TARGET/AGENTS.md")" -le 24000
-test "$(wc -c < "$TARGET/CLAUDE.md")" -le 24000
+if [ -f "$TARGET/GEMINI.md" ] && [ ! -L "$TARGET/GEMINI.md" ]; then
+  test "$(wc -c < "$TARGET/GEMINI.md")" -le 24000
+fi
 
 test -f "$TARGET/docs/AGENT_GUIDE.md"
 test -f "$TARGET/docs/PROJECT_CONTEXT.md"
