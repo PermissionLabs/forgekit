@@ -108,10 +108,12 @@ copy_entrypoint_preserving_title() {
     return
   fi
   make_sibling_tmp "$dst"
+  # Explicit status check: bash 3.2 does not apply errexit to a failed
+  # redirection on a compound command, which would commit an empty file.
   {
     head -n 1 "$dst"
     tail -n +2 "$src"
-  } > "$FORGEKIT_TMP"
+  } > "$FORGEKIT_TMP" || return 1
   preserve_mode "$dst" "$FORGEKIT_TMP"
   # Replaces an in-repo symlink itself, never the file it points to.
   commit_sibling_tmp "$dst"
@@ -294,13 +296,17 @@ fi
 
 gitignore="$target/.gitignore"
 if [ ! -e "$gitignore" ] || ! grep -qxF ".context/" "$gitignore"; then
-  # Append to .gitignore itself, not to the file an in-repo link points to.
-  replace_link_with_copy "$gitignore"
-  touch "$gitignore"
-  if [ -s "$gitignore" ] && [ "$(tail -c1 "$gitignore" | wc -l | tr -d ' ')" = "0" ]; then
-    printf '\n' >> "$gitignore"
+  if [ -L "$gitignore" ]; then
+    # Write .gitignore itself, not the file an in-repo link points to: the
+    # link becomes a regular copy with the line added in the same temp write.
+    replace_link_with_copy "$gitignore" ".context/"
+  else
+    touch "$gitignore"
+    if [ -s "$gitignore" ] && [ "$(tail -c1 "$gitignore" | wc -l | tr -d ' ')" = "0" ]; then
+      printf '\n' >> "$gitignore"
+    fi
+    echo ".context/" >> "$gitignore"
   fi
-  echo ".context/" >> "$gitignore"
   echo "update: .gitignore"
 fi
 

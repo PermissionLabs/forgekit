@@ -119,6 +119,18 @@ fi
 CTX_DIR="$ABS_WORKTREE/.context"
 STATE_FILE="$CTX_DIR/workflow-state.json"
 
+# The seed temp file this process owns; removed on any exit before the final
+# mv so a failed jq, chmod or mv never leaves it behind.
+STATE_TMP=""
+cleanup_state_tmp() {
+  if [ -n "$STATE_TMP" ]; then
+    rm -f "$STATE_TMP"
+    STATE_TMP=""
+  fi
+}
+trap cleanup_state_tmp EXIT
+trap 'exit 1' HUP INT TERM
+
 if ! mkdir -p "$CTX_DIR"; then
   cleanup_incomplete_worktree
   exit 1
@@ -129,12 +141,20 @@ if [ -f "$STATE_FILE" ]; then
 else
   # Exclusive random temp name (O_EXCL); a predictable "$STATE_FILE.tmp.$$"
   # could already exist as a symlink and be truncated through. BSD mktemp
-  # needs the template to end in X.
+  # needs the template to end in X. The temp file is held at 0600 while it is
+  # written (set explicitly: mktemp's mode is masked by the umask), and the
+  # umask default a plain redirect would give is applied just before the
+  # rename (applied earlier, umask 0222 made it read-only before jq wrote).
   if ! STATE_TMP="$(mktemp "$CTX_DIR/.workflow-state.json.tmp.XXXXXX")"; then
+    STATE_TMP=""
     cleanup_incomplete_worktree
     exit 1
   fi
-  chmod "$(printf '%o' $((0666 & ~0$(umask))))" "$STATE_TMP"
+  if ! chmod 600 "$STATE_TMP"; then
+    cleanup_state_tmp
+    cleanup_incomplete_worktree
+    exit 1
+  fi
   if ! jq -n \
     --arg task "$BRANCH" \
     --arg branch "$BRANCH" \
@@ -174,15 +194,17 @@ else
       next_step: "Update this workflow state with the concrete task plan before editing files.",
       updated_at: $updated_at
     }' > "$STATE_TMP"; then
-    rm -f "$STATE_TMP"
+    cleanup_state_tmp
     cleanup_incomplete_worktree
     exit 1
   fi
-  if ! mv "$STATE_TMP" "$STATE_FILE"; then
-    rm -f "$STATE_TMP"
+  if ! chmod "$(printf '%o' $((0666 & ~0$(umask))))" "$STATE_TMP" \
+    || ! mv "$STATE_TMP" "$STATE_FILE"; then
+    cleanup_state_tmp
     cleanup_incomplete_worktree
     exit 1
   fi
+  STATE_TMP=""
 fi
 
 echo "Created worktree: $ABS_WORKTREE"

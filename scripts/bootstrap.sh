@@ -154,13 +154,17 @@ copy_file "$templates/.context/workflow-state.compact.example.json" "$target/.co
 # Idempotently add .context/ to .gitignore.
 gitignore="$target/.gitignore"
 if [ ! -e "$gitignore" ] || ! grep -qxF ".context/" "$gitignore"; then
-  # Append to .gitignore itself, not to the file an in-repo link points to.
-  replace_link_with_copy "$gitignore"
-  touch "$gitignore"
-  if [ -s "$gitignore" ] && [ "$(tail -c1 "$gitignore" | wc -l | tr -d ' ')" = "0" ]; then
-    printf '\n' >> "$gitignore"
+  if [ -L "$gitignore" ]; then
+    # Write .gitignore itself, not the file an in-repo link points to: the
+    # link becomes a regular copy with the line added in the same temp write.
+    replace_link_with_copy "$gitignore" ".context/"
+  else
+    touch "$gitignore"
+    if [ -s "$gitignore" ] && [ "$(tail -c1 "$gitignore" | wc -l | tr -d ' ')" = "0" ]; then
+      printf '\n' >> "$gitignore"
+    fi
+    echo ".context/" >> "$gitignore"
   fi
-  echo ".context/" >> "$gitignore"
 fi
 
 # Parity check before declaring success — AGENTS.md and CLAUDE.md must

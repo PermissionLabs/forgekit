@@ -140,8 +140,18 @@ or rewritten through links the same way.
   pre-placed link that `> "$tmp"` truncates through. `make_sibling_tmp` /
   `commit_sibling_tmp` in `scripts/lib/repo-paths.sh` own the temp path, and
   both writers install `trap forgekit_tmp_cleanup EXIT` so a failure between
-  creation and the rename removes it. The mode is reset from `mktemp`'s
-  `0600` to the umask default.
+  creation and the rename removes it (`scripts/worktree-add.sh` has its own
+  EXIT trap for the seed temp).
+- Temp file mode (X6): temp files are held at `0600` (set explicitly;
+  `mktemp`'s own mode is masked by the umask) until their content is
+  complete, and the umask default a plain redirect would give is applied in
+  `commit_sibling_tmp` / just before the seed `mv`. Applying it at creation
+  made the temp read-only under umask `0222`, so the following write failed;
+  under bash 3.2 the failed `{ ... } > "$tmp"` redirect also escaped
+  `errexit` and an empty `CLAUDE.md` was committed, so those writes now
+  check their status. A `.gitignore` link is materialised with `.context/`
+  added in the same temp write, because the committed `0444` copy cannot be
+  appended to.
 
 ## Documentation Updates
 
@@ -188,6 +198,11 @@ or rewritten through links the same way.
   own (missing `LINK`, outside tree hash changed through a real write, partial
   update) for both `update-harness.sh` and `bootstrap.sh`, independent of the
   read-side cases.
+- Mutation checks (cycle 6, X6): the umask `0222` tests fail with the final
+  mode applied in `make_sibling_tmp` before the write (update-harness, and
+  bootstrap's `.gitignore` link run by hand), with the explicit `chmod 600`
+  removed (mktemp then gives `0400`), and with `worktree-add.sh` applying the
+  final mode before `jq` writes the seed.
 - Manual checks: Reviewed full `git diff` across root and `templates/`.
 
 ## Review Cycles
@@ -199,6 +214,7 @@ or rewritten through links the same way.
 | 3 | Cross-review (Codex) | X3 the outside-repo guard normalised paths logically, so `redirect/../file` through a directory symlink escaped it and outside content was diffed; X4 the `update-harness.sh` final failure hint suggested `forgekit-override` for `SIZE`/`FORMAT`; C7 residual `check_exact` diffed docs/skill files resolving outside the repository. | Fixed in the cycle-3 commit: physical-path resolver, guard before every diff, cause-specific hints. |
 | 4 | Follow-up (found during cycle 3, out of its scope) | `update-harness.sh` / `bootstrap.sh` wrote through symlinks resolving outside the target repository with `--force` (plain `cp`, `>>`, `touch`). | Fixed in the write-guard commit: shared `scripts/lib/repo-paths.sh`, all-paths pre-check, in-repo links replaced instead of followed. |
 | 5 | Cross-review (Codex) | X5 the `.context/workflow-state.json` temp path `$state_file.tmp.$$` was predictable and outside the pre-check, so a pre-placed outside link was truncated by `> "$tmp"`; the write-path tests did not cover `redirect/../file` (m8 caught only on the read side). | Fixed in the X5 commit: `mktemp` sibling temps for every writer plus an EXIT cleanup trap, canary tests at the old PID names, `redirect/../` write tests for both writers. |
+| 6 | Cross-review (Codex) | X6 temp files got their final (umask) mode before being written, so under umask `0222` every temp write failed with `Permission denied` (a regression from the X5 commit). | Fixed in the X6 commit: final mode applied after the content is written, explicit `0600` while writing, write-status checks, `worktree-add.sh` EXIT trap, umask `0222` tests for update-harness, bootstrap and worktree-add. |
 
 ## Branch & Merge Evidence
 
@@ -212,6 +228,7 @@ or rewritten through links the same way.
 | --- | --- | --- | --- |
 | Cycle 2 / C6 | Shared review contract and per-host review adapters are described but not implemented | `filed_followup` | `docs/review-skills/README.md` states the contract; adapters land in a follow-up change |
 | Cycle 5 / review notes | TOCTOU between the all-paths pre-check and the later writes (a path swapped for a link after the check) | `accepted` | Reviewer judgement: acceptable for a single-user local harness, not an adversarial boundary. Exclusive `mktemp` temp files remove the predictable-name case; the remaining window needs a concurrent writer in the target repo. |
+| Cycle 6 / X6 review | `scripts/worktree-add.sh` does not check whether `$CTX_DIR` (`<worktree>/.context`) is a link resolving outside the repository before seeding state into it (pre-existing, not introduced by this change) | `filed_followup` | Out of X6 scope; the follow-up applies the `write_target_problem` guard to the seed path |
 
 ## Compound Capture
 

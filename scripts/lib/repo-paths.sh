@@ -125,43 +125,62 @@ forgekit_tmp_cleanup() {
   fi
 }
 
+# Mode a plain `> file` redirect would give a new file under the current umask.
+forgekit_default_file_mode() {
+  printf '%o' $((0666 & ~0$(umask)))
+}
+
 # Create a new, empty temp file next to $1 (same directory, so the final mv
 # is a rename) and store its path in FORGEKIT_TMP. mktemp opens it with
 # O_CREAT|O_EXCL under a random name, so a pre-placed file or symlink is
 # never opened or truncated (the old "$dst.tmp.$$" name was predictable).
-# BSD mktemp needs the template to end in X. The mode is reset from 0600 to
-# the umask default a plain redirect would have produced.
+# BSD mktemp needs the template to end in X. The file is held at 0600 while
+# callers write it (set explicitly: mktemp's own mode is masked by the umask,
+# so umask 0222 would give 0400), and commit_sibling_tmp applies the umask
+# default only after the content is complete. Applying the final mode first
+# made the temp file read-only under umask 0222 and the later write failed.
 make_sibling_tmp() {
-  local dst="$1" mode
+  local dst="$1"
   FORGEKIT_TMP="$(mktemp "$(dirname "$dst")/.$(basename "$dst").forgekit-tmp.XXXXXX")" || {
     FORGEKIT_TMP=""
     return 1
   }
-  mode="$(printf '%o' $((0666 & ~0$(umask))))"
-  chmod "$mode" "$FORGEKIT_TMP"
+  chmod 600 "$FORGEKIT_TMP" || return 1
 }
 
-# Rename FORGEKIT_TMP onto $1. An existing symlink at $1 is removed first:
-# mv onto a link to a directory would move the file into that directory.
+# Apply the final mode to FORGEKIT_TMP and rename it onto $1. An existing
+# symlink at $1 is removed first: mv onto a link to a directory would move
+# the file into that directory. On failure FORGEKIT_TMP is kept set so the
+# EXIT trap (forgekit_tmp_cleanup) removes the temp file.
 commit_sibling_tmp() {
   local dst="$1"
+  chmod "$(forgekit_default_file_mode)" "$FORGEKIT_TMP" || return 1
   if [ -L "$dst" ]; then
     rm -f "$dst"
   fi
-  mv "$FORGEKIT_TMP" "$dst"
+  mv "$FORGEKIT_TMP" "$dst" || return 1
   FORGEKIT_TMP=""
 }
 
 # Replace a symlink at $1 with a regular file holding its current content
 # (empty when the link dangles) so a following in-place edit (append, touch)
 # changes $1 itself, not the file the link points to. No-op for non-links.
+# An optional line $2 is appended to the copy (after a newline if the content
+# lacks one) before it is committed, so the new file never needs a second,
+# in-place write: under a umask such as 0222 the committed file is read-only.
 # Callers must have passed $1 through write_target_problem.
 replace_link_with_copy() {
-  local f="$1"
+  local f="$1" line="${2:-}"
   [ -L "$f" ] || return 0
   make_sibling_tmp "$f"
   if [ -f "$f" ]; then
-    cat "$f" > "$FORGEKIT_TMP"
+    cat "$f" > "$FORGEKIT_TMP" || return 1
+  fi
+  if [ -n "$line" ]; then
+    if [ -s "$FORGEKIT_TMP" ] && [ "$(tail -c1 "$FORGEKIT_TMP" | wc -l | tr -d ' ')" = "0" ]; then
+      printf '\n' >> "$FORGEKIT_TMP" || return 1
+    fi
+    printf '%s\n' "$line" >> "$FORGEKIT_TMP" || return 1
   fi
   commit_sibling_tmp "$f"
 }

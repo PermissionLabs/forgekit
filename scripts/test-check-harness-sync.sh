@@ -619,4 +619,94 @@ expect_has "LINK: docs/design-skills/FIGMA.md parent directory resolves outside 
 [ "$(tree_hash "$dir")" = "$repo_tree" ] \
   || fail "partial bootstrap: files written despite the refusal"
 
+# 21. X6: under umask 0222 the temp files must stay writable until their
+#     content is complete; the final mode (umask default, 0444) is applied
+#     just before the rename. Applying it first made every temp write fail.
+mode_of() {
+  if stat -f '%Lp' "$1" >/dev/null 2>&1; then
+    stat -f '%Lp' "$1"
+  else
+    stat -c '%a' "$1"
+  fi
+}
+expect_no_tmp() {
+  ! find "$1" \( -name '*forgekit-tmp*' -o -name '.workflow-state.json.tmp.*' \) | grep -q . \
+    || fail "temp file left behind"
+}
+if command -v jq >/dev/null 2>&1; then
+  repo="$(new_repo umask-update)"
+  printf '\nlocal edit\n' >> "$repo/CLAUDE.md"
+  jq '.resume_protocol.read_this_file_on = []' "$repo/.context/workflow-state.json" > "$TMP_DIR/umask-state.json"
+  cat "$TMP_DIR/umask-state.json" > "$repo/.context/workflow-state.json"
+  LABEL="update-harness --force under umask 0222"
+  CASES=$((CASES + 1))
+  capture bash -c 'umask 0222; exec bash "$0" "$1" --force' "$ROOT/scripts/update-harness.sh" "$repo"
+  expect_rc 0
+  expect_has "copy: CLAUDE.md (body updated, title preserved)"
+  expect_has "update: .context/workflow-state.json resume_protocol"
+  same_entry_body "$repo/CLAUDE.md" "$ROOT/templates/CLAUDE.md" || fail "CLAUDE.md body not updated"
+  [ "$(mode_of "$repo/CLAUDE.md")" = "444" ] || fail "CLAUDE.md mode $(mode_of "$repo/CLAUDE.md"), want 444"
+  [ "$(mode_of "$repo/.context/workflow-state.json")" = "444" ] \
+    || fail "workflow-state.json mode $(mode_of "$repo/.context/workflow-state.json"), want 444"
+  [ "$(jq -r .resume_protocol.phase_refs_source "$repo/.context/workflow-state.json")" = "docs/PHASE_REFS.json" ] \
+    || fail "workflow-state.json was not updated"
+  expect_no_tmp "$repo"
+fi
+
+repo="$(new_repo umask-boot)"
+mkdir -p "$repo/.harness"
+printf 'node_modules/' > "$repo/.harness/gitignore"
+rm -f "$repo/.gitignore"
+ln -s .harness/gitignore "$repo/.gitignore"
+LABEL="bootstrap --force under umask 0222 replaces a .gitignore link"
+CASES=$((CASES + 1))
+capture bash -c 'umask 0222; exec bash "$0" "$1" --force' "$ROOT/scripts/bootstrap.sh" "$repo"
+expect_rc 0
+[ ! -L "$repo/.gitignore" ] || fail ".gitignore is still a symlink"
+[ "$(cat "$repo/.gitignore")" = "$(printf 'node_modules/\n.context/')" ] || fail ".gitignore content wrong"
+[ "$(cat "$repo/.harness/gitignore")" = "node_modules/" ] || fail "bootstrap wrote through the .gitignore link"
+[ "$(mode_of "$repo/.gitignore")" = "444" ] || fail ".gitignore mode $(mode_of "$repo/.gitignore"), want 444"
+expect_no_tmp "$repo"
+
+# worktree-add: git itself cannot create .git/worktrees/<name> or checkout
+# directories under umask 0222, so a shim runs git with umask 022 and the
+# checkout tracks .context/ (mkdir -p under 0222 would make it read-only).
+# Only the state seed then runs under umask 0222.
+if command -v jq >/dev/null 2>&1; then
+  wt_src="$TMP_DIR/umask-wt-src"
+  mkdir -p "$wt_src/scripts" "$wt_src/.context" "$TMP_DIR/umask-git-shim"
+  cp "$ROOT/scripts/worktree-add.sh" "$wt_src/scripts/worktree-add.sh"
+  printf 'keep\n' > "$wt_src/.context/.keep"
+  git -C "$wt_src" init -q
+  git -C "$wt_src" add -A
+  git -C "$wt_src" -c user.name=t -c user.email=t@example.invalid commit -qm init
+  real_git="$(command -v git)"
+  printf '#!/bin/sh\numask 022\nexec "%s" "$@"\n' "$real_git" > "$TMP_DIR/umask-git-shim/git"
+  chmod +x "$TMP_DIR/umask-git-shim/git"
+  wt_path="$TMP_DIR/umask-wt"
+  LABEL="worktree-add seeds state under umask 0222"
+  CASES=$((CASES + 1))
+  capture env PATH="$TMP_DIR/umask-git-shim:$PATH" bash -c 'umask 0222; exec bash "$0" "$1" -b umask-task HEAD' \
+    "$wt_src/scripts/worktree-add.sh" "$wt_path"
+  expect_rc 0
+  expect_has "Seeded state:"
+  [ "$(jq -r .branch "$wt_path/.context/workflow-state.json")" = "umask-task" ] || fail "state not seeded"
+  [ "$(mode_of "$wt_path/.context/workflow-state.json")" = "444" ] \
+    || fail "seeded state mode $(mode_of "$wt_path/.context/workflow-state.json"), want 444"
+  expect_no_tmp "$wt_path/.context"
+
+  # A failed rename removes the seed temp file and the incomplete worktree.
+  mkdir -p "$TMP_DIR/failing-mv-shim"
+  printf '#!/bin/sh\nexit 1\n' > "$TMP_DIR/failing-mv-shim/mv"
+  chmod +x "$TMP_DIR/failing-mv-shim/mv"
+  wt_path="$TMP_DIR/mvfail-wt"
+  LABEL="worktree-add cleans its temp file when the rename fails"
+  CASES=$((CASES + 1))
+  capture env PATH="$TMP_DIR/failing-mv-shim:$PATH" bash "$wt_src/scripts/worktree-add.sh" "$wt_path" -b mvfail-task HEAD
+  expect_rc 1
+  expect_has "error: failed to seed workflow state"
+  [ ! -e "$wt_path" ] || fail "incomplete worktree left behind"
+  expect_no_tmp "$wt_src"
+fi
+
 echo "check-harness-sync contract tests passed ($CASES cases)"
