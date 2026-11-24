@@ -58,6 +58,8 @@ source "$forgekit_root/scripts/check-target-paths.sh"
 
 # shellcheck source=lib/repo-paths.sh
 . "$forgekit_root/scripts/lib/repo-paths.sh"
+trap forgekit_tmp_cleanup EXIT
+trap 'exit 1' HUP INT TERM
 
 # Outside-target guard: check every path this script writes before writing
 # any of them, so a rejected path never leaves a partial bootstrap behind.

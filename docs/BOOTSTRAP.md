@@ -79,6 +79,24 @@ The update helper:
 - copies new harness files such as `docs/PHASE_REFS.json`
 - runs `scripts/check-harness-sync.sh "$TARGET"` at the end
 
+Compatibility note for downstream projects (symlinked harness files):
+`bootstrap.sh` and `update-harness.sh` no longer write through symlinks. A
+harness path that is a symlink resolving **inside** the repository (for
+example `AGENTS.md -> .harness/AGENTS.md`, or a linked `.gitignore`) is
+replaced by a regular file holding the new content; the file the link
+pointed to is left unchanged. A symlink resolving **outside** the repository
+stops the whole run with a `LINK:` line, even with `--force`. If your project
+keeps harness files behind links on purpose:
+
+- before updating, decide which copy is canonical; after the update the named
+  path holds ForgeKit's content and the old link target is stale;
+- either delete the old link target and keep the regular file, or re-create
+  the link afterwards and mark the canonical file with `forgekit-override` if
+  it intentionally diverges (`update-harness.sh` will replace the link again
+  on the next update that changes it);
+- review `git diff` / `git status` for `typechange` entries (link -> file)
+  before committing.
+
 Expected PR contents in the target repo:
 
 - copied or updated harness-owned files

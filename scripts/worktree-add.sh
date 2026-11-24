@@ -127,7 +127,14 @@ fi
 if [ -f "$STATE_FILE" ]; then
   echo "warn: workflow state already exists, leaving it unchanged: $STATE_FILE" >&2
 else
-  STATE_TMP="$STATE_FILE.tmp.$$"
+  # Exclusive random temp name (O_EXCL); a predictable "$STATE_FILE.tmp.$$"
+  # could already exist as a symlink and be truncated through. BSD mktemp
+  # needs the template to end in X.
+  if ! STATE_TMP="$(mktemp "$CTX_DIR/.workflow-state.json.tmp.XXXXXX")"; then
+    cleanup_incomplete_worktree
+    exit 1
+  fi
+  chmod "$(printf '%o' $((0666 & ~0$(umask))))" "$STATE_TMP"
   if ! jq -n \
     --arg task "$BRANCH" \
     --arg branch "$BRANCH" \

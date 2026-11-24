@@ -63,6 +63,8 @@ source "$forgekit_root/scripts/check-target-paths.sh"
 
 # shellcheck source=lib/repo-paths.sh
 . "$forgekit_root/scripts/lib/repo-paths.sh"
+trap forgekit_tmp_cleanup EXIT
+trap 'exit 1' HUP INT TERM
 
 if ! git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "error: target is not a git repository: $target" >&2
@@ -99,24 +101,20 @@ preserve_mode() {
 }
 
 copy_entrypoint_preserving_title() {
-  local src="$1" dst="$2" tmp
+  local src="$1" dst="$2"
   mkdir -p "$(dirname "$dst")"
   if [ ! -e "$dst" ]; then
     safe_copy_file "$src" "$dst"
     return
   fi
-  tmp="$(mktemp "$dst.tmp.XXXXXXXX")"
+  make_sibling_tmp "$dst"
   {
     head -n 1 "$dst"
     tail -n +2 "$src"
-  } > "$tmp"
-  preserve_mode "$dst" "$tmp"
-  # Replace an in-repo symlink itself; mv onto a link to a directory would
-  # move the file into that directory instead.
-  if [ -L "$dst" ]; then
-    rm -f "$dst"
-  fi
-  mv "$tmp" "$dst"
+  } > "$FORGEKIT_TMP"
+  preserve_mode "$dst" "$FORGEKIT_TMP"
+  # Replaces an in-repo symlink itself, never the file it points to.
+  commit_sibling_tmp "$dst"
 }
 
 would_update_file() {
@@ -264,7 +262,7 @@ if [ ! -f "$state_file" ]; then
   copy_file "$templates/.context/workflow-state.compact.example.json" "$state_file"
   echo "copy: .context/workflow-state.json"
 elif command -v jq >/dev/null 2>&1; then
-  tmp="$(mktemp "$state_file.tmp.XXXXXXXX")"
+  make_sibling_tmp "$state_file"
   if jq '
     def append_missing($v): if index($v) then . else . + [$v] end;
     .resume_protocol.read_this_file_on = (
@@ -277,20 +275,17 @@ elif command -v jq >/dev/null 2>&1; then
     )
     | .resume_protocol.read_phase_refs = (.resume_protocol.read_phase_refs // "on_phase_entry_only")
     | .resume_protocol.phase_refs_source = (.resume_protocol.phase_refs_source // "docs/PHASE_REFS.json")
-  ' "$state_file" > "$tmp"; then
-    if cmp -s "$tmp" "$state_file"; then
-      rm -f "$tmp"
+  ' "$state_file" > "$FORGEKIT_TMP"; then
+    if cmp -s "$FORGEKIT_TMP" "$state_file"; then
+      forgekit_tmp_cleanup
       echo "ok:   .context/workflow-state.json resume_protocol"
     else
-      preserve_mode "$state_file" "$tmp"
-      if [ -L "$state_file" ]; then
-        rm -f "$state_file"
-      fi
-      mv "$tmp" "$state_file"
+      preserve_mode "$state_file" "$FORGEKIT_TMP"
+      commit_sibling_tmp "$state_file"
       echo "update: .context/workflow-state.json resume_protocol"
     fi
   else
-    rm -f "$tmp"
+    forgekit_tmp_cleanup
     echo "warn: could not update .context/workflow-state.json" >&2
   fi
 else

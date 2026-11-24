@@ -112,20 +112,56 @@ safe_copy_file() {
   cp "$src" "$dst"
 }
 
+# Exclusive sibling temp files. FORGEKIT_TMP holds the temp file this
+# process currently owns; callers that source this file install
+#   trap forgekit_tmp_cleanup EXIT
+# so a failure between creation and the final mv never leaves it behind.
+FORGEKIT_TMP=""
+
+forgekit_tmp_cleanup() {
+  if [ -n "${FORGEKIT_TMP:-}" ]; then
+    rm -f "$FORGEKIT_TMP"
+    FORGEKIT_TMP=""
+  fi
+}
+
+# Create a new, empty temp file next to $1 (same directory, so the final mv
+# is a rename) and store its path in FORGEKIT_TMP. mktemp opens it with
+# O_CREAT|O_EXCL under a random name, so a pre-placed file or symlink is
+# never opened or truncated (the old "$dst.tmp.$$" name was predictable).
+# BSD mktemp needs the template to end in X. The mode is reset from 0600 to
+# the umask default a plain redirect would have produced.
+make_sibling_tmp() {
+  local dst="$1" mode
+  FORGEKIT_TMP="$(mktemp "$(dirname "$dst")/.$(basename "$dst").forgekit-tmp.XXXXXX")" || {
+    FORGEKIT_TMP=""
+    return 1
+  }
+  mode="$(printf '%o' $((0666 & ~0$(umask))))"
+  chmod "$mode" "$FORGEKIT_TMP"
+}
+
+# Rename FORGEKIT_TMP onto $1. An existing symlink at $1 is removed first:
+# mv onto a link to a directory would move the file into that directory.
+commit_sibling_tmp() {
+  local dst="$1"
+  if [ -L "$dst" ]; then
+    rm -f "$dst"
+  fi
+  mv "$FORGEKIT_TMP" "$dst"
+  FORGEKIT_TMP=""
+}
+
 # Replace a symlink at $1 with a regular file holding its current content
 # (empty when the link dangles) so a following in-place edit (append, touch)
 # changes $1 itself, not the file the link points to. No-op for non-links.
 # Callers must have passed $1 through write_target_problem.
 replace_link_with_copy() {
-  local f="$1" tmp
+  local f="$1"
   [ -L "$f" ] || return 0
-  tmp="$f.forgekit-tmp.$$"
-  rm -f "$tmp"
+  make_sibling_tmp "$f"
   if [ -f "$f" ]; then
-    cp "$f" "$tmp"
-  else
-    : > "$tmp"
+    cat "$f" > "$FORGEKIT_TMP"
   fi
-  rm -f "$f"
-  mv "$tmp" "$f"
+  commit_sibling_tmp "$f"
 }

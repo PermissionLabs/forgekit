@@ -125,6 +125,23 @@ or rewritten through links the same way.
   example a project-owned file the link points to — and the sync check reads
   the named path either way, so replacing the link is the only behaviour
   that keeps writes confined to the harness path.
+- Compatibility change for downstream projects: an in-repo symlinked harness
+  file (e.g. `AGENTS.md -> .harness/AGENTS.md`) used to be written through,
+  updating the link target; it is now replaced by a regular file, leaving
+  the old target stale, and git shows a `typechange`. `docs/BOOTSTRAP.md`
+  ("Compatibility note for downstream projects") tells projects how to pick
+  the canonical copy and what to review before committing.
+- Temp files (X5): every temp file the writers create (`AGENTS.md` /
+  `CLAUDE.md` title-preserving copy, `.context/workflow-state.json` jq
+  rewrite, `.gitignore` link materialisation, and the state seed in
+  `scripts/worktree-add.sh`) is created with `mktemp` in the destination's
+  directory (`.<name>.forgekit-tmp.XXXXXX`; BSD `mktemp` needs the trailing
+  `X`s), so the old predictable `<file>.tmp.$$` name can no longer be a
+  pre-placed link that `> "$tmp"` truncates through. `make_sibling_tmp` /
+  `commit_sibling_tmp` in `scripts/lib/repo-paths.sh` own the temp path, and
+  both writers install `trap forgekit_tmp_cleanup EXIT` so a failure between
+  creation and the rename removes it. The mode is reset from `mktemp`'s
+  `0600` to the umask default.
 
 ## Documentation Updates
 
@@ -163,6 +180,14 @@ or rewritten through links the same way.
   refusal disabled, the `.gitignore` pre-check removed, `cd -P` replaced by a
   logical `cd` in the shared resolver, and the guard moved from the
   pre-check to write time (partial update).
+- Mutation checks (cycle 5, X5 and write-path `..`): the new tests fail with
+  the cycle-4 temp code, and with each temp path alone reverted to the
+  predictable `<file>.tmp.$$` name (state rewrite, entrypoint copy,
+  `.gitignore` materialisation). With `cd -P` replaced by a logical `cd` in
+  the shared resolver (m8), the new `redirect/../` write cases fail on their
+  own (missing `LINK`, outside tree hash changed through a real write, partial
+  update) for both `update-harness.sh` and `bootstrap.sh`, independent of the
+  read-side cases.
 - Manual checks: Reviewed full `git diff` across root and `templates/`.
 
 ## Review Cycles
@@ -173,6 +198,7 @@ or rewritten through links the same way.
 | 2 | Cross-review (Codex + Claude) | X1 `bash -n` only parsed the first file; X2/C5 cap applied to `CLAUDE.md`, host logic hard-coded by file name; C1 missing entrypoint aborted the run under `set -e`; C2 standalone `GEMINI.md` forced to match the template, no `update-harness.sh` pre-check, wrong remediation text; C3 `SIZE`/`FORMAT` only warned under override; C4 tests did not catch mutations; C6 host tool names stated as the review binding; C7 outside-repo entrypoint symlinks diffed to stderr. | Fixed in the cycle-2 commit; C6 ships the contract paragraph only, contract and adapters follow up. |
 | 3 | Cross-review (Codex) | X3 the outside-repo guard normalised paths logically, so `redirect/../file` through a directory symlink escaped it and outside content was diffed; X4 the `update-harness.sh` final failure hint suggested `forgekit-override` for `SIZE`/`FORMAT`; C7 residual `check_exact` diffed docs/skill files resolving outside the repository. | Fixed in the cycle-3 commit: physical-path resolver, guard before every diff, cause-specific hints. |
 | 4 | Follow-up (found during cycle 3, out of its scope) | `update-harness.sh` / `bootstrap.sh` wrote through symlinks resolving outside the target repository with `--force` (plain `cp`, `>>`, `touch`). | Fixed in the write-guard commit: shared `scripts/lib/repo-paths.sh`, all-paths pre-check, in-repo links replaced instead of followed. |
+| 5 | Cross-review (Codex) | X5 the `.context/workflow-state.json` temp path `$state_file.tmp.$$` was predictable and outside the pre-check, so a pre-placed outside link was truncated by `> "$tmp"`; the write-path tests did not cover `redirect/../file` (m8 caught only on the read side). | Fixed in the X5 commit: `mktemp` sibling temps for every writer plus an EXIT cleanup trap, canary tests at the old PID names, `redirect/../` write tests for both writers. |
 
 ## Branch & Merge Evidence
 
@@ -185,6 +211,7 @@ or rewritten through links the same way.
 | Source | Finding | Disposition | Link/reason |
 | --- | --- | --- | --- |
 | Cycle 2 / C6 | Shared review contract and per-host review adapters are described but not implemented | `filed_followup` | `docs/review-skills/README.md` states the contract; adapters land in a follow-up change |
+| Cycle 5 / review notes | TOCTOU between the all-paths pre-check and the later writes (a path swapped for a link after the check) | `accepted` | Reviewer judgement: acceptable for a single-user local harness, not an adversarial boundary. Exclusive `mktemp` temp files remove the predictable-name case; the remaining window needs a concurrent writer in the target repo. |
 
 ## Compound Capture
 

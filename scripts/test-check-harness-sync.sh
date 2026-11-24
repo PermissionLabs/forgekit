@@ -484,4 +484,139 @@ expect_rc 0
 [ -f "$dir/AGENTS.md" ] && [ ! -L "$dir/AGENTS.md" ] || fail "AGENTS.md is still a symlink"
 cmp -s "$dir/AGENTS.md" "$ROOT/templates/AGENTS.md" || fail "AGENTS.md does not match the template"
 
+# 19. X5: temp files are created exclusively (mktemp), never at the old
+#     predictable "<file>.tmp.<PID>" / "<file>.forgekit-tmp.<PID>" names.
+#     `exec` keeps the wrapper's PID, so the script's $$ is known here and
+#     canary links at every old name point outside. The outside canary keeps
+#     its hash, the planted links stay untouched, and no temp file is left.
+mkdir -p "$TMP_DIR/outside-x5"
+printf 'OUTSIDE_TMP_CANARY_5c0e\n' > "$TMP_DIR/outside-x5/canary"
+canary_hash="$(hash_of "$TMP_DIR/outside-x5/canary")"
+# plant_and_exec <repo> <script> [args...]: plant canary links for this PID,
+# then exec the script under the same PID.
+plant_and_exec() {
+  # shellcheck disable=SC2016
+  bash -c '
+    repo="$1" canary="$2"; shift 2
+    for n in AGENTS.md CLAUDE.md .context/workflow-state.json .gitignore; do
+      ln -s "$canary" "$repo/$n.tmp.$$"
+      ln -s "$canary" "$repo/$n.forgekit-tmp.$$"
+      printf "%s\n" "$repo/$n.tmp.$$" "$repo/$n.forgekit-tmp.$$" >> "$repo.planted"
+    done
+    exec bash "$@"
+  ' _ "$1" "$TMP_DIR/outside-x5/canary" "${@:2}"
+}
+expect_planted_intact() {
+  local l
+  while IFS= read -r l; do
+    [ -L "$l" ] && [ "$(readlink "$l")" = "$TMP_DIR/outside-x5/canary" ] \
+      || fail "planted link was replaced or removed: $l"
+  done < "$1.planted"
+  [ "$(hash_of "$TMP_DIR/outside-x5/canary")" = "$canary_hash" ] \
+    || fail "outside canary changed through a predictable temp name"
+  if find "$1" ! -type l \( -name '*forgekit-tmp*' -o -name '.workflow-state.json.tmp.*' \) | grep -q .; then
+    fail "temp file left behind: $(find "$1" ! -type l -name '*tmp*')"
+  fi
+}
+repo="$(new_repo tmp-canary-update)"
+mkdir -p "$repo/.harness"
+printf '\nlocal edit\n' >> "$repo/AGENTS.md"
+printf '\nlocal edit\n' >> "$repo/CLAUDE.md"
+printf 'node_modules/\n' > "$repo/.harness/gitignore"
+rm -f "$repo/.gitignore"
+ln -s .harness/gitignore "$repo/.gitignore"
+if command -v jq >/dev/null 2>&1; then
+  jq 'del(.resume_protocol.phase_refs_source)' "$repo/.context/workflow-state.json" \
+    > "$repo/.harness/state" && mv "$repo/.harness/state" "$repo/.context/workflow-state.json"
+fi
+LABEL="update-harness ignores pre-placed predictable temp names"
+CASES=$((CASES + 1))
+capture plant_and_exec "$repo" "$ROOT/scripts/update-harness.sh" "$repo" --force
+expect_rc 0
+expect_has "copy: AGENTS.md (body updated, title preserved)"
+expect_has "update: .gitignore"
+if command -v jq >/dev/null 2>&1; then
+  expect_has "update: .context/workflow-state.json resume_protocol"
+  [ "$(jq -r .resume_protocol.phase_refs_source "$repo/.context/workflow-state.json")" = "docs/PHASE_REFS.json" ] \
+    || fail "workflow-state.json was not updated"
+fi
+same_entry_body() { diff <(tail -n +2 "$1") <(tail -n +2 "$2") >/dev/null; }
+same_entry_body "$repo/AGENTS.md" "$ROOT/templates/AGENTS.md" || fail "AGENTS.md body not updated"
+[ -f "$repo/.gitignore" ] && [ ! -L "$repo/.gitignore" ] || fail ".gitignore is still a symlink"
+expect_planted_intact "$repo"
+
+dir="$TMP_DIR/tmp-canary-boot"
+mkdir -p "$dir/.harness" "$dir/.context"
+git -C "$dir" init -q
+printf 'node_modules/\n' > "$dir/.harness/gitignore"
+ln -s .harness/gitignore "$dir/.gitignore"
+LABEL="bootstrap ignores pre-placed predictable temp names"
+CASES=$((CASES + 1))
+capture plant_and_exec "$dir" "$ROOT/scripts/bootstrap.sh" "$dir"
+expect_rc 0
+grep -qxF '.context/' "$dir/.gitignore" && grep -qxF 'node_modules/' "$dir/.gitignore" \
+  || fail ".gitignore lost its content or the .context/ line"
+[ "$(cat "$dir/.harness/gitignore")" = "node_modules/" ] || fail "bootstrap wrote through an in-repo .gitignore link"
+expect_planted_intact "$dir"
+
+# 19b. X5: a failed state update removes its temp file (the EXIT trap and the
+#      explicit cleanup), and leaves the state file as it was.
+if command -v jq >/dev/null 2>&1; then
+  repo="$(new_repo tmp-cleanup)"
+  printf 'not json\n' > "$repo/.context/workflow-state.json"
+  run_script "update-harness cleans its temp file when jq fails" \
+    "$ROOT/scripts/update-harness.sh" "$repo"
+  expect_has "warn: could not update .context/workflow-state.json"
+  [ "$(cat "$repo/.context/workflow-state.json")" = "not json" ] || fail "state file changed"
+  ! find "$repo" -name '*forgekit-tmp*' | grep -q . || fail "temp file left behind"
+fi
+
+# 20. Write guard resolves `..` physically (m8): redirect -> ../outside/child,
+#     so redirect/../X is outside/X on disk but repo/X logically. A decoy
+#     in-repo dskills/ makes the logical reading look valid. Both writers must
+#     refuse before writing anything (no partial update) and the outside tree
+#     keeps its hash.
+mkdir -p "$TMP_DIR/outside-w3/child" "$TMP_DIR/outside-w3/dskills"
+printf '# Agent Entry Point\nOUTSIDE_W3_MARK_2d7a\n' > "$TMP_DIR/outside-w3/fixture.md"
+printf 'keep\n' > "$TMP_DIR/outside-w3/dskills/.keep"
+plant_dotdot() {
+  ln -s "../outside-w3/child" "$1/redirect"
+  mkdir -p "$1/dskills" "$1/docs"
+  printf 'decoy\n' > "$1/dskills/.keep"
+  rm -f "$1/AGENTS.md"
+  ln -s "redirect/../fixture.md" "$1/AGENTS.md"
+  rm -rf "$1/docs/design-skills"
+  ln -s "../redirect/../dskills" "$1/docs/design-skills"
+}
+before_tree="$(tree_hash "$TMP_DIR/outside-w3")"
+repo="$(new_repo write-dotdot)"
+printf '\nlocal edit\n' >> "$repo/CLAUDE.md"
+plant_dotdot "$repo"
+repo_tree="$(tree_hash "$repo")"
+run_script "update-harness --force refuses redirect/../ write targets" \
+  "$ROOT/scripts/update-harness.sh" "$repo" --force
+expect_rc 1
+expect_has "LINK: AGENTS.md symlink -> redirect/../fixture.md resolves outside the repository"
+expect_has "LINK: docs/design-skills/FIGMA.md parent directory resolves outside the repository"
+expect_lacks "OUTSIDE_W3_MARK_2d7a"
+[ "$(tree_hash "$TMP_DIR/outside-w3")" = "$before_tree" ] \
+  || fail "update-harness changed files outside the repository through redirect/../"
+[ "$(tree_hash "$repo")" = "$repo_tree" ] \
+  || fail "partial update: files written despite the refusal"
+
+dir="$TMP_DIR/boot-dotdot"
+mkdir -p "$dir"
+git -C "$dir" init -q
+plant_dotdot "$dir"
+repo_tree="$(tree_hash "$dir")"
+run_script "bootstrap --force refuses redirect/../ write targets" \
+  "$ROOT/scripts/bootstrap.sh" "$dir" --force
+expect_rc 1
+expect_has "LINK: AGENTS.md symlink -> redirect/../fixture.md resolves outside the repository"
+expect_has "LINK: docs/design-skills/FIGMA.md parent directory resolves outside the repository"
+[ "$(tree_hash "$TMP_DIR/outside-w3")" = "$before_tree" ] \
+  || fail "bootstrap changed files outside the target through redirect/../"
+[ "$(tree_hash "$dir")" = "$repo_tree" ] \
+  || fail "partial bootstrap: files written despite the refusal"
+
 echo "check-harness-sync contract tests passed ($CASES cases)"
