@@ -91,6 +91,9 @@ if [ ! -d "$templates" ]; then
   exit 2
 fi
 
+# shellcheck source=lib/repo-paths.sh
+. "$forgekit_root/scripts/lib/repo-paths.sh"
+
 mode_internal=""
 mode_target=""
 
@@ -180,48 +183,8 @@ check_title_only() {
   fi
 }
 
-# Print the physical path $1 resolves to. Symlinks are followed in the final
-# component and in every parent directory, and `..` is applied after the
-# link it follows is resolved (cd -P / pwd -P), so `link/../file` lands where
-# the kernel would open it. Fails on loops or unresolvable directories.
-# Portable to macOS bash 3.2 and BSD (no readlink -f / realpath).
-resolve_physical() {
-  local p="$1" dir base link n=0
-  while :; do
-    dir="$(CDPATH='' cd -P "$(dirname "$p")" 2>/dev/null && pwd -P)" || return 1
-    base="$(basename "$p")"
-    case "$base" in
-      .|..)
-        (CDPATH='' cd -P "$dir/$base" 2>/dev/null && pwd -P)
-        return
-        ;;
-    esac
-    p="${dir%/}/$base"
-    [ -L "$p" ] || break
-    n=$((n + 1))
-    [ "$n" -le 40 ] || return 1
-    link="$(readlink "$p")" || return 1
-    case "$link" in
-      /*) p="$link" ;;
-      *) p="${dir%/}/$link" ;;
-    esac
-  done
-  printf '%s\n' "$p"
-}
-
-# True when $1 exists (or is a dangling symlink) and physically resolves
-# outside repo root $2, through a symlink in the file itself or in any parent
-# directory, or cannot be resolved at all.
-path_escapes_repo() {
-  local f="$1" root="$2" root_phys resolved
-  [ -e "$f" ] || [ -L "$f" ] || return 1
-  root_phys="$(CDPATH='' cd -P "$root" 2>/dev/null && pwd -P)" || return 0
-  resolved="$(resolve_physical "$f")" || return 0
-  case "$resolved" in
-    "$root_phys"/*) return 1 ;;
-    *) return 0 ;;
-  esac
-}
+# resolve_physical / path_escapes_repo live in scripts/lib/repo-paths.sh so
+# the writers (bootstrap.sh, update-harness.sh) use the same resolver.
 
 # Guard run before every content comparison. Returns 0 (and records LINK
 # drift) when $1 resolves outside the checked repository; the file is

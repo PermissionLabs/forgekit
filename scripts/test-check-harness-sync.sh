@@ -64,6 +64,29 @@ big_body() {
   printf '%*s\n' 24500 '' | tr ' ' "$1"
 }
 
+# Content hash of a file (sha256; portable between macOS and Linux CI).
+hash_of() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 < "$1"
+  else
+    sha256sum < "$1"
+  fi
+}
+
+# Hash of every file under a directory, by relative path.
+tree_hash() {
+  (cd "$1" && find . -type f | sort | while IFS= read -r f; do
+    printf '%s %s\n' "$f" "$(hash_of "$f")"
+  done)
+}
+
+run_script() {
+  LABEL="$1"
+  shift
+  CASES=$((CASES + 1))
+  capture bash "$@"
+}
+
 # 1. Clean bootstrapped repo passes
 repo="$(new_repo clean)"
 run_check "clean" "$repo"
@@ -320,5 +343,145 @@ expect_rc 1
 expect_has "STALE: docs/review-skills/retired-skill.md"
 expect_has "hint: DRIFT/MISSING/STALE: remove stale harness files, or add a forgekit-override"
 expect_lacks "hint: SIZE/FORMAT:"
+
+# 15. Write guard: update-harness.sh --force refuses a harness file that is a
+#     symlink resolving outside the repository. The outside file keeps its
+#     hash, its content is not printed, and no other file is written (another
+#     drifted file that --force would restore stays as it was).
+mkdir -p "$TMP_DIR/outside-w1"
+printf 'OUTSIDE_WRITE_MARK_51aa\n' > "$TMP_DIR/outside-w1/workflow.md"
+outside_hash="$(hash_of "$TMP_DIR/outside-w1/workflow.md")"
+repo="$(new_repo write-outside-file)"
+rm -f "$repo/docs/WORKFLOW.md"
+ln -s "$TMP_DIR/outside-w1/workflow.md" "$repo/docs/WORKFLOW.md"
+printf '\nlocal edit\n' >> "$repo/docs/AGENT_GUIDE.md"
+guide_hash="$(hash_of "$repo/docs/AGENT_GUIDE.md")"
+run_script "update-harness --force refuses outside symlink target" \
+  "$ROOT/scripts/update-harness.sh" "$repo" --force
+expect_rc 1
+expect_has "LINK: docs/WORKFLOW.md symlink -> $TMP_DIR/outside-w1/workflow.md resolves outside the repository"
+expect_has "--force does not override this"
+expect_has "update stopped before changing files"
+expect_lacks "OUTSIDE_WRITE_MARK_51aa"
+[ "$(hash_of "$TMP_DIR/outside-w1/workflow.md")" = "$outside_hash" ] \
+  || fail "outside file changed"
+[ -L "$repo/docs/WORKFLOW.md" ] || fail "symlink was replaced despite the refusal"
+[ "$(hash_of "$repo/docs/AGENT_GUIDE.md")" = "$guide_hash" ] \
+  || fail "partial update: docs/AGENT_GUIDE.md was written despite the refusal"
+
+# 15b. Write guard: a dangling symlink to an outside path must not create the
+#      outside file (cp would create it through the link).
+repo="$(new_repo write-outside-dangling)"
+rm -f "$repo/docs/PROJECT_CONTEXT.md"
+ln -s "$TMP_DIR/outside-w1/created-by-cp.md" "$repo/docs/PROJECT_CONTEXT.md"
+run_script "update-harness --force refuses dangling outside symlink" \
+  "$ROOT/scripts/update-harness.sh" "$repo" --force
+expect_rc 1
+expect_has "LINK: docs/PROJECT_CONTEXT.md symlink ->"
+[ ! -e "$TMP_DIR/outside-w1/created-by-cp.md" ] \
+  || fail "file created outside the repository through a dangling symlink"
+
+# 15c. Write guard: appended/rewritten non-harness files (.gitignore) get the
+#      same refusal.
+printf 'node_modules/\n' > "$TMP_DIR/outside-w1/gitignore"
+outside_hash="$(hash_of "$TMP_DIR/outside-w1/gitignore")"
+repo="$(new_repo write-outside-gitignore)"
+rm -f "$repo/.gitignore"
+ln -s "$TMP_DIR/outside-w1/gitignore" "$repo/.gitignore"
+run_script "update-harness refuses outside .gitignore symlink" \
+  "$ROOT/scripts/update-harness.sh" "$repo" --force
+expect_rc 1
+expect_has "LINK: .gitignore symlink ->"
+[ "$(hash_of "$TMP_DIR/outside-w1/gitignore")" = "$outside_hash" ] \
+  || fail "outside .gitignore changed"
+
+# 16. Write guard: a symlinked parent directory resolving outside the
+#     repository. Existing files with drift (review-skills) and files that
+#     would be newly created inside it (design-skills, empty outside dir)
+#     are both refused; the outside trees keep their hashes.
+mkdir -p "$TMP_DIR/outside-w2/review-skills" "$TMP_DIR/outside-w2/design-skills"
+repo="$(new_repo write-outside-parent)"
+for f in "$repo"/docs/review-skills/*.md; do
+  { cat "$f"; printf 'OUTSIDE_PARENT_MARK_c3d0\n'; } \
+    > "$TMP_DIR/outside-w2/review-skills/$(basename "$f")"
+done
+rm -rf "$repo/docs/review-skills" "$repo/docs/design-skills"
+ln -s "$TMP_DIR/outside-w2/review-skills" "$repo/docs/review-skills"
+ln -s "../../outside-w2/design-skills" "$repo/docs/design-skills"
+before_tree="$(tree_hash "$TMP_DIR/outside-w2")"
+run_script "update-harness --force refuses symlinked parent directory" \
+  "$ROOT/scripts/update-harness.sh" "$repo" --force
+expect_rc 1
+expect_has "LINK: docs/review-skills/README.md resolves outside the repository through a symlinked parent directory"
+expect_has "LINK: docs/design-skills/FIGMA.md parent directory resolves outside the repository"
+expect_lacks "OUTSIDE_PARENT_MARK_c3d0"
+[ "$(tree_hash "$TMP_DIR/outside-w2")" = "$before_tree" ] \
+  || fail "files outside the repository changed through a symlinked parent"
+
+# 17. Write guard control: symlinks resolving inside the repository are
+#     replaced by regular files (the link itself), never written through, so
+#     the in-repo files they pointed to keep their content.
+repo="$(new_repo write-inside-links)"
+mkdir -p "$repo/.harness"
+mv "$repo/docs/WORKFLOW.md" "$repo/.harness/WORKFLOW.md"
+printf '\nlocal edit\n' >> "$repo/.harness/WORKFLOW.md"
+ln -s ../.harness/WORKFLOW.md "$repo/docs/WORKFLOW.md"
+mv "$repo/AGENTS.md" "$repo/.harness/AGENTS.md"
+printf '\nlocal edit\n' >> "$repo/.harness/AGENTS.md"
+ln -s .harness/AGENTS.md "$repo/AGENTS.md"
+printf 'node_modules/\n' > "$repo/.harness/gitignore"
+rm -f "$repo/.gitignore"
+ln -s .harness/gitignore "$repo/.gitignore"
+inside_tree="$(tree_hash "$repo/.harness")"
+run_script "update-harness --force replaces in-repo symlinks" \
+  "$ROOT/scripts/update-harness.sh" "$repo" --force
+expect_rc 0
+[ "$(tree_hash "$repo/.harness")" = "$inside_tree" ] \
+  || fail "update-harness wrote through an in-repo symlink"
+for f in docs/WORKFLOW.md AGENTS.md .gitignore; do
+  [ -f "$repo/$f" ] && [ ! -L "$repo/$f" ] || fail "$f is still a symlink"
+done
+cmp -s "$repo/docs/WORKFLOW.md" "$ROOT/templates/docs/WORKFLOW.md" \
+  || fail "docs/WORKFLOW.md does not match the template"
+grep -qxF 'node_modules/' "$repo/.gitignore" && grep -qxF '.context/' "$repo/.gitignore" \
+  || fail ".gitignore lost its content or the .context/ line"
+
+# 18. bootstrap.sh --force gets the same write guard: an outside file
+#     symlink and an outside parent directory are refused before anything is
+#     written (no partial bootstrap); outside files keep their hashes.
+mkdir -p "$TMP_DIR/outside-b1/docs"
+printf 'OUTSIDE_BOOT_MARK_e8f1\n' > "$TMP_DIR/outside-b1/agents.md"
+before_tree="$(tree_hash "$TMP_DIR/outside-b1")"
+dir="$TMP_DIR/boot-outside"
+mkdir -p "$dir"
+git -C "$dir" init -q
+ln -s "$TMP_DIR/outside-b1/agents.md" "$dir/AGENTS.md"
+ln -s "$TMP_DIR/outside-b1/docs" "$dir/docs"
+run_script "bootstrap --force refuses outside write targets" \
+  "$ROOT/scripts/bootstrap.sh" "$dir" --force
+expect_rc 1
+expect_has "LINK: AGENTS.md symlink -> $TMP_DIR/outside-b1/agents.md resolves outside the repository"
+expect_has "LINK: docs/WORKFLOW.md parent directory resolves outside the repository"
+expect_has "bootstrap stopped before changing files"
+expect_lacks "OUTSIDE_BOOT_MARK_e8f1"
+[ "$(tree_hash "$TMP_DIR/outside-b1")" = "$before_tree" ] \
+  || fail "bootstrap changed files outside the target"
+[ ! -e "$dir/CLAUDE.md" ] && [ ! -e "$dir/.gitignore" ] \
+  || fail "partial bootstrap: files written despite the refusal"
+
+# 18b. bootstrap.sh control: an in-repo symlink is replaced, not written through
+dir="$TMP_DIR/boot-inside"
+mkdir -p "$dir/.harness"
+git -C "$dir" init -q
+printf 'project notes\n' > "$dir/.harness/agents.md"
+ln -s .harness/agents.md "$dir/AGENTS.md"
+inside_hash="$(hash_of "$dir/.harness/agents.md")"
+run_script "bootstrap --force replaces in-repo symlink" \
+  "$ROOT/scripts/bootstrap.sh" "$dir" --force
+expect_rc 0
+[ "$(hash_of "$dir/.harness/agents.md")" = "$inside_hash" ] \
+  || fail "bootstrap wrote through an in-repo symlink"
+[ -f "$dir/AGENTS.md" ] && [ ! -L "$dir/AGENTS.md" ] || fail "AGENTS.md is still a symlink"
+cmp -s "$dir/AGENTS.md" "$ROOT/templates/AGENTS.md" || fail "AGENTS.md does not match the template"
 
 echo "check-harness-sync contract tests passed ($CASES cases)"

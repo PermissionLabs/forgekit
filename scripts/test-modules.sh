@@ -54,6 +54,7 @@ run "module shell syntax" syntax_check_each \
   "$ROOT/modules/host-adapters/test-codex-hook-adapter.sh" \
   "$ROOT/scripts/bootstrap.sh" \
   "$ROOT/scripts/check-harness-sync.sh" \
+  "$ROOT/scripts/lib/repo-paths.sh" \
   "$ROOT/scripts/test-check-harness-sync.sh" \
   "$ROOT/scripts/update-harness.sh" \
   "$ROOT/scripts/worktree-add.sh" \

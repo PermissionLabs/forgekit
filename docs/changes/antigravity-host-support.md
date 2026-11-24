@@ -51,7 +51,7 @@ host-neutral (no mandatory third root entrypoint file).
 | Track | Status | Changed paths | Verification | Risks |
 | --- | --- | --- | --- | --- |
 | Docs & Templates | Completed | `AGENTS.md`, `README.md`, `docs/*`, `templates/*` | `scripts/check-harness-sync.sh --forgekit` | Low — title-line diff preserves downstream compatibility |
-| Sync & Tests | Completed | `scripts/check-harness-sync.sh`, `scripts/update-harness.sh`, `scripts/bootstrap.sh`, `scripts/test-check-harness-sync.sh`, `scripts/test-modules.sh` | `bash scripts/test-modules.sh` | Medium — downstream `AGENTS.md`/`GEMINI.md` over 24,000 bytes now fail even with a `forgekit-override` marker (intentional: truncation drops rules silently) |
+| Sync & Tests | Completed | `scripts/check-harness-sync.sh`, `scripts/update-harness.sh`, `scripts/bootstrap.sh`, `scripts/lib/repo-paths.sh`, `scripts/test-check-harness-sync.sh`, `scripts/test-modules.sh` | `bash scripts/test-modules.sh` | Medium — downstream `AGENTS.md`/`GEMINI.md` over 24,000 bytes now fail even with a `forgekit-override` marker (intentional: truncation drops rules silently) |
 | Server / Frontend / App | Skipped | N/A | N/A | Harness docs/scripts repo only |
 
 ## Implementation Notes
@@ -97,6 +97,35 @@ no `readlink -f` / `realpath`). When the final sync check inside
 `update-harness.sh` fails, its hints follow the checker's drift classes:
 only `DRIFT`/`MISSING`/`STALE` suggest a `forgekit-override` marker.
 
+### Write guard (bootstrap.sh / update-harness.sh)
+
+`copy_file` used a plain `cp`, so with `--force` a harness file that is a
+symlink to a path outside the target repository (or sits under a symlinked
+parent directory) overwrote the outside file; a dangling outside link even
+created one, and `.gitignore` / `.context/workflow-state.json` were appended
+or rewritten through links the same way.
+
+- The resolver (`resolve_physical`, `path_escapes_repo`) moved to
+  `scripts/lib/repo-paths.sh`, sourced by all three scripts, so reads and
+  writes share one `cd -P` implementation. `write_target_problem` adds the
+  write-side rule: an existing (or dangling) target must resolve inside the
+  repository and be a regular file or symlink; a missing target's nearest
+  existing ancestor (what `mkdir -p` descends into) must resolve inside the
+  repository and be a directory.
+- Both scripts check every path they would write (harness files,
+  `.context/workflow-state.json`, `.gitignore`) before writing any of them.
+  One failing path stops the run with a `LINK:` line naming the path and
+  reason only, even with `--force`, so a refusal never leaves a partial
+  update. In `update-harness.sh` the guard runs before `has_override`/`cmp`,
+  so an outside file is not read either.
+- A symlink that resolves inside the repository is replaced by a regular
+  file (the link is removed, then the file written; `.gitignore` is
+  materialised from its current content before the append). Writing through
+  the link would change a different in-repo file than the one named — for
+  example a project-owned file the link points to — and the sync check reads
+  the named path either way, so replacing the link is the only behaviour
+  that keeps writes confined to the harness path.
+
 ## Documentation Updates
 
 - Updated docs: `README.md`, `AGENTS.md`, `templates/AGENTS.md`,
@@ -126,6 +155,14 @@ only `DRIFT`/`MISSING`/`STALE` suggest a `forgekit-override` marker.
   physical-path resolver, the guard removed from `check_exact`, and the old
   generic `update-harness.sh` failure hint restored each made the contract
   tests fail.
+- Mutation checks (write guard): the new tests fail with the HEAD scripts and
+  with each of these mutations — `write_target_problem` always passing, the
+  link removed before `cp` dropped (writes through in-repo links), the guard
+  call removed from `would_update_file`, the missing-target parent branch
+  removed, `replace_link_with_copy` made a no-op, the `bootstrap.sh`
+  refusal disabled, the `.gitignore` pre-check removed, `cd -P` replaced by a
+  logical `cd` in the shared resolver, and the guard moved from the
+  pre-check to write time (partial update).
 - Manual checks: Reviewed full `git diff` across root and `templates/`.
 
 ## Review Cycles
@@ -135,6 +172,7 @@ only `DRIFT`/`MISSING`/`STALE` suggest a `forgekit-override` marker.
 | 1 | Code + security (self-review) | Verified shell quoting, `mktemp -d` cleanup trap, portable `wc -c` / `-ef` checks, no secret exposure, backward-compatible `forgekit-override` warning behavior. | Clean (0 residual findings) |
 | 2 | Cross-review (Codex + Claude) | X1 `bash -n` only parsed the first file; X2/C5 cap applied to `CLAUDE.md`, host logic hard-coded by file name; C1 missing entrypoint aborted the run under `set -e`; C2 standalone `GEMINI.md` forced to match the template, no `update-harness.sh` pre-check, wrong remediation text; C3 `SIZE`/`FORMAT` only warned under override; C4 tests did not catch mutations; C6 host tool names stated as the review binding; C7 outside-repo entrypoint symlinks diffed to stderr. | Fixed in the cycle-2 commit; C6 ships the contract paragraph only, contract and adapters follow up. |
 | 3 | Cross-review (Codex) | X3 the outside-repo guard normalised paths logically, so `redirect/../file` through a directory symlink escaped it and outside content was diffed; X4 the `update-harness.sh` final failure hint suggested `forgekit-override` for `SIZE`/`FORMAT`; C7 residual `check_exact` diffed docs/skill files resolving outside the repository. | Fixed in the cycle-3 commit: physical-path resolver, guard before every diff, cause-specific hints. |
+| 4 | Follow-up (found during cycle 3, out of its scope) | `update-harness.sh` / `bootstrap.sh` wrote through symlinks resolving outside the target repository with `--force` (plain `cp`, `>>`, `touch`). | Fixed in the write-guard commit: shared `scripts/lib/repo-paths.sh`, all-paths pre-check, in-repo links replaced instead of followed. |
 
 ## Branch & Merge Evidence
 

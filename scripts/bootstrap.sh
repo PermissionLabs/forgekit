@@ -14,6 +14,11 @@ target's .gitignore.
 
 Refuses to overwrite existing harness files unless --force is passed.
 docs/PROJECT_CONTEXT.md is never overwritten (project-local content).
+
+Every path it would write is checked first. If any resolves outside the
+target (its own symlink, a symlinked parent directory, or a `link/..` path),
+nothing is written, even with --force. A symlink that resolves inside the
+target is replaced by a regular file, never written through.
 EOF
 }
 
@@ -51,6 +56,39 @@ fi
 target="$(cd "$target" && pwd -P)"
 source "$forgekit_root/scripts/check-target-paths.sh"
 
+# shellcheck source=lib/repo-paths.sh
+. "$forgekit_root/scripts/lib/repo-paths.sh"
+
+# Outside-target guard: check every path this script writes before writing
+# any of them, so a rejected path never leaves a partial bootstrap behind.
+write_targets=(
+  "AGENTS.md"
+  "CLAUDE.md"
+  "scripts/worktree-add.sh"
+  ".context/workflow-state.json"
+  ".gitignore"
+)
+while IFS= read -r src; do
+  rel="${src#$templates/}"
+  if [ "$rel" = "docs/PROJECT_CONTEXT.md" ] && [ -e "$target/$rel" ]; then
+    continue
+  fi
+  write_targets+=("$rel")
+done < <(find "$templates/docs" -type f | sort)
+
+unsafe=0
+for rel in "${write_targets[@]}"; do
+  if why="$(write_target_problem "$target/$rel" "$target")"; then
+    echo "LINK: $rel $why; --force does not override this" >&2
+    unsafe=1
+  fi
+done
+if [ "$unsafe" -ne 0 ]; then
+  echo "error: bootstrap stopped before changing files. Replace each LINK path with a" >&2
+  echo "       regular file inside the target (or remove it), then re-run." >&2
+  exit 1
+fi
+
 # Conflict check.
 conflicts=()
 check_paths=(
@@ -85,9 +123,7 @@ if [ "${#conflicts[@]}" -gt 0 ] && [ "$force" != "--force" ]; then
 fi
 
 copy_file() {
-  local src="$1" dst="$2"
-  mkdir -p "$(dirname "$dst")"
-  cp "$src" "$dst"
+  safe_copy_file "$1" "$2"
 }
 
 # Top-level entry points (Codex, Antigravity, and OpenCode read AGENTS.md; Claude reads CLAUDE.md).
@@ -111,13 +147,14 @@ while IFS= read -r src; do
 done < <(find "$templates/docs" -type f)
 
 # Seed compact workflow-state.
-mkdir -p "$target/.context"
-cp "$templates/.context/workflow-state.compact.example.json" "$target/.context/workflow-state.json"
+copy_file "$templates/.context/workflow-state.compact.example.json" "$target/.context/workflow-state.json"
 
 # Idempotently add .context/ to .gitignore.
 gitignore="$target/.gitignore"
-touch "$gitignore"
-if ! grep -qxF ".context/" "$gitignore"; then
+if [ ! -e "$gitignore" ] || ! grep -qxF ".context/" "$gitignore"; then
+  # Append to .gitignore itself, not to the file an in-repo link points to.
+  replace_link_with_copy "$gitignore"
+  touch "$gitignore"
   if [ -s "$gitignore" ] && [ "$(tail -c1 "$gitignore" | wc -l | tr -d ' ')" = "0" ]; then
     printf '\n' >> "$gitignore"
   fi

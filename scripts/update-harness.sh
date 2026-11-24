@@ -18,6 +18,12 @@ Always preserves:
     resume_protocol.phase_refs_source when jq is available
 
 Files carrying a forgekit-override marker are skipped.
+
+Every path it would write is checked first. If any resolves outside the
+target repository (its own symlink, a symlinked parent directory, or a
+`link/..` path), nothing is written, even with --force. A symlink that
+resolves inside the repository is replaced by a regular file, never written
+through.
 EOF
 }
 
@@ -55,6 +61,9 @@ fi
 target="$(cd "$target" && pwd -P)"
 source "$forgekit_root/scripts/check-target-paths.sh"
 
+# shellcheck source=lib/repo-paths.sh
+. "$forgekit_root/scripts/lib/repo-paths.sh"
+
 if ! git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "error: target is not a git repository: $target" >&2
   exit 1
@@ -66,10 +75,17 @@ has_override() {
     | grep -qE '^[[:space:]]*((<!--|#|//)[[:space:]]*forgekit-override:|"forgekit-override"[[:space:]]*:)'
 }
 
+# Pre-check for one write target (relative path $1). Reports the path and
+# the reason only; content is never read.
+guard_write_target() {
+  local rel="$1" why
+  why="$(write_target_problem "$target/$rel" "$target")" || return 0
+  echo "LINK: $rel $why; --force does not override this. Fix: replace it with a regular file inside the repository" >&2
+  return 1
+}
+
 copy_file() {
-  local src="$1" dst="$2"
-  mkdir -p "$(dirname "$dst")"
-  cp "$src" "$dst"
+  safe_copy_file "$1" "$2"
 }
 
 same_entrypoint_body() {
@@ -86,7 +102,7 @@ copy_entrypoint_preserving_title() {
   local src="$1" dst="$2" tmp
   mkdir -p "$(dirname "$dst")"
   if [ ! -e "$dst" ]; then
-    cp "$src" "$dst"
+    safe_copy_file "$src" "$dst"
     return
   fi
   tmp="$(mktemp "$dst.tmp.XXXXXXXX")"
@@ -95,6 +111,11 @@ copy_entrypoint_preserving_title() {
     tail -n +2 "$src"
   } > "$tmp"
   preserve_mode "$dst" "$tmp"
+  # Replace an in-repo symlink itself; mv onto a link to a directory would
+  # move the file into that directory instead.
+  if [ -L "$dst" ]; then
+    rm -f "$dst"
+  fi
   mv "$tmp" "$dst"
 }
 
@@ -107,6 +128,9 @@ would_update_file() {
   if [ "$rel" = "docs/PROJECT_CONTEXT.md" ] && [ -e "$dst" ]; then
     return 0
   fi
+
+  # Before has_override/cmp so an outside file is never read.
+  guard_write_target "$rel" || return 1
 
   if [ -e "$dst" ]; then
     if has_override "$dst"; then
@@ -208,11 +232,16 @@ while IFS= read -r src; do
   would_update_file "$src" "$rel" || drift=1
 done < <(find "$templates/docs" -type f | sort)
 
+# Other files this script writes or appends to.
+guard_write_target ".context/workflow-state.json" || drift=1
+guard_write_target ".gitignore" || drift=1
+
 if [ "$drift" -ne 0 ]; then
   echo "" >&2
   echo "update stopped before changing files." >&2
   echo "Review the drift. DRIFT lines: re-run with --force if those harness files should match ForgeKit." >&2
-  echo "LINK lines: apply the fix named on the line first (--force does not repair symlinks)." >&2
+  echo "LINK lines: apply the fix named on the line first (--force does not repair symlinks" >&2
+  echo "or allow writes that resolve outside the repository)." >&2
   exit 1
 fi
 
@@ -254,6 +283,9 @@ elif command -v jq >/dev/null 2>&1; then
       echo "ok:   .context/workflow-state.json resume_protocol"
     else
       preserve_mode "$state_file" "$tmp"
+      if [ -L "$state_file" ]; then
+        rm -f "$state_file"
+      fi
       mv "$tmp" "$state_file"
       echo "update: .context/workflow-state.json resume_protocol"
     fi
@@ -266,8 +298,10 @@ else
 fi
 
 gitignore="$target/.gitignore"
-touch "$gitignore"
-if ! grep -qxF ".context/" "$gitignore"; then
+if [ ! -e "$gitignore" ] || ! grep -qxF ".context/" "$gitignore"; then
+  # Append to .gitignore itself, not to the file an in-repo link points to.
+  replace_link_with_copy "$gitignore"
+  touch "$gitignore"
   if [ -s "$gitignore" ] && [ "$(tail -c1 "$gitignore" | wc -l | tr -d ' ')" = "0" ]; then
     printf '\n' >> "$gitignore"
   fi

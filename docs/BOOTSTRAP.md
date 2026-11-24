@@ -258,7 +258,11 @@ pointer.
   rules silently, so exceeding the cap is always drift.
 - Any checked file (root entry points, docs, skills) that resolves outside the
   repository through a symlink — its own or a parent directory's — fails the
-  sync check as `LINK`; its content is not printed.
+  sync check as `LINK`; its content is not printed. `bootstrap.sh` and
+  `update-harness.sh` check every path they would write first and refuse the
+  whole run (even with `--force`) when one resolves outside the repository;
+  a symlink resolving inside it is replaced by a regular file, never written
+  through.
 - Skills under `.agents/skills/<name>/SKILL.md` are natively discovered by both
   Codex and Antigravity.
 
