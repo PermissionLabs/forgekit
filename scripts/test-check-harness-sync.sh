@@ -899,6 +899,71 @@ expect_has "update stopped before changing files"
 [ "$(tree_state "$repo")" = "$repo_tree" ] || fail "files changed despite the refusal"
 [ -L "$repo/docs/WORKFLOW.md" ] || fail "docs/WORKFLOW.md link was replaced"
 
+# 26c. X8: on a case-insensitive filesystem the same managed hop can be
+#      spelled differently (docs/workflow.md, DOCS/WORKFLOW.md); the pre-check
+#      must match it by entry identity, not spelling, and still refuse first.
+mkdir -p "$TMP_DIR/case-probe"
+: > "$TMP_DIR/case-probe/CaseProbe"
+if [ -e "$TMP_DIR/case-probe/caseprobe" ]; then
+  x8_n=0
+  for variant in docs/workflow.md DOCS/WORKFLOW.md; do
+    x8_n=$((x8_n + 1))
+    repo="$(new_repo "x8-case-$x8_n")"
+    rm "$repo/docs/WORKFLOW.md"
+    ln -s ../AGENTS.md "$repo/docs/WORKFLOW.md"
+    ln -s "$variant" "$repo/GEMINI.md"
+    repo_tree="$(tree_state "$repo")"
+    run_script "update-harness --force refuses GEMINI.md -> $variant (case variant of a managed file)" \
+      "$ROOT/scripts/update-harness.sh" "$repo" --force
+    expect_rc 1
+    expect_has "LINK: GEMINI.md"
+    expect_has "update stopped before changing files"
+    [ "$(tree_state "$repo")" = "$repo_tree" ] || fail "files changed despite the refusal"
+    [ -L "$repo/docs/WORKFLOW.md" ] || fail "docs/WORKFLOW.md link was replaced"
+  done
+else
+  echo "skip: X8 case-variant tests (temp filesystem is case-sensitive)"
+fi
+
+# 26d. A11: the same refusal for a hard-coded managed path (CLAUDE.md) and
+#      for an absolute link hop; a multi-hop chain through unmanaged paths
+#      that reaches AGENTS.md is still accepted (control).
+repo="$(new_repo a11-claude-hop)"
+rm "$repo/CLAUDE.md"
+ln -s AGENTS.md "$repo/CLAUDE.md"
+ln -s CLAUDE.md "$repo/GEMINI.md"
+repo_tree="$(tree_state "$repo")"
+run_script "update-harness --force refuses GEMINI.md chain through CLAUDE.md" \
+  "$ROOT/scripts/update-harness.sh" "$repo" --force
+expect_rc 1
+expect_has "LINK: GEMINI.md reaches AGENTS.md through CLAUDE.md"
+expect_has "update stopped before changing files"
+[ "$(tree_state "$repo")" = "$repo_tree" ] || fail "files changed despite the refusal"
+
+repo="$(new_repo a11-absolute-hop)"
+rm "$repo/docs/WORKFLOW.md"
+ln -s ../AGENTS.md "$repo/docs/WORKFLOW.md"
+ln -s "$repo/docs/WORKFLOW.md" "$repo/GEMINI.md"
+repo_tree="$(tree_state "$repo")"
+run_script "update-harness --force refuses an absolute GEMINI.md link to a managed file" \
+  "$ROOT/scripts/update-harness.sh" "$repo" --force
+expect_rc 1
+expect_has "LINK: GEMINI.md reaches AGENTS.md through docs/WORKFLOW.md"
+expect_has "update stopped before changing files"
+[ "$(tree_state "$repo")" = "$repo_tree" ] || fail "files changed despite the refusal"
+
+repo="$(new_repo a11-unmanaged-chain)"
+mkdir -p "$repo/alias"
+ln -s ../AGENTS.md "$repo/alias/one.md"
+ln -s one.md "$repo/alias/two.md"
+ln -s alias/two.md "$repo/GEMINI.md"
+run_script "update-harness --force keeps GEMINI.md chain through unmanaged links" \
+  "$ROOT/scripts/update-harness.sh" "$repo" --force
+expect_rc 0
+[ -L "$repo/GEMINI.md" ] && [ -L "$repo/alias/two.md" ] && [ -L "$repo/alias/one.md" ] \
+  || fail "the unmanaged alias chain was replaced"
+[ "$repo/GEMINI.md" -ef "$repo/AGENTS.md" ] || fail "GEMINI.md no longer resolves to AGENTS.md"
+
 # 27. A9: CRLF frontmatter and frontmatter on a standalone GEMINI.md.
 repo="$(new_repo crlf-frontmatter)"
 {

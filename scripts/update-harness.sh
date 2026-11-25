@@ -221,19 +221,46 @@ managed_write_paths() {
   done
 }
 
+# Inode of the directory entry $1 itself (lstat: a final symlink is not
+# followed; ls -d does not follow symlink operands on BSD or GNU).
+entry_inode() {
+  ls -di -- "$1" 2>/dev/null | awk 'NR == 1 { print $1 }'
+}
+
+# True when $1 and $2 name the same existing directory entry. Compares
+# filesystem identity, not spelling, so case variants on a case-insensitive
+# filesystem (docs/workflow.md, DOCS/WORKFLOW.md) match: the parents must be
+# the same directory and the entries the same inode, without following a
+# final symlink (a link hop is its own entry, distinct from its target).
+same_entry() {
+  local a="$1" b="$2" ia ib
+  { [ -e "$a" ] || [ -L "$a" ]; } || return 1
+  { [ -e "$b" ] || [ -L "$b" ]; } || return 1
+  [ "$(dirname "$a")" -ef "$(dirname "$b")" ] || return 1
+  ia="$(entry_inode "$a")"
+  ib="$(entry_inode "$b")"
+  [ -n "$ia" ] && [ "$ia" = "$ib" ]
+}
+
 # True when a hop of the link chain starting at $1 (before it reaches $2) is
-# one of the newline-separated physical paths in $3. Prints that hop.
+# the same directory entry as one of the newline-separated physical paths in
+# $3 (compared by identity, see same_entry). Prints that hop.
 link_chain_hop_in() {
-  local p="$1" want="$2" set="$3" dir base link n=0
+  local p="$1" want="$2" set="$3" dir base link m n=0
   while :; do
     dir="$(CDPATH='' cd -P "$(dirname "$p")" 2>/dev/null && pwd -P)" || return 1
     base="$(basename "$p")"
     p="${dir%/}/$base"
     [ "$p" = "$want" ] && return 1
-    if printf '%s\n' "$set" | grep -qxF -- "$p"; then
-      printf '%s\n' "$p"
-      return 0
-    fi
+    while IFS= read -r m; do
+      [ -n "$m" ] || continue
+      if [ "$m" = "$p" ] || same_entry "$p" "$m"; then
+        printf '%s\n' "$p"
+        return 0
+      fi
+    done <<EOS
+$set
+EOS
     [ -L "$p" ] || return 1
     n=$((n + 1))
     [ "$n" -le 40 ] || return 1
