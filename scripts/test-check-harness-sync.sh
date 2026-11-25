@@ -883,6 +883,22 @@ expect_rc 0
 [ "$repo/GEMINI.md" -ef "$repo/AGENTS.md" ] && [ ! -L "$repo/AGENTS.md" ] \
   || fail "GEMINI.md no longer resolves to the regular AGENTS.md"
 
+# 26b. X7: a GEMINI.md chain that reaches AGENTS.md only through a file the
+#      updater replaces (docs/WORKFLOW.md becomes a regular template copy)
+#      would stop being an alias after the update; refuse before any change.
+repo="$(new_repo x7-managed-hop)"
+rm "$repo/docs/WORKFLOW.md"
+ln -s ../AGENTS.md "$repo/docs/WORKFLOW.md"
+ln -s docs/WORKFLOW.md "$repo/GEMINI.md"
+repo_tree="$(tree_state "$repo")"
+run_script "update-harness --force refuses GEMINI.md chain through a managed file" \
+  "$ROOT/scripts/update-harness.sh" "$repo" --force
+expect_rc 1
+expect_has "LINK: GEMINI.md"
+expect_has "update stopped before changing files"
+[ "$(tree_state "$repo")" = "$repo_tree" ] || fail "files changed despite the refusal"
+[ -L "$repo/docs/WORKFLOW.md" ] || fail "docs/WORKFLOW.md link was replaced"
+
 # 27. A9: CRLF frontmatter and frontmatter on a standalone GEMINI.md.
 repo="$(new_repo crlf-frontmatter)"
 {

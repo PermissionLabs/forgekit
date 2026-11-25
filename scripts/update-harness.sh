@@ -200,11 +200,60 @@ update_file() {
 # --force, before any file changes. A directory is refused the same way; a
 # regular file is project-managed and only warned about. Host load rules
 # (byte cap, frontmatter) are enforced by the final check-harness-sync.sh run.
+# A chain whose hops pass through another file this script writes (e.g.
+# GEMINI.md -> docs/WORKFLOW.md -> ../AGENTS.md) is refused too: that hop is
+# replaced by a regular file below, which would break the alias mid-update.
+
+# Physical paths (one per line) of every file this script may write other
+# than AGENTS.md: parent resolved with cd -P, final component kept as is, the
+# same form link_chain_reaches compares hops in. Missing parents are skipped
+# (no existing hop can live there).
+managed_write_paths() {
+  local rel dir src
+  {
+    printf '%s\n' CLAUDE.md scripts/worktree-add.sh .context/workflow-state.json .gitignore
+    find "$templates/docs" -type f | while IFS= read -r src; do
+      printf '%s\n' "${src#$templates/}"
+    done
+  } | while IFS= read -r rel; do
+    dir="$(CDPATH='' cd -P "$(dirname "$target/$rel")" 2>/dev/null && pwd -P)" || continue
+    printf '%s\n' "${dir%/}/$(basename "$rel")"
+  done
+}
+
+# True when a hop of the link chain starting at $1 (before it reaches $2) is
+# one of the newline-separated physical paths in $3. Prints that hop.
+link_chain_hop_in() {
+  local p="$1" want="$2" set="$3" dir base link n=0
+  while :; do
+    dir="$(CDPATH='' cd -P "$(dirname "$p")" 2>/dev/null && pwd -P)" || return 1
+    base="$(basename "$p")"
+    p="${dir%/}/$base"
+    [ "$p" = "$want" ] && return 1
+    if printf '%s\n' "$set" | grep -qxF -- "$p"; then
+      printf '%s\n' "$p"
+      return 0
+    fi
+    [ -L "$p" ] || return 1
+    n=$((n + 1))
+    [ "$n" -le 40 ] || return 1
+    link="$(readlink "$p")" || return 1
+    case "$link" in
+      /*) p="$link" ;;
+      *) p="${dir%/}/$link" ;;
+    esac
+  done
+}
+
 would_keep_gemini_alias() {
-  local f="$target/GEMINI.md" root_phys link
+  local f="$target/GEMINI.md" root_phys link hop
   if [ -L "$f" ]; then
     root_phys="$(CDPATH='' cd -P "$target" && pwd -P)"
     if link_chain_reaches "$f" "$root_phys/AGENTS.md"; then
+      if hop="$(link_chain_hop_in "$f" "$root_phys/AGENTS.md" "$(managed_write_paths)")"; then
+        echo "LINK: GEMINI.md reaches AGENTS.md through ${hop#$root_phys/}, which update-harness replaces with a regular file; --force does not fix this. Fix: (cd \"$target\" && ln -sfn AGENTS.md GEMINI.md)" >&2
+        return 1
+      fi
       return 0
     fi
     link="$(readlink "$f")"
