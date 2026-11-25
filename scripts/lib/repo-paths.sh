@@ -32,6 +32,31 @@ resolve_physical() {
   printf '%s\n' "$p"
 }
 
+# True when the symlink chain starting at $1 passes through the physical
+# path $2 (checked at every hop, $1 included, before the hop is followed),
+# so `GEMINI.md -> AGENTS.md -> elsewhere` reaches AGENTS.md while a link
+# that bypasses it to the same final file does not. $2 need not exist.
+link_chain_reaches() {
+  local p="$1" want="$2" dir base link n=0
+  while :; do
+    dir="$(CDPATH='' cd -P "$(dirname "$p")" 2>/dev/null && pwd -P)" || return 1
+    base="$(basename "$p")"
+    case "$base" in
+      .|..) return 1 ;;
+    esac
+    p="${dir%/}/$base"
+    [ "$p" = "$want" ] && return 0
+    [ -L "$p" ] || return 1
+    n=$((n + 1))
+    [ "$n" -le 40 ] || return 1
+    link="$(readlink "$p")" || return 1
+    case "$link" in
+      /*) p="$link" ;;
+      *) p="${dir%/}/$link" ;;
+    esac
+  done
+}
+
 # True when $1 exists (or is a dangling symlink) and physically resolves
 # outside repo root $2, through a symlink in the file itself or in any parent
 # directory, or cannot be resolved at all.
@@ -49,16 +74,20 @@ path_escapes_repo() {
 # Write-side guard. Prints a one-line reason and returns 0 when writing a
 # regular file at $1 could change anything outside repo root $2:
 #   - $1 exists (or is a dangling symlink) and resolves outside the repo;
-#   - $1 exists and is neither a regular file nor a symlink (a directory);
+#   - $1 exists and its physical parent directory (where the writers unlink
+#     it, create the sibling temp file and rename) is outside the repo, even
+#     when $1 itself is a link pointing back inside;
+#   - $1 exists and is not a regular file, or is a symlink to an existing
+#     non-regular file (a directory: mv onto it would move into it);
 #   - $1 does not exist and its nearest existing ancestor (the directory
 #     mkdir -p would descend into) resolves outside the repo, cannot be
 #     resolved, or is not a directory.
 # Returns 1 (prints nothing) when the write is confined to the repository.
-# Never reads file content. A symlink that resolves inside the repo passes;
-# callers replace the link itself (safe_copy_file / replace_link_with_copy)
-# instead of writing through it.
+# Never reads file content. A symlink that resolves to a regular file (or
+# dangles) inside the repo passes; callers replace the link itself
+# (safe_copy_file / commit_sibling_tmp) instead of writing through it.
 write_target_problem() {
-  local f="$1" root="$2" root_phys p resolved
+  local f="$1" root="$2" root_phys p resolved parent_phys
   root_phys="$(CDPATH='' cd -P "$root" 2>/dev/null && pwd -P)" || {
     echo "repository root cannot be resolved"
     return 0
@@ -72,7 +101,23 @@ write_target_problem() {
       fi
       return 0
     fi
-    if [ ! -L "$f" ] && [ ! -f "$f" ]; then
+    parent_phys="$(CDPATH='' cd -P "$(dirname "$f")" 2>/dev/null && pwd -P)" || {
+      echo "parent directory cannot be resolved"
+      return 0
+    }
+    case "$parent_phys" in
+      "$root_phys"|"$root_phys"/*) ;;
+      *)
+        echo "parent directory resolves outside the repository (the link is replaced there)"
+        return 0
+        ;;
+    esac
+    if [ -L "$f" ]; then
+      if [ -e "$f" ] && [ ! -f "$f" ]; then
+        echo "symlink -> $(readlink "$f") resolves to a non-regular file"
+        return 0
+      fi
+    elif [ ! -f "$f" ]; then
       echo "exists and is not a regular file"
       return 0
     fi

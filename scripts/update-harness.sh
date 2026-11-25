@@ -107,13 +107,12 @@ copy_entrypoint_preserving_title() {
     safe_copy_file "$src" "$dst"
     return
   fi
-  make_sibling_tmp "$dst"
-  # Explicit status check: bash 3.2 does not apply errexit to a failed
-  # redirection on a compound command, which would commit an empty file.
-  {
-    head -n 1 "$dst"
-    tail -n +2 "$src"
-  } > "$FORGEKIT_TMP" || return 1
+  make_sibling_tmp "$dst" || return 1
+  # Each step is checked on its own: errexit is off on the left of `||`, so
+  # a grouped `{ head; tail; } > tmp || return 1` let a failed head (an
+  # unreadable file) commit a body without its title line.
+  head -n 1 "$dst" > "$FORGEKIT_TMP" || return 1
+  tail -n +2 "$src" >> "$FORGEKIT_TMP" || return 1
   preserve_mode "$dst" "$FORGEKIT_TMP"
   # Replaces an in-repo symlink itself, never the file it points to.
   commit_sibling_tmp "$dst"
@@ -194,22 +193,26 @@ update_file() {
 }
 
 # GEMINI.md is an optional alias of AGENTS.md that this script never writes.
-# A symlink must resolve to AGENTS.md (--force cannot repair it, so this
-# blocks even with --force); a regular file is project-managed and only
-# warned about. Host load rules (byte cap, frontmatter) are enforced by the
-# final check-harness-sync.sh run.
+# A symlink must reach the AGENTS.md path itself (directly or through other
+# links): AGENTS.md may be replaced by a new regular file below, so a link
+# that only shares its final target (both linking to .harness/AGENTS.md)
+# would stop matching. --force cannot repair it, so this blocks even with
+# --force, before any file changes. A directory is refused the same way; a
+# regular file is project-managed and only warned about. Host load rules
+# (byte cap, frontmatter) are enforced by the final check-harness-sync.sh run.
 would_keep_gemini_alias() {
-  local f="$target/GEMINI.md" a="$target/AGENTS.md" link
+  local f="$target/GEMINI.md" root_phys link
   if [ -L "$f" ]; then
-    if [ -e "$f" ] && [ -e "$a" ] && [ "$f" -ef "$a" ]; then
+    root_phys="$(CDPATH='' cd -P "$target" && pwd -P)"
+    if link_chain_reaches "$f" "$root_phys/AGENTS.md"; then
       return 0
     fi
     link="$(readlink "$f")"
-    # AGENTS.md is about to be created; a relative link to it will resolve.
-    if [ ! -e "$a" ] && { [ "$link" = "AGENTS.md" ] || [ "$link" = "./AGENTS.md" ]; }; then
-      return 0
-    fi
-    echo "LINK: GEMINI.md is a symlink (-> $link) that does not resolve to AGENTS.md; --force does not fix this. Fix: (cd \"$target\" && ln -sfn AGENTS.md GEMINI.md), or remove it" >&2
+    echo "LINK: GEMINI.md is a symlink (-> $link) that does not resolve through AGENTS.md; --force does not fix this. Fix: (cd \"$target\" && ln -sfn AGENTS.md GEMINI.md), or remove it" >&2
+    return 1
+  fi
+  if [ -e "$f" ] && [ ! -f "$f" ]; then
+    echo "LINK: GEMINI.md is not a regular file or a symlink to AGENTS.md; --force does not fix this. Fix: remove it, or (cd \"$target\" && ln -sfn AGENTS.md GEMINI.md)" >&2
     return 1
   fi
   if [ -f "$f" ]; then
@@ -301,7 +304,9 @@ if [ ! -e "$gitignore" ] || ! grep -qxF ".context/" "$gitignore"; then
     # link becomes a regular copy with the line added in the same temp write.
     replace_link_with_copy "$gitignore" ".context/"
   else
-    touch "$gitignore"
+    # No `touch` first: under umask 0222 it would create a read-only file
+    # the append below cannot open. A missing file is created by the
+    # append's own open, which writes it even when its mode is read-only.
     if [ -s "$gitignore" ] && [ "$(tail -c1 "$gitignore" | wc -l | tr -d ' ')" = "0" ]; then
       printf '\n' >> "$gitignore"
     fi

@@ -159,7 +159,9 @@ if [ ! -e "$gitignore" ] || ! grep -qxF ".context/" "$gitignore"; then
     # link becomes a regular copy with the line added in the same temp write.
     replace_link_with_copy "$gitignore" ".context/"
   else
-    touch "$gitignore"
+    # No `touch` first: under umask 0222 it would create a read-only file
+    # the append below cannot open. A missing file is created by the
+    # append's own open, which writes it even when its mode is read-only.
     if [ -s "$gitignore" ] && [ "$(tail -c1 "$gitignore" | wc -l | tr -d ' ')" = "0" ]; then
       printf '\n' >> "$gitignore"
     fi

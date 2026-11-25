@@ -136,6 +136,43 @@ if ! mkdir -p "$CTX_DIR"; then
   exit 1
 fi
 
+# The checkout may contain committed links at .context or at the state file.
+# Seeding writes a temp file in .context and renames it onto the state file,
+# so .context must physically resolve inside the worktree and the state path
+# must be absent, a regular file, or a link to one (mv onto a link to a
+# directory would move the temp file into that directory). This script is
+# copied into product repos on its own, so the check is inline (cd -P /
+# pwd -P, portable to bash 3.2 and BSD) rather than from scripts/lib.
+seed_target_problem() {
+  local ctx_phys
+  ctx_phys="$(CDPATH='' cd -P "$CTX_DIR" 2>/dev/null && pwd -P)" || {
+    echo ".context cannot be resolved"
+    return 0
+  }
+  case "$ctx_phys" in
+    "$ABS_WORKTREE"/*) ;;
+    *)
+      echo ".context resolves outside the worktree"
+      return 0
+      ;;
+  esac
+  if [ -L "$STATE_FILE" ] && [ ! -f "$STATE_FILE" ]; then
+    echo ".context/workflow-state.json is a symlink that does not resolve to a regular file"
+    return 0
+  fi
+  if [ -e "$STATE_FILE" ] && [ ! -f "$STATE_FILE" ]; then
+    echo ".context/workflow-state.json exists and is not a regular file"
+    return 0
+  fi
+  return 1
+}
+
+if seed_problem="$(seed_target_problem)"; then
+  echo "error: refusing to seed workflow state: $seed_problem" >&2
+  cleanup_incomplete_worktree
+  exit 1
+fi
+
 if [ -f "$STATE_FILE" ]; then
   echo "warn: workflow state already exists, leaving it unchanged: $STATE_FILE" >&2
 else

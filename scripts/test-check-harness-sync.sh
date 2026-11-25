@@ -695,18 +695,333 @@ if command -v jq >/dev/null 2>&1; then
     || fail "seeded state mode $(mode_of "$wt_path/.context/workflow-state.json"), want 444"
   expect_no_tmp "$wt_path/.context"
 
-  # A failed rename removes the seed temp file and the incomplete worktree.
+  # A failed rename removes the incomplete worktree (the temp-file cleanup
+  # itself is asserted in a kept worktree further below: here `worktree
+  # remove` deletes the seed directory either way).
   mkdir -p "$TMP_DIR/failing-mv-shim"
   printf '#!/bin/sh\nexit 1\n' > "$TMP_DIR/failing-mv-shim/mv"
   chmod +x "$TMP_DIR/failing-mv-shim/mv"
   wt_path="$TMP_DIR/mvfail-wt"
-  LABEL="worktree-add cleans its temp file when the rename fails"
+  LABEL="worktree-add removes the incomplete worktree when the rename fails"
   CASES=$((CASES + 1))
   capture env PATH="$TMP_DIR/failing-mv-shim:$PATH" bash "$wt_src/scripts/worktree-add.sh" "$wt_path" -b mvfail-task HEAD
   expect_rc 1
   expect_has "error: failed to seed workflow state"
   [ ! -e "$wt_path" ] || fail "incomplete worktree left behind"
-  expect_no_tmp "$wt_src"
+fi
+
+# ── r5 (A1–A9) ────────────────────────────────────────────────────────────
+# Every entry under a directory (links included, with their targets) plus
+# regular-file hashes, so a new temp file, a replaced link or a changed
+# file outside the repository all change the value.
+tree_state() {
+  (cd "$1" && find . -print | sort && find . -type l -exec readlink {} \; | sort)
+  tree_hash "$1"
+}
+
+# 22. A1: an outside-linked parent directory holding a symlink back inside
+#     the repository. resolve_physical of the final target lands inside, but
+#     the write (unlink + copy, or sibling temp + rename) happens in the
+#     outside directory. Both writers must refuse, even without --force.
+mkdir -p "$TMP_DIR/outside-a1u" "$TMP_DIR/outside-a1b"
+repo="$(new_repo a1-update)"
+rm -rf "$repo/.context"
+ln -s "$TMP_DIR/outside-a1u" "$repo/.context"
+ln -s "$repo/a1-inside-dangling" "$TMP_DIR/outside-a1u/workflow-state.json"
+before_tree="$(tree_state "$TMP_DIR/outside-a1u")"
+run_script "update-harness refuses an outside parent holding a link back inside" \
+  "$ROOT/scripts/update-harness.sh" "$repo"
+expect_rc 1
+expect_has "LINK: .context/workflow-state.json"
+expect_has "update stopped before changing files"
+[ "$(tree_state "$TMP_DIR/outside-a1u")" = "$before_tree" ] \
+  || fail "update-harness wrote into an outside parent directory"
+
+dir="$TMP_DIR/a1-boot"
+mkdir -p "$dir/docs"
+git -C "$dir" init -q
+printf '{}\n' > "$dir/docs/inside.json"
+ln -s "$TMP_DIR/outside-a1b" "$dir/.context"
+ln -s "$dir/docs/inside.json" "$TMP_DIR/outside-a1b/workflow-state.json"
+before_tree="$(tree_state "$TMP_DIR/outside-a1b")"
+repo_tree="$(tree_state "$dir")"
+run_script "bootstrap refuses an outside parent holding a link back inside" \
+  "$ROOT/scripts/bootstrap.sh" "$dir"
+expect_rc 1
+expect_has "LINK: .context/workflow-state.json"
+expect_has "bootstrap stopped before changing files"
+[ "$(tree_state "$TMP_DIR/outside-a1b")" = "$before_tree" ] \
+  || fail "bootstrap wrote into an outside parent directory"
+[ "$(tree_state "$dir")" = "$repo_tree" ] || fail "partial bootstrap despite the refusal"
+
+# 22b. A8: .context/workflow-state.json and scripts/worktree-add.sh as
+#      direct outside links are refused by both writers.
+mkdir -p "$TMP_DIR/outside-a8"
+printf '{"outside":true}\n' > "$TMP_DIR/outside-a8/state.json"
+printf 'OUTSIDE_A8_SCRIPT\n' > "$TMP_DIR/outside-a8/wt.sh"
+before_tree="$(tree_state "$TMP_DIR/outside-a8")"
+repo="$(new_repo a8-update)"
+rm -f "$repo/.context/workflow-state.json" "$repo/scripts/worktree-add.sh"
+ln -s "$TMP_DIR/outside-a8/state.json" "$repo/.context/workflow-state.json"
+ln -s "$TMP_DIR/outside-a8/wt.sh" "$repo/scripts/worktree-add.sh"
+run_script "update-harness --force refuses outside state and helper links" \
+  "$ROOT/scripts/update-harness.sh" "$repo" --force
+expect_rc 1
+expect_has "LINK: .context/workflow-state.json symlink ->"
+expect_has "LINK: scripts/worktree-add.sh symlink ->"
+expect_lacks "OUTSIDE_A8_SCRIPT"
+[ "$(tree_state "$TMP_DIR/outside-a8")" = "$before_tree" ] || fail "outside files changed"
+
+dir="$TMP_DIR/a8-boot"
+mkdir -p "$dir/.context" "$dir/scripts"
+git -C "$dir" init -q
+ln -s "$TMP_DIR/outside-a8/state.json" "$dir/.context/workflow-state.json"
+ln -s "$TMP_DIR/outside-a8/wt.sh" "$dir/scripts/worktree-add.sh"
+run_script "bootstrap --force refuses outside state and helper links" \
+  "$ROOT/scripts/bootstrap.sh" "$dir" --force
+expect_rc 1
+expect_has "LINK: .context/workflow-state.json symlink ->"
+expect_has "LINK: scripts/worktree-add.sh symlink ->"
+[ "$(tree_state "$TMP_DIR/outside-a8")" = "$before_tree" ] || fail "outside files changed"
+
+# 23. A3: the checker never lists or reads files of a docs/ directory that
+#     resolves outside the repository (stale scan and *_TEMPLATE.md scan).
+mkdir -p "$TMP_DIR/outside-a3/docs/review-skills" "$TMP_DIR/outside-a3/docs/changes"
+printf '<!-- forgekit-override: x -->\nA3_PRIVATE\n' > "$TMP_DIR/outside-a3/docs/review-skills/private-a3.md"
+printf 'secret\n' > "$TMP_DIR/outside-a3/docs/changes/SECRET_A3_TEMPLATE.md"
+repo="$(new_repo a3-docs-outside)"
+rm -rf "$repo/docs"
+ln -s "$TMP_DIR/outside-a3/docs" "$repo/docs"
+run_check "checker does not scan an outside docs/ directory" "$repo"
+expect_rc 1
+expect_has "LINK:  docs/review-skills resolves outside the repository"
+expect_lacks "private-a3.md"
+expect_lacks "SECRET_A3_TEMPLATE"
+
+# 24. A4/A9: a missing .gitignore is created under umask 0222.
+repo="$(new_repo a4-update)"
+rm -f "$repo/.gitignore"
+LABEL="update-harness creates a missing .gitignore under umask 0222"
+CASES=$((CASES + 1))
+capture bash -c 'umask 0222; exec bash "$0" "$1"' "$ROOT/scripts/update-harness.sh" "$repo"
+expect_rc 0
+expect_has "update: .gitignore"
+[ "$(cat "$repo/.gitignore")" = ".context/" ] || fail ".gitignore content wrong"
+
+repo="$(new_repo a4-boot)"
+rm -f "$repo/.gitignore"
+LABEL="bootstrap --force creates a missing .gitignore under umask 0222"
+CASES=$((CASES + 1))
+capture bash -c 'umask 0222; exec bash "$0" "$1" --force' "$ROOT/scripts/bootstrap.sh" "$repo"
+expect_rc 0
+[ "$(cat "$repo/.gitignore")" = ".context/" ] || fail ".gitignore content wrong"
+
+# 25. A5: a failed read of the current entrypoint title aborts the update;
+#     nothing is committed and no temp file is left. An in-repo symlink to a
+#     directory is refused by the pre-check.
+repo="$(new_repo a5-unreadable)"
+printf '\nlocal edit\n' >> "$repo/AGENTS.md"
+chmod 000 "$repo/AGENTS.md"
+if [ ! -r "$repo/AGENTS.md" ]; then
+  run_script "update-harness --force aborts when the title cannot be read" \
+    "$ROOT/scripts/update-harness.sh" "$repo" --force
+  [ "$RC" -ne 0 ] || fail "expected a non-zero exit"
+  expect_lacks "copy: AGENTS.md"
+  chmod 644 "$repo/AGENTS.md"
+  [ "$(head -n 1 "$repo/AGENTS.md")" = "# Agent Entry Point" ] || fail "AGENTS.md title lost"
+  expect_no_tmp "$repo"
+fi
+chmod 644 "$repo/AGENTS.md"
+
+repo="$(new_repo a5-dirlink)"
+rm -f "$repo/AGENTS.md"
+ln -s docs "$repo/AGENTS.md"
+run_script "update-harness --force refuses an entrypoint linked to a directory" \
+  "$ROOT/scripts/update-harness.sh" "$repo" --force
+expect_rc 1
+expect_has "LINK: AGENTS.md"
+expect_has "update stopped before changing files"
+[ -L "$repo/AGENTS.md" ] || fail "AGENTS.md link was changed"
+
+# 26. A6: GEMINI.md that cannot stay a valid alias is refused before any
+#     file changes: a directory, and a link that bypasses AGENTS.md to the
+#     same in-repo file AGENTS.md links to (AGENTS.md becomes a regular file).
+repo="$(new_repo a6-dir)"
+mkdir "$repo/GEMINI.md"
+printf '\nlocal edit\n' >> "$repo/CLAUDE.md"
+repo_tree="$(tree_state "$repo")"
+run_script "update-harness --force refuses GEMINI.md directory" \
+  "$ROOT/scripts/update-harness.sh" "$repo" --force
+expect_rc 1
+expect_has "LINK: GEMINI.md"
+expect_has "update stopped before changing files"
+[ "$(tree_state "$repo")" = "$repo_tree" ] || fail "files changed despite the refusal"
+
+repo="$(new_repo a6-double-link)"
+mkdir -p "$repo/.harness"
+mv "$repo/AGENTS.md" "$repo/.harness/AGENTS.md"
+printf '\nlocal edit\n' >> "$repo/.harness/AGENTS.md"
+ln -s .harness/AGENTS.md "$repo/AGENTS.md"
+ln -s .harness/AGENTS.md "$repo/GEMINI.md"
+repo_tree="$(tree_state "$repo")"
+run_script "update-harness --force refuses GEMINI.md bypassing AGENTS.md" \
+  "$ROOT/scripts/update-harness.sh" "$repo" --force
+expect_rc 1
+expect_has "LINK: GEMINI.md"
+expect_has "update stopped before changing files"
+[ "$(tree_state "$repo")" = "$repo_tree" ] || fail "files changed despite the refusal"
+
+repo="$(new_repo a6-chain-control)"
+mkdir -p "$repo/.harness"
+mv "$repo/AGENTS.md" "$repo/.harness/AGENTS.md"
+printf '\nlocal edit\n' >> "$repo/.harness/AGENTS.md"
+ln -s .harness/AGENTS.md "$repo/AGENTS.md"
+ln -s AGENTS.md "$repo/GEMINI.md"
+run_script "update-harness --force keeps GEMINI.md -> AGENTS.md -> link" \
+  "$ROOT/scripts/update-harness.sh" "$repo" --force
+expect_rc 0
+[ "$repo/GEMINI.md" -ef "$repo/AGENTS.md" ] && [ ! -L "$repo/AGENTS.md" ] \
+  || fail "GEMINI.md no longer resolves to the regular AGENTS.md"
+
+# 27. A9: CRLF frontmatter and frontmatter on a standalone GEMINI.md.
+repo="$(new_repo crlf-frontmatter)"
+{
+  printf -- '---\r\nactivation: always\r\n---\r\n'
+  cat "$repo/AGENTS.md"
+} > "$repo/AGENTS.md.new"
+mv "$repo/AGENTS.md.new" "$repo/AGENTS.md"
+run_check "CRLF frontmatter AGENTS.md" "$repo"
+expect_rc 1
+expect_has "FORMAT: AGENTS.md"
+
+repo="$(new_repo gemini-frontmatter)"
+printf -- '---\nactivation: always\n---\n# Gemini Entry Point\n' > "$repo/GEMINI.md"
+run_check "standalone GEMINI.md with frontmatter" "$repo"
+expect_rc 1
+expect_has "FORMAT: GEMINI.md"
+
+# 28. A7: the bootstrap/update-harness EXIT traps remove the owned temp file
+#     when the process is terminated mid-write (an mv shim sends TERM to the
+#     script, whose TERM trap exits; only the EXIT trap can clean up).
+mkdir -p "$TMP_DIR/term-mv-shim"
+printf '#!/bin/sh\nkill -TERM "$PPID"\nexit 1\n' > "$TMP_DIR/term-mv-shim/mv"
+chmod +x "$TMP_DIR/term-mv-shim/mv"
+repo="$(new_repo a7-update-trap)"
+printf '\nlocal edit\n' >> "$repo/CLAUDE.md"
+LABEL="update-harness EXIT trap removes its temp file"
+CASES=$((CASES + 1))
+capture env PATH="$TMP_DIR/term-mv-shim:$PATH" bash "$ROOT/scripts/update-harness.sh" "$repo" --force
+[ "$RC" -ne 0 ] || fail "expected a non-zero exit"
+expect_no_tmp "$repo"
+
+repo="$(new_repo a7-boot-trap)"
+mkdir -p "$repo/.harness"
+printf 'node_modules/\n' > "$repo/.harness/gitignore"
+rm -f "$repo/.gitignore"
+ln -s .harness/gitignore "$repo/.gitignore"
+LABEL="bootstrap EXIT trap removes its temp file"
+CASES=$((CASES + 1))
+capture env PATH="$TMP_DIR/term-mv-shim:$PATH" bash "$ROOT/scripts/bootstrap.sh" "$repo" --force
+[ "$RC" -ne 0 ] || fail "expected a non-zero exit"
+expect_no_tmp "$repo"
+
+if command -v jq >/dev/null 2>&1; then
+  # A7: worktree-add's own cleanup, observed in a worktree that is kept: a
+  #     git shim turns `worktree remove` into a no-op so the seed directory
+  #     survives, and the failed rename must still remove the temp file.
+  mkdir -p "$TMP_DIR/keep-wt-shim"
+  printf '#!/bin/sh\nif [ "$3" = worktree ] && [ "$4" = remove ]; then exit 0; fi\nexec "%s" "$@"\n' \
+    "$real_git" > "$TMP_DIR/keep-wt-shim/git"
+  chmod +x "$TMP_DIR/keep-wt-shim/git"
+  wt_path="$TMP_DIR/mvfail-kept-wt"
+  LABEL="worktree-add removes its temp file when the rename fails"
+  CASES=$((CASES + 1))
+  capture env PATH="$TMP_DIR/failing-mv-shim:$TMP_DIR/keep-wt-shim:$PATH" \
+    bash "$wt_src/scripts/worktree-add.sh" "$wt_path" -b mvfail-kept HEAD
+  expect_rc 1
+  [ -d "$wt_path/.context" ] || fail "kept worktree missing (shim did not apply)"
+  expect_no_tmp "$wt_path/.context"
+
+  # A7: worktree-add's EXIT trap (TERM during the rename).
+  wt_path="$TMP_DIR/term-wt"
+  LABEL="worktree-add EXIT trap removes its temp file"
+  CASES=$((CASES + 1))
+  capture env PATH="$TMP_DIR/term-mv-shim:$PATH" \
+    bash "$wt_src/scripts/worktree-add.sh" "$wt_path" -b term-task HEAD
+  [ "$RC" -ne 0 ] || fail "expected a non-zero exit"
+  [ -d "$wt_path/.context" ] || fail "worktree missing"
+  expect_no_tmp "$wt_path/.context"
+
+  # A2 / A8: worktree-add refuses to seed through a committed
+  #     .context/workflow-state.json link to a directory (outside or inside),
+  #     and through a committed .context link resolving outside.
+  # wt_case <name> <setup-in-src>: fresh source repo with the setup committed.
+  wt_case_src() {
+    local src="$TMP_DIR/$1-src"
+    mkdir -p "$src/scripts" "$src/.context"
+    cp "$ROOT/scripts/worktree-add.sh" "$src/scripts/worktree-add.sh"
+    git -C "$src" init -q
+    printf '%s\n' "$src"
+  }
+  commit_all() {
+    git -C "$1" add -A
+    git -C "$1" -c user.name=t -c user.email=t@example.invalid commit -qm init
+  }
+  mkdir -p "$TMP_DIR/outside-a2"
+  before_tree="$(tree_state "$TMP_DIR/outside-a2")"
+
+  src="$(wt_case_src a2-state-dirlink)"
+  ln -s "$TMP_DIR/outside-a2" "$src/.context/workflow-state.json"
+  commit_all "$src"
+  run_script "worktree-add refuses a state link to an outside directory" \
+    "$src/scripts/worktree-add.sh" "$TMP_DIR/a2-wt1" -b a2-one HEAD
+  expect_rc 1
+  expect_has "refusing to seed"
+  [ "$(tree_state "$TMP_DIR/outside-a2")" = "$before_tree" ] \
+    || fail "worktree-add wrote into an outside directory"
+
+  src="$(wt_case_src a2-state-inside-dirlink)"
+  mkdir -p "$src/somedir"
+  printf 'keep\n' > "$src/somedir/.keep"
+  ln -s ../somedir "$src/.context/workflow-state.json"
+  commit_all "$src"
+  run_script "worktree-add refuses a state link to an in-repo directory" \
+    "$src/scripts/worktree-add.sh" "$TMP_DIR/a2-wt2" -b a2-two HEAD
+  expect_rc 1
+  expect_has "refusing to seed"
+
+  src="$(wt_case_src a2-ctx-outside)"
+  rmdir "$src/.context"
+  ln -s "$TMP_DIR/outside-a2" "$src/.context"
+  commit_all "$src"
+  run_script "worktree-add refuses a .context link resolving outside" \
+    "$src/scripts/worktree-add.sh" "$TMP_DIR/a2-wt3" -b a2-three HEAD
+  expect_rc 1
+  expect_has "refusing to seed"
+  [ "$(tree_state "$TMP_DIR/outside-a2")" = "$before_tree" ] \
+    || fail "worktree-add wrote into an outside .context"
+
+  # A9: X5 regression for worktree-add. A committed link at the old
+  #     predictable "$STATE_FILE.tmp.<PID>" name points at an outside canary;
+  #     `exec` keeps the PID, so the link is committed for the script's $$.
+  src="$(wt_case_src x5-wt)"
+  printf 'keep\n' > "$src/.context/.keep"
+  commit_all "$src"
+  LABEL="worktree-add ignores a pre-placed predictable temp name"
+  CASES=$((CASES + 1))
+  # shellcheck disable=SC2016
+  capture bash -c '
+    src="$1" canary="$2" wt="$3"
+    ln -s "$canary" "$src/.context/workflow-state.json.tmp.$$"
+    git -C "$src" add -A
+    git -C "$src" -c user.name=t -c user.email=t@example.invalid commit -qm plant
+    exec bash "$src/scripts/worktree-add.sh" "$wt" -b x5-task HEAD
+  ' _ "$src" "$TMP_DIR/outside-x5/canary" "$TMP_DIR/x5-wt"
+  expect_rc 0
+  [ "$(hash_of "$TMP_DIR/outside-x5/canary")" = "$canary_hash" ] \
+    || fail "outside canary changed through worktree-add's predictable temp name"
+  [ "$(jq -r .branch "$TMP_DIR/x5-wt/.context/workflow-state.json")" = "x5-task" ] \
+    || fail "state not seeded"
 fi
 
 echo "check-harness-sync contract tests passed ($CASES cases)"

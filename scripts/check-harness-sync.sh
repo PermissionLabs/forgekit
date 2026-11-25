@@ -301,6 +301,9 @@ check_exact() {
 # forgekit-override marker.
 check_no_stale_in_dir() {
   local target_dir="$1" template_dir="$2" label_prefix="$3"
+  # find follows the start directory (and its symlinked ancestors), so an
+  # outside directory would be listed and its files read by has_override.
+  guard_outside_repo "$target_dir" "$label_prefix" && return 0
   [ -d "$target_dir" ] || return 0
   while IFS= read -r target_file; do
     rel="${target_file#$target_dir/}"
@@ -366,17 +369,19 @@ else
     check_exact "$mode_target/$rel" "$src" "$rel"
   done < <(find "$templates/docs" -type f -name '*_TEMPLATE.md')
 
-  while IFS= read -r target_file; do
-    rel="${target_file#$mode_target/}"
-    if [ -f "$templates/$rel" ]; then
-      continue
-    fi
-    if has_override "$target_file"; then
-      echo "skip:  $rel (project extension, forgekit-override)"
-    else
-      note_drift "STALE: $rel (template file not present in templates/)"
-    fi
-  done < <(find "$mode_target/docs" -type f -name '*_TEMPLATE.md' 2>/dev/null)
+  if ! guard_outside_repo "$mode_target/docs" "docs"; then
+    while IFS= read -r target_file; do
+      rel="${target_file#$mode_target/}"
+      if [ -f "$templates/$rel" ]; then
+        continue
+      fi
+      if has_override "$target_file"; then
+        echo "skip:  $rel (project extension, forgekit-override)"
+      else
+        note_drift "STALE: $rel (template file not present in templates/)"
+      fi
+    done < <(find "$mode_target/docs" -type f -name '*_TEMPLATE.md' 2>/dev/null)
+  fi
 fi
 
 echo ""
