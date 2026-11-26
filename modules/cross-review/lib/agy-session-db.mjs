@@ -66,8 +66,9 @@ export function decodeGeneration(data) {
 export function decodeTrajectory(data) {
   const f = protoFields(data);
   const uris = [];
-  for (const w of f.get(1) ?? []) if (w instanceof Uint8Array) { const u = textAt(protoFields(w), 1); if (u) uris.push(u); }
-  for (const w of f.get(7) ?? []) if (w instanceof Uint8Array) { const u = utf8.decode(w).trim(); if (u) uris.push(u); }
+  // Every workspace entry must yield a URI: an entry that cannot be read makes ownership unprovable (throws).
+  for (const w of f.get(1) ?? []) { const u = w instanceof Uint8Array ? textAt(protoFields(w), 1) : null; if (!u) throw new Error("workspace entry without a URI"); uris.push(u); }
+  for (const w of f.get(7) ?? []) { const u = w instanceof Uint8Array ? utf8.decode(w).trim() : ""; if (!u) throw new Error("workspace URI empty"); uris.push(u); }
   return { sessionId: textAt(f, 6), workspaceUris: uris };
 }
 

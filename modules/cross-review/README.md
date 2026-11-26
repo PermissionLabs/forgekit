@@ -2,7 +2,9 @@
 
 A host-neutral cross-review runner. One CLI, one input shape, one output schema, and one adapter per
 reviewer host (Claude Code, Codex CLI, Antigravity). Host differences live only in `adapters/`.
-Zero runtime dependencies; Node 20 or newer (tests use `node:test`).
+Zero runtime dependencies; Node 20 or newer (tests use `node:test`). The Antigravity 1.5 runtime path
+reads the session database with `node:sqlite`, so it needs Node 22.13 or newer (older Node: every 1.5
+run is `incomplete` with `model_unconfirmed`; its tests are skipped).
 
 ```text
 modules/cross-review/
@@ -152,9 +154,9 @@ another reviewer or model.
 | No writes | `--tools Read,Grep,Glob`, `--restricted`, `--permission-mode dontAsk` | OS sandbox profile with no write entry (header must say `sandbox: read-only`), `approval_policy="never"` | fs/terminal capabilities false, permissions `reject_once`, session mode `default` (1.5); `enabledTools:["view_file"]` (≤1.4 only: 1.5 ignores it, so non-read tools are caught by the audit) |
 | Reads confined | `--restricted` confines file tools to cwd = snapshot; audit of every tool path, Glob patterns (each brace alternative; over 64 alternatives an automaton decides whether any alternative is absolute, `~` or has `..`: if so the run is `incomplete` with `tool_glob_unauditable`, otherwise it is a relative glob) and Grep `path`/`glob` (Grep's regex `pattern` is not a path); `~` paths are outside | **OS-enforced** (macOS Seatbelt, see below); the shell-command audit is evidence only (warnings) | audit of every `read_file`/`view_file` path (full `rawInput`/`args`, `tool_call_update` names and titles); any other tool except `update_steps` → `incomplete`; `~` paths are outside |
 | Code execution | none (no Bash) | interpreters / command substitution may run, always under the same OS sandbox; `hosts.codex.allow_code_execution` (default `true`) only decides whether node's package dir is granted; code execution is recorded as a warning | none (commands need a permission, always rejected; any command tool call → `incomplete`) |
-| No network beyond the model API | no WebFetch/WebSearch/Bash; `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` | the profile has no network entry (model commands have no network); `web_search="disabled"` | web tools not enabled |
+| No network beyond the model API | no WebFetch/WebSearch/Bash; `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` | the profile has no network entry (model commands have no network); `web_search="disabled"` | ≤1.4: web tools not enabled; 1.5: `search_web` is available and can run before the audit makes the run `incomplete` |
 | No MCP | `--strict-mcp-config --mcp-config '{"mcpServers":{}}'`, `--safe-mode` | `--ignore-user-config` (MCP servers live there), `--disable plugins/apps` | `mcpServers: []`, isolated `GEMINI_HOME` without `config/` |
-| No delegation | Agent tool not in `--tools` | `--disable multi_agent[_v2]` | `invoke_subagent` not enabled |
+| No delegation | Agent tool not in `--tools` | `--disable multi_agent[_v2]` | ≤1.4: `invoke_subagent` not enabled; 1.5: available, caught after the fact by the audit (`incomplete`) |
 | Ignore user settings | `--setting-sources ""`, `--restricted`, `--safe-mode`, `--disable-slash-commands` | `--ignore-user-config`, `--ignore-rules` | isolated `GEMINI_HOME` (only `antigravity-acp/` linked) |
 | No session persistence | `--no-session-persistence` | `--ephemeral` | not possible: session files deleted afterwards when `.meta` cwd (≤1.4) or every session-database workspace URI (1.5) matches |
 | Never | `--dangerously-*`, `bypassPermissions`, `acceptEdits`, `--add-dir` | anything outside the exact argv shape the runner builds (flag allowlist; every `-c` byte-identical to a runner-generated value); in particular `-s`/`--sandbox`/`sandbox_mode` in any form, `-p`/`--profile`/`-c profile=`, `--include-managed-config*`, `-P…`, `-a…`, `--enable`, `--sandbox-state*`, `--full-auto`, `--add-dir`, `--dangerously-*` | `allow_*`, `reject_always` |
@@ -170,7 +172,9 @@ is accepted only when the value is byte-for-byte one the runner generated for th
 produces (`exec`, `-m`, `-c` = exactly the `allowedConfig` values and all of them, `--disable <name>`,
 `--ephemeral`, `--ignore-user-config`, `--ignore-rules`, `--skip-git-repo-check`, `-C <abs>`,
 `--color never`, `--output-schema`, `-o`, trailing `-`); any other token, or a missing generated value
-(e.g. the permission profile), is refused. The reported argv is re-checked the same way after the run. Antigravity has no argv beyond the server binary. The
+(e.g. the permission profile), is refused. The reported argv is re-checked the same way after the run. Antigravity ≤1.4 has no argv beyond the
+server binary; the 1.5 argv (`acp --gemini-dir … --app-data-dir antigravity-acp --log-file … --disable-telemetry`)
+is checked against the bypass list before spawn. The
 snapshot hash is compared before/after. Token files (`~/.codex/auth.json`, Claude credentials,
 `acp_token.json`) are never opened by the runner.
 

@@ -54,6 +54,22 @@ before(() => {
   rel("eee-noversion", { version: "../9" });
   rel("fff-symlink", { version: "9.9.3" }, "antigravity", null);
   fs.symlinkSync(path.join(cliRoot, "aaa-new", "antigravity"), path.join(cliRoot, "fff-symlink", "antigravity"));
+  rel("ggg-nobytes", { version: "9.9.4", executable: { name: "antigravity" } });
+  rel("hhh-strbytes", { version: "9.9.5", executable: { name: "antigravity", bytes: String(Buffer.byteLength(launcher)) } });
+  // A symlinked version directory (pointing outside versions/) and a symlinked install record are never used.
+  const outside = path.join(tmp, "outside-rel");
+  fs.mkdirSync(outside);
+  fs.writeFileSync(path.join(outside, "antigravity"), launcher); fs.chmodSync(path.join(outside, "antigravity"), 0o755);
+  fs.writeFileSync(path.join(outside, ".install-complete.json"), JSON.stringify({ version: "9.9.6", executable: { name: "antigravity", bytes: Buffer.byteLength(launcher) } }));
+  fs.symlinkSync(outside, path.join(cliRoot, "iii-dirlink"));
+  fs.mkdirSync(path.join(cliRoot, "jjj-reclink"));
+  fs.writeFileSync(path.join(cliRoot, "jjj-reclink", "antigravity"), launcher); fs.chmodSync(path.join(cliRoot, "jjj-reclink", "antigravity"), 0o755);
+  fs.symlinkSync(path.join(outside, ".install-complete.json"), path.join(cliRoot, "jjj-reclink", ".install-complete.json"));
+  // .par fallback: a non-numeric directory name and a symlinked .par are never candidates.
+  fs.mkdirSync(path.join(cliRoot, "old"));
+  fs.writeFileSync(path.join(cliRoot, "old", "agy_acp_server.par"), launcher); fs.chmodSync(path.join(cliRoot, "old", "agy_acp_server.par"), 0o755);
+  fs.mkdirSync(path.join(cliRoot, "9.9.7"));
+  fs.symlinkSync(path.join(outside, "antigravity"), path.join(cliRoot, "9.9.7", "agy_acp_server.par"));
   fs.mkdirSync(path.join(cliRoot, "1.4.9"));
   fs.writeFileSync(path.join(cliRoot, "1.4.9", "agy_acp_server.par"), launcher);
   fs.chmodSync(path.join(cliRoot, "1.4.9", "agy_acp_server.par"), 0o755);
@@ -137,7 +153,9 @@ test("large scope is split into file chunks per turn (operator 5)", async () => 
 test("spawn failure and an early server exit fail fast instead of waiting for the RPC timeout (A14)", async () => {
   const bad = path.join(tmp, "bad-runtime", "versions", "9.9.9");
   fs.mkdirSync(bad, { recursive: true });
-  fs.writeFileSync(path.join(bad, "agy_acp_server.par"), "not executable");
+  // Discovered (regular, executable) but cannot start: its interpreter does not exist.
+  fs.writeFileSync(path.join(bad, "agy_acp_server.par"), "#!/nonexistent/cross-review-interpreter\n");
+  fs.chmodSync(path.join(bad, "agy_acp_server.par"), 0o755);
   const t0 = Date.now();
   const ev = await go({}, { runtime: { ...policy().hosts.antigravity.runtime, runtime_root: path.dirname(bad) } });
   withheld(ev, /spawn_error/);
@@ -303,9 +321,12 @@ test("planTurns and findRuntime", () => {
 });
 
 // ---------------------------------------------------------------- 1.5 "cli" runtime layout
+// The 1.5 adapter reads the session database with node:sqlite (Node 22.13+ without flags).
+const noSqlite = await import("node:sqlite").then(() => false, () => "node:sqlite unavailable (Node < 22.13)");
+const ctest = (name, fn) => test(name, { skip: noSqlite }, fn);
 const goCli = (fake = {}, over = {}) => go(fake, { runtime: { ...policy().hosts.antigravity.runtime, runtime_root: cliRoot }, ...over });
 
-test("cli layout: findRuntime reads .install-complete.json, picks the highest valid version, skips bad records", () => {
+ctest("cli layout: findRuntime reads .install-complete.json, picks the highest valid version, skips bad records", () => {
   const r = findRuntime(cliRoot);
   assert.equal(r.version, "1.5.18");
   assert.equal(r.layout, "cli");
@@ -317,7 +338,7 @@ test("cli layout: findRuntime reads .install-complete.json, picks the highest va
   assert.deepEqual(launchArgs("cli", { geminiHome: "/h", logFile: "/l" }), ["acp", "--gemini-dir", "/h", "--app-data-dir", "antigravity-acp", "--log-file", "/l", "--disable-telemetry"]);
 });
 
-test("cli layout: env drops inherited Antigravity variables, adds the update/browser guards, no harness path", () => {
+ctest("cli layout: env drops inherited Antigravity variables, adds the update/browser guards, no harness path", () => {
   const env = buildEnv({ PATH: "/usr/bin", GEMINI_HOME: "/x", AGY_CLI_DISABLE_AUTO_UPDATE: "0", CHROME_CRASHPAD_PIPE_NAME: "p", GOOGLE_API_KEY: "k" }, { geminiHome: "/h", tmpDir: "/t", harness: "/hx", layout: "cli", shimDir: "/s" });
   assert.equal(env.GEMINI_HOME, "/h");
   assert.equal(env.AGY_CLI_DISABLE_AUTO_UPDATE, "1");
@@ -336,7 +357,7 @@ test("isAgy matches the 1.4 server, the 1.5 `antigravity acp` process and this r
   assert.ok(!isAgy("vim antigravity.md"));
 });
 
-test("session database decoding: generation model and display name, normalisation", () => {
+ctest("session database decoding: generation model and display name, normalisation", () => {
   const v = (x) => { const o = []; while (x > 127) { o.push((x & 127) | 128); x = Math.floor(x / 128); } o.push(x); return Buffer.from(o); };
   const enc = (fs_) => Buffer.concat(fs_.map(([n, s]) => { const b = Buffer.isBuffer(s) ? s : Buffer.from(s); return Buffer.concat([v(n * 8 + 2), v(b.length), b]); }));
   const g = decodeGeneration(enc([[1, enc([[19, "gemini-4-neon"], [21, "Gemini 4 Neon (High)"]])]]));
@@ -362,14 +383,39 @@ test("cli layout happy path: argv, per-turn generation model, read_file audit, s
   assert.equal(fs.existsSync(ev.isolation.geminiHome), false);
 });
 
-test("cli layout: a turn without a generation record, a different model or level, or no database -> incomplete", async () => {
+ctest("cli layout: a turn without a generation record, a different model or level, or no database -> incomplete", async () => {
   withheld(await goCli({ noGen: [1] }), /model_unconfirmed:group:tests/);
   withheld(await goCli({ genDisplay: "Gemini 4 Neon (Low)" }), /generation_model_mismatch:gemini-4-neon\/gemini-4-neon-low/);
   withheld(await goCli({ genModel: "gemini-3.8-flash" }), /generation_model_mismatch:gemini-3\.8-flash/);
   withheld(await goCli({ noGen: [0, 1] }), /model_unconfirmed:group:correctness/);
+  const nodb = await goCli({ noDb: true });
+  withheld(nodb, /model_unconfirmed:session database unreadable/);
+  assert.equal(nodb.extra.sessionCleanup.skipped, ".meta and session database missing");
 });
 
-test("cli layout: non-read tools, reads outside the snapshot, log-file errors, auth and session mode are fatal", async () => {
+ctest("cli layout: a late generation of one turn never confirms a later turn without its own (X27/A76)", async () => {
+  const ev = await goCli({ lateGen: true, noGen: [1] });
+  withheld(ev, /model_unconfirmed:group:tests/);
+  assert.equal(ev.attempts[0].generationModels.length, 2);
+  assert.equal((await goCli({ lateGen: true })).status, "complete");
+});
+
+ctest("cli layout: tool audit keeps a call's name across title-only updates, and refuses idless or nameless-then-renamed calls (X29/A78)", async () => {
+  const ok = await goCli({ updateTitle: { 0: "File a.ts" } });
+  assert.equal(ok.status, "complete", ok.incompleteReasons.join());
+  withheld(await goCli({ idless: { 0: true } }), /tool_calls_without_id:1/);
+  withheld(await goCli({ namelessSteps: { 0: true } }), /unauditable_tool_calls:1/);
+});
+
+ctest("cli layout: session files are kept when the database has no session id (X26/A77)", async () => {
+  const ev = await goCli({ noTrajSid: true });
+  assert.equal(ev.status, "complete", ev.incompleteReasons.join());
+  assert.equal(ev.extra.sessionCleanup.skipped, "session database has no session id");
+  assert.deepEqual(ev.extra.sessionCleanup.removed, []);
+  fs.rmSync(path.join(profileAcp, "conversations", "11111111-1111-4111-8111-111111111111.db"));
+});
+
+ctest("cli layout: non-read tools, reads outside the snapshot, log-file errors, auth and session mode are fatal", async () => {
   withheld(await goCli({ toolName: { 0: "run_command" } }), /non_view_file_tool_calls:1/);
   withheld(await goCli({ readPath: { 0: "/etc/hosts" } }), /tool_read_outside_snapshot/);
   withheld(await goCli({ stderrLine: { 0: "E1126 agent.go:1] RESOURCE_EXHAUSTED quota" } }), /agent_error:group:correctness/);
@@ -379,7 +425,7 @@ test("cli layout: non-read tools, reads outside the snapshot, log-file errors, a
   assert.equal(b.extra.authRequired, true);
 });
 
-test("cli layout: session files are kept when the database workspace is not this run's snapshot", async () => {
+ctest("cli layout: session files are kept when the database workspace is not this run's snapshot", async () => {
   const ev = await goCli({ workspace: "/somewhere/else" });
   assert.equal(ev.status, "complete", ev.incompleteReasons.join());
   assert.equal(ev.extra.sessionCleanup.skipped, "session database workspace differs from runner cwd");

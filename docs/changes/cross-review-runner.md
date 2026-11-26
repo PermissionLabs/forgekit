@@ -68,8 +68,9 @@ flowchart TD
 
 ## Implementation Notes
 
-- Zero dependencies, plain `.mjs` (Node 20+). Node type stripping was not used so CI's stock Node works
-  without flags; the CI job's Bun install is untouched.
+- Zero dependencies, plain `.mjs` (Node 20+; the Antigravity 1.5 runtime path needs Node 22.13+ for
+  `node:sqlite`, and without it fails closed as `model_unconfirmed`; its tests are skipped there). Node
+  type stripping was not used so CI's stock Node works without flags; the CI job's Bun install is untouched.
 - Policy (`review-policy.json`) is the only place for model ids: Claude `claude-opus-5-5` (the current
   Opus id; `claude --help` accepts full names and the live `init` event reported it), Codex
   `gpt-6.1-sol`, Antigravity `gemini-4-neon`, all at `review_effort: high`. It also holds id prefixes,
@@ -153,14 +154,14 @@ flowchart TD
 
 | Guarantee | Claude | Codex | Antigravity |
 | --- | --- | --- | --- |
-| Read-only tools | `--tools Read,Grep,Glob`, `--allowedTools` same, `--permission-mode dontAsk`, `--permission-prompts none`, `--restricted` | generated permission profile without write entries (header `sandbox: read-only`), `-c approval_policy="never"` | `enabledTools:["view_file"]`, fs/terminal false, `reject_once` |
+| Read-only tools | `--tools Read,Grep,Glob`, `--allowedTools` same, `--permission-mode dontAsk`, `--permission-prompts none`, `--restricted` | generated permission profile without write entries (header `sandbox: read-only`), `-c approval_policy="never"` | ≤1.4: `enabledTools:["view_file"]`; 1.5: ignored, so only the audit (non-read tool → incomplete); both: fs/terminal false, `reject_once`, 1.5 session mode `default` |
 | Read confinement | `--restricted` (host-enforced; an outside read was denied in the flag probe) + audit | OS-enforced Seatbelt profile (self-tested per run); shell audit is evidence only | audit |
-| Network | no web/shell tools, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` | profile has no network entry, `-c web_search="disabled"` | web tools not enabled |
+| Network | no web/shell tools, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` | profile has no network entry, `-c web_search="disabled"` | ≤1.4: web tools not enabled; 1.5: `search_web` is available and can run before the audit makes the run incomplete |
 | MCP | `--strict-mcp-config --mcp-config '{"mcpServers":{}}'`, `--safe-mode` | `--ignore-user-config`, `--disable plugins`/`apps` | `mcpServers: []`, isolated home without `config/` |
-| Delegation | no Agent tool | `--disable multi_agent`, `multi_agent_v2` | `invoke_subagent` not enabled |
+| Delegation | no Agent tool | `--disable multi_agent`, `multi_agent_v2` | ≤1.4: `invoke_subagent` not enabled; 1.5: available, caught after the fact by the audit |
 | User settings | `--setting-sources ""`, `--restricted`, `--safe-mode`, `--disable-slash-commands` | `--ignore-user-config`, `--ignore-rules` | isolated `GEMINI_HOME` |
-| Session persistence | `--no-session-persistence` | `--ephemeral` | not available; files deleted when `.meta` cwd matches |
-| Bypass flags | none; argv checked against the bypass list | none; argv checked | `allow_*`/`reject_always` never chosen |
+| Session persistence | `--no-session-persistence` | `--ephemeral` | not available; files deleted when `.meta` cwd (≤1.4) or the session database's session id + workspace (1.5) match |
+| Bypass flags | none; argv checked against the bypass list | none; argv checked | `allow_*`/`reject_always` never chosen; the 1.5 argv is checked against the bypass list before spawn |
 
 ## Documentation Updates
 
@@ -343,6 +344,22 @@ Smoke (1.5.18, 7613dcc, `lib/plan.mjs` 4-line diff, correctness): `complete`, ve
 | 6 (r3) | Re-review of c8a846c..e64a80c: Codex ran to completion under the first production OS sandbox (922 s, 222,195 tokens) but was incomplete only by the secondary audit (`ls -l` of the allowed node binary, a false positive); its draft X18–X23 (block) was kept as `reviewIfIncomplete`. Antigravity incomplete `total_timeout_before:group:tests+contract_docs:files4/4` (fixed 1500 s budget; 11 of 16 turns); partial turns A47–A57 extracted for information. Merge: 0 groups (both incomplete); manual overlaps X18 = A52, X19 ≈ A49, X3/A6/A19 unverified. | Orchestrator decision: simplify so the loop converges — shell audit evidence-only, `audit_only` removed, denial counter dropped. Real fixes with regression tests for every r3 id and every unverified prior (dispositions below). |
 | 7 (r4) | Re-review of e64a80c..481a88c: Codex complete (336 s, 182,111 tokens; self-test ok, 6 probes), verdict fix, 1 med X24; 25/27 priors verified, A50 and A53 not verified. Antigravity complete (1552 s of a 2880 s budget, 16 turns: 4 groups × 4 chunks), verdict fix, 4 med + 5 low A58–A66; 27/27 priors verified. Merge: 10 groups, no cross-host grouping; manual overlaps X24 vs A58 (same loc, opposite directions), A59 ≈ A50-unverified, A61 ≈ A53-unverified. No high/critical. | Every r4 id fixed with a regression test (dispositions below); operator items: plan turn estimate, split-row dispositions; speed knob `rereview_single_group`. Ready for PR. |
 | 8 (r5) | Confirmation re-review of 481a88c..aa873f3: Codex complete (198 s, 128,037 tokens; self-test ok, 7 probes incl. `/private/var/tmp`), verdict fix, 1 med X25; Antigravity complete (4 turns = plan estimate, one re-review group, 582 s of a 720 s budget), verdict fix, 1 med + 4 low A67–A71; both hosts verified 12/12 priors (A50 and A53 now verified by Codex); merge grouped X25=A70 | No high/critical. X25/A70 (med) new sandbox tests assumed macOS paths (`/private/var/tmp`, `/tmp`→`/private/tmp`) and failed on Linux; A71 the A60 regression test let `path.join` normalise `bin/..` away; A69 the `turn_timeout_sec` floor branch was not exercised and a comment misnamed the floor; A68 `budget.singleGroup` shown whenever one group resulted; A67 README `plan` budget text was the r3 formula | All five fixed test/doc/display-only (no sandbox/argv/status logic change); suite also run on Linux (node:22 container: 126 pass, 6 macOS-only skipped, 0 fail) |
+| 9 (r6) | Delta review of the Antigravity 1.5 adapter (7613dcc..f42edcb): Codex complete, verdict block, X26–X30 (2 high, 3 med); Antigravity incomplete (`total_timeout_before:group:correctness:files2/2`, 3 of 4 turns), draft A72–A81 (1 high, 5 med, 4 low) | All real except as noted in the r6 dispositions; fixed in the r6 commit with tests. |
+
+### r6 dispositions
+
+| Id | Disposition | Ref |
+| --- | --- | --- |
+| X26 (high) / A77 (med) | fixed | cleanup needs the database's session id to equal ours (a missing id keeps the files); a workspace entry without a URI makes ownership unreadable (kept) |
+| X27 (high) / A76 (med) | fixed (residual) | the generation count is re-read right before each prompt, and a turn's settle waits until the count is unchanged for 1.5 s (≤ 10 s); test with a row committed 330 ms after the reply. Residual: rows carry no timestamp or turn id, so a row committed after the next prompt was sent is indistinguishable; it can only mask a turn without any record, never a different model, because every row in the session must match the pin |
+| X28 (med) / A75 part 2 | fixed | `executable.bytes` must be a positive safe integer; absent/null/string/fractional sizes reject the record |
+| A75 (high) parts 1, 3 | fixed | the version directory and the install record must not be symlinks; the `.par` fallback needs a numeric directory name and a regular, non-symlink executable `.par` |
+| X29 (med) | fixed | a title-only update keeps the name its call's first item established |
+| A78 (med) | fixed | a call is exempt from the path requirement only when every item is a bookkeeping tool by name (a call that started nameless never inherits); a tool call without `toolCallId` → `tool_calls_without_id` |
+| X30 (med) / A81 (med) | fixed (docs + skip) | Node 22.13+ documented for the 1.5 path (fails closed as `model_unconfirmed` on older Node); cli tests skip without `node:sqlite` |
+| A72 (med), A74 (low) | fixed | README and guarantees tables state what 1.5 only audits (web, subagents, tool allowlist) |
+| A73 (low), A79 (low) | fixed | the 1.5 argv goes through `bypassFlags` before spawn; README says so |
+| A80 (low) | fixed | `noDb` case asserts `model_unconfirmed:session database unreadable` and kept files |
 
 ### r5 dispositions
 
@@ -467,6 +484,7 @@ Smoke (1.5.18, 7613dcc, `lib/plan.mjs` 4-line diff, correctness): `complete`, ve
 | Design | Claude effort level is not reported by the host | `accepted_with_reason` | Recorded as pinned only; listed in `hostLimits` |
 | Design | Antigravity session persistence cannot be disabled | `accepted_with_reason` | Files deleted after the run when `.meta` cwd (≤1.4) or the session database's workspace (1.5) matches (same as T3); 1.5 also keeps a summary row in the profile's `conversation_summaries.db`, which is not touched |
 | Runtime 1.5 | `enabledTools` is ignored by the runtime, so a non-read tool (e.g. `search_web`, `invoke_subagent`) could run before the audit sees it | `accepted_with_reason` | Edits and commands still need a permission (always `reject_once`); any other tool makes the run `incomplete`; the prompt names `read_file` as the only allowed tool |
+| r6 X27/A76 | A generation committed after the next prompt was sent cannot be told apart from that turn's own (no timestamp/turn id in `gen_metadata`) | `accepted_with_reason` | Count re-read before every prompt and a 1.5 s stability window after every turn; a misattribution can only hide a missing record, never a different model (every row must match the pin) |
 | Runtime 1.5 | The model check depends on the undocumented `gen_metadata` protobuf layout (fields 1/19/21, as decoded by T3) | `accepted_with_reason` | A layout change yields an unreadable or mismatching record → `incomplete`, never a silent pass |
 | Runtime 1.5 | Sign-in comes from the OS keyring; if T3 later forces file storage (`SSH_CONNECTION`, `antigravity-oauth-token`) the keyring may be stale | `accepted_with_reason` | Fails closed as `auth_required`; the runner never opens a browser (PATH shims) |
 | antigravity-host-support C6 | Shared review contract and per-host adapters | `fixed` | This change |

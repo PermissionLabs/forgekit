@@ -12,7 +12,11 @@
 // row per turn and a trajectory_metadata_blob row, sends ACP `name`/`args` tool calls (read_file), and advertises
 // session modes. Extra knobs: noGen: [turn], genModel: "m", genDisplay: "Name (Level)", workspace: "/other",
 //   mode: "auto", toolName: {turn: "run_command"}, steps: true (an update_steps call without a path),
-//   browser: true (authenticate runs `open <url>` from PATH, then fails like 1.5 without a sign-in).
+//   browser: true (authenticate runs `open <url>` from PATH, then fails like 1.5 without a sign-in),
+//   noDb: true (no session database at all), noTrajSid: true (trajectory metadata without the session id),
+//   lateGen: true (turn 0 commits a second generation 300 ms after its reply), idless: {turn: true} (a read_file
+//   tool_call without toolCallId), namelessSteps: {turn: true} (a nameless "view_file" call without a path that a
+//   later update renames to update_steps).
 // Per-turn stderr is written (and flushed) before any stdout for that turn, so the parent always sees it first.
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -63,15 +67,15 @@ process.stdin.setEncoding("utf8").on("data", (c) => {
       cwd = m.params.cwd;
       const conv = path.join(process.env.GEMINI_HOME, "antigravity-acp", "conversations");
       fs.mkdirSync(conv, { recursive: true });
-      if (CLI) {
+      if (CLI && !cfg.noDb) {
         db = new sqlite.DatabaseSync(path.join(conv, `${SID}.db`));
         db.exec("CREATE TABLE gen_metadata (idx INTEGER, data BLOB); CREATE TABLE trajectory_metadata_blob (data BLOB);");
         const uri = pathToFileURL(cfg.workspace ?? cwd).href;
-        db.prepare("INSERT INTO trajectory_metadata_blob (data) VALUES (?)").run(enc([[1, enc([[1, uri]])], [6, SID], [7, uri]]));
+        db.prepare("INSERT INTO trajectory_metadata_blob (data) VALUES (?)").run(enc([[1, enc([[1, uri]])], ...(cfg.noTrajSid ? [] : [[6, SID]]), [7, uri]]));
         const ann = path.join(process.env.GEMINI_HOME, "antigravity-acp", "annotations");
         fs.mkdirSync(ann, { recursive: true });
         fs.writeFileSync(path.join(ann, `${SID}.pbtxt`), "x");
-      } else {
+      } else if (!CLI) {
         fs.writeFileSync(path.join(conv, `${SID}.meta`), JSON.stringify({ cwd: cfg.metaCwd ?? cwd }));
         fs.writeFileSync(path.join(conv, `${SID}.db`), "");
       }
@@ -90,7 +94,9 @@ process.stdin.setEncoding("utf8").on("data", (c) => {
       const text = m.params.prompt.filter((b) => b.type === "text").map((b) => b.text).join("\n");
       let err = "";
       if (!CLI && !has(cfg.noProxy, t)) err += `I1126 proxy.go:1] Proxy extracted model from path: ${cfg.proxyModel ?? `${model}-${thinking}`}\n`;
-      if (CLI && !has(cfg.noGen, t)) db.prepare("INSERT INTO gen_metadata (idx, data) VALUES (?, ?)").run(t, enc([[1, enc([[19, cfg.genModel ?? model], [21, cfg.genDisplay ?? `${model} (${thinking})`]])]]));
+      const gen = () => enc([[1, enc([[19, cfg.genModel ?? model], [21, cfg.genDisplay ?? `${model} (${thinking})`]])]]);
+      if (CLI && db && !has(cfg.noGen, t)) db.prepare("INSERT INTO gen_metadata (idx, data) VALUES (?, ?)").run(t * 10, gen());
+      if (CLI && db && cfg.lateGen && t === 0) setTimeout(() => db.prepare("INSERT INTO gen_metadata (idx, data) VALUES (?, ?)").run(1, gen()), 330);
       if (cfg.stderrLine?.[t]) err += cfg.stderrLine[t] + "\n";
       const id = m.id;
       // stderr first, flushed, and a pause: stdout for this turn can never overtake its stderr (A44).
@@ -104,6 +110,8 @@ function answer(t, text, id) {
   // longEscape: inside the snapshot for the first 500+ characters, then climbs out.
   const p = cfg.longEscape && t === 0 ? cwd + "/.".repeat(300) + "/../../../../../../../../etc/passwd" : cfg.readPath?.[t] ?? path.join(cwd, "src/a.ts");
   if (CLI && cfg.steps) notify({ sessionUpdate: "tool_call", toolCallId: `s${t}`, name: "update_steps", title: "Run update_steps", kind: "other", status: "completed", args: { steps: [] } });
+  if (CLI && cfg.idless?.[t]) notify({ sessionUpdate: "tool_call", name: "read_file", title: "File x", kind: "read", status: "pending", args: {} });
+  if (CLI && cfg.namelessSteps?.[t]) { notify({ sessionUpdate: "tool_call", toolCallId: `n${t}`, title: "view_file", kind: "read", status: "pending" }); notify({ sessionUpdate: "tool_call_update", toolCallId: `n${t}`, name: "update_steps", status: "completed" }); }
   if (CLI) notify({ sessionUpdate: "tool_call", toolCallId: `t${t}`, name: cfg.toolName?.[t] ?? "read_file", title: `File ${path.basename(p)}`, kind: "read", status: "pending", args: { Path: p }, locations: [{ path: p }] });
   else notify({ sessionUpdate: "tool_call", toolCallId: `t${t}`, title: "view_file", kind: "read", status: "pending", rawInput: { AbsolutePath: p } });
   if (cfg.updateTitle?.[t]) notify({ sessionUpdate: "tool_call_update", toolCallId: `t${t}`, title: cfg.updateTitle[t], status: "completed" });

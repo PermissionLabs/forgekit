@@ -34,7 +34,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { expandHome } from "../lib/policy.mjs";
 import { insideRoot, redact, sha256 } from "../lib/inputs.mjs";
-import { groupMembers, ownedMembers } from "../lib/proc.mjs";
+import { bypassFlags, groupMembers, ownedMembers } from "../lib/proc.mjs";
 import { groupsFor, planTurns, runTurns, totalBudget } from "../lib/turns.mjs";
 import { countGenerations, readGenerations, readTrajectoryOwner } from "../lib/agy-session-db.mjs";
 
@@ -127,33 +127,39 @@ export const isAgy = (cmd, executable = null) => /agy_acp_server|localharness_ex
 
 /**
  * One version directory -> { version, dir, executable, layout } or null.
- * "cli": `.install-complete.json` gives the version and executable name (a plain file name, a regular non-symlink
- * executable file of the recorded size). A record naming agy_acp_server.par is the "par" layout. Without a record,
- * a directory holding agy_acp_server.par is "par" with the directory name as version (pre-record installs).
+ * The version directory must be a real directory (not a symlink) directly under the root.
+ * "cli": a regular (non-symlink) `.install-complete.json` gives a numeric version and a plain executable file name;
+ * the executable must be a regular, non-symlink, executable file whose size equals the record's positive integer
+ * `executable.bytes` (a missing or malformed size rejects the record). A record naming agy_acp_server.par is the
+ * "par" layout. Without a record, a directory with a numeric version name holding a regular executable
+ * agy_acp_server.par is "par" (pre-record installs).
  */
+const VERSION_RE = /^\d+(\.\d+)*([.+_-][0-9A-Za-z]+)*$/;
 export function runtimeEntry(root, name) {
   const dir = path.join(root, name);
+  const lst = (p) => { try { return fs.lstatSync(p); } catch { return null; } };
+  if (!lst(dir)?.isDirectory()) return null;
   const rec = path.join(dir, INSTALL_RECORD);
   const exeOk = (exe, bytes) => {
-    try {
-      const st = fs.lstatSync(exe);
-      if (!st.isFile() || (Number.isSafeInteger(bytes) && st.size !== bytes)) return false;
-      fs.accessSync(exe, fs.constants.X_OK);
-      return true;
-    } catch { return false; }
+    const st = lst(exe);
+    if (!st?.isFile() || (bytes !== undefined && st.size !== bytes)) return false;
+    try { fs.accessSync(exe, fs.constants.X_OK); return true; } catch { return false; }
   };
-  if (fs.existsSync(rec)) {
+  const recSt = lst(rec);
+  if (recSt) {
+    if (!recSt.isFile()) return null;
     let j;
     try { j = JSON.parse(fs.readFileSync(rec, "utf8")); } catch { return null; }
-    const exeName = j?.executable?.name;
-    if (typeof j?.version !== "string" || !/^\d+(\.\d+)*([.+_-][0-9A-Za-z]+)*$/.test(j.version)) return null;
+    const exeName = j?.executable?.name, bytes = j?.executable?.bytes;
+    if (typeof j?.version !== "string" || !VERSION_RE.test(j.version)) return null;
     if (typeof exeName !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(exeName)) return null;
+    if (!Number.isSafeInteger(bytes) || bytes <= 0) return null;
     const executable = path.join(dir, exeName);
-    if (!exeOk(executable, j.executable.bytes)) return null;
+    if (!exeOk(executable, bytes)) return null;
     return { version: j.version, dir, executable, layout: PAR_NAMES.has(exeName) ? "par" : "cli" };
   }
   const par = path.join(dir, "agy_acp_server.par");
-  return fs.existsSync(par) ? { version: name, dir, executable: par, layout: "par" } : null;
+  return VERSION_RE.test(name) && exeOk(par) ? { version: name, dir, executable: par, layout: "par" } : null;
 }
 
 /** Runtime: `{platform}-{arch}` placeholders expanded; the highest version of either layout (runtimeEntry). */
@@ -347,20 +353,31 @@ export async function run(ctx) {
     while ((nl = logBuf.indexOf("\n")) !== -1) { const line = logBuf.slice(0, nl); logBuf = logBuf.slice(nl + 1); onStderrLine(line); }
   };
   const sessionDb = () => (sessionId && UUID_V4.test(sessionId) ? path.join(acpDir, "conversations", `${sessionId}.db`) : null);
-  // After a cli turn: wait briefly for its generation record(s) to be committed, then remember the count.
-  const settleGenerations = async (before) => {
+  const readCount = async () => {
     const db = sessionDb();
-    if (!db) return before;
-    let n = before;
-    for (let i = 0; i < 12; i++) {
-      try { n = await countGenerations(db); genReadError = null; } catch (e) { genReadError = e.message; }
-      if (n > before) break;
+    if (!db) return null;
+    try { const n = await countGenerations(db); genReadError = null; return n; } catch (e) { genReadError = e.message; return null; }
+  };
+  // After a cli turn: wait until its generation records stop changing (unchanged for 1.5 s, at most 10 s), so a
+  // record committed shortly after the turn's reply is still counted for this turn and not for the next one.
+  const settleGenerations = async (before) => {
+    let n = before, last = before, stableSince = Date.now();
+    const until = Date.now() + 10_000;
+    while (Date.now() < until) {
+      const c = await readCount();
+      if (c !== null) n = c;
+      if (n !== last) { last = n; stableSince = Date.now(); }
+      if (n > before && Date.now() - stableSince >= 1500) break;
       await sleep(250);
     }
     return n;
   };
 
   const runPrompt = async (blocks, label, timeoutMs) => {
+    // cli: re-read the generation count right before the prompt, so rows that landed after the previous turn's
+    // settle window (or before the first turn) are never credited to this turn.
+    let genStart = genCount;
+    if (cli) { const c = await readCount(); if (c !== null) genStart = genCount = c; }
     collecting = [];
     const started = ms();
     const failBefore = upstreamFailures;
@@ -383,7 +400,7 @@ export async function run(ctx) {
     collecting = null;
     if (resp?.usage) promptUsage.push({ label, ...resp.usage });
     const rec = { label, durationMs: ms() - started, timedOut, upstreamFailure: upstream, stopReason: resp?.stopReason ?? null, error: err ? String(err.message ?? err) : null, agentErrors: agentErrors.slice(errBefore), outputChars: text.length, promptSha256: sha256(JSON.stringify(blocks)), proxyStart };
-    if (cli) { rec.genStart = genCount; genCount = await settleGenerations(genCount); rec.genEnd = genCount; }
+    if (cli) { rec.genStart = genStart; genCount = await settleGenerations(genStart); rec.genEnd = genCount; }
     out.attempts.push(rec);
     return { rec, text };
   };
@@ -412,6 +429,9 @@ export async function run(ctx) {
     }
     const args = launchArgs(layout, { geminiHome: home, logFile });
     out.argv = [serverBin, ...args];
+    // Same guard the other adapters run before spawning (run.mjs re-checks the reported argv afterwards).
+    const bypass = bypassFlags(args);
+    if (bypass.length) { reasons.push(`bypass_flags_in_argv:${bypass.join(",")} (refused before spawn)`); return; }
     out.isolation = { geminiHome: home, antigravityAcpLink: acpDir, cwd, clientCapabilities: CLIENT_CAPABILITIES, sessionMeta: { antigravity: { enabledTools: ENABLED_TOOLS } }, enabledToolsEnforcedBy: cli ? "audit only (1.5 ignores enabledTools)" : "runtime + audit", permissionPolicy: "reject_once", runtime: version, layout, browserShim: shimDir };
     psBefore = psList().filter((p) => isAgy(p.cmd, serverBin)).map((p) => p.pid);
     const env = buildEnv(process.env, { geminiHome: home, tmpDir, harness: path.join(runtimeDir, "localharness_external"), layout, shimDir });
@@ -589,7 +609,7 @@ export async function run(ctx) {
           if (!sc.skipped) {
             const real = (p) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
             const want = real(cwd);
-            if (owner.sessionId !== null && owner.sessionId !== sessionId) sc.skipped = "session database belongs to another session id";
+            if (owner.sessionId !== sessionId) sc.skipped = owner.sessionId === null ? "session database has no session id" : "session database belongs to another session id";
             else if (!owner.workspacePaths.length) sc.skipped = "session database has no workspace";
             else if (!owner.workspacePaths.every((w) => real(w) === want)) sc.skipped = "session database workspace differs from runner cwd";
             else sc.ownedBy = "session database workspace";
@@ -612,15 +632,28 @@ export async function run(ctx) {
     const withPath = new Set(toolInputs.filter((t) => pathsOf(t).length).map((t) => t.id));
     // An item is allowed by its ACP `name` (1.5) when it has one, otherwise by its title (1.4 view_file). Names and
     // titles from tool_call and tool_call_update are both checked: an update may introduce or change the tool.
-    const allowedItem = (t) => (t.name !== undefined ? READ_TOOLS.has(t.name) || NO_PATH_TOOLS.has(t.name) : ALLOWED_TOOL_TITLE.test(String(t.title ?? "")));
+    // An update without a name keeps the name its call established (1.5 updates may change only the title), but
+    // only when the call's first item carried that name; a call that started nameless is judged item by item.
+    const firstName = new Map(), seenId = new Set();
+    for (const t of toolItems) {
+      if (t.id === undefined || seenId.has(t.id)) continue;
+      seenId.add(t.id);
+      if (t.name !== undefined) firstName.set(t.id, t.name);
+    }
+    const nameOf = (t) => t.name ?? (t.id !== undefined ? firstName.get(t.id) : undefined);
+    const allowedItem = (t) => { const n = nameOf(t); return n !== undefined ? READ_TOOLS.has(n) || NO_PATH_TOOLS.has(n) : ALLOWED_TOOL_TITLE.test(String(t.title ?? "")); };
     const badTitles = toolItems.filter((t) => (t.update === "tool_call" || t.title !== undefined || t.name !== undefined) && !allowedItem(t)).map((t) => t.name ?? t.title ?? null);
-    // Bookkeeping tools carry no path; every other call must have one, and only if ALL its items are bookkeeping.
-    const noPathIds = new Set(callIds.filter((id) => { const its = toolItems.filter((t) => t.id === id && t.name !== undefined); return its.length && its.every((t) => NO_PATH_TOOLS.has(t.name)); }));
+    // Bookkeeping tools carry no path; a call is exempt only when every one of its items is a bookkeeping tool by name.
+    const noPathIds = new Set(callIds.filter((id) => { const its = toolItems.filter((t) => t.id === id); return its.every((t) => NO_PATH_TOOLS.has(nameOf(t))); }));
+    // A tool call without a toolCallId cannot be matched to its inputs: never auditable.
+    const idless = toolItems.filter((t) => t.id === undefined).length;
     const outside = all.filter((p) => !insideRoot(cwd, p));
     out.toolAudit = { enabledTools: ENABLED_TOOLS, toolCallCount: callIds.length, pathsTouched: all.map((p) => String(p).slice(0, 500)), outsideSnapshot: outside.map((p) => String(p).slice(0, 500)), nonViewFileCalls: badTitles, callsWithoutAuditablePath: callIds.filter((id) => !withPath.has(id) && !noPathIds.has(id)), permissionRequests, clientRequests };
     if (outside.length) reasons.push(`tool_read_outside_snapshot:${outside.length}`);
     if (badTitles.length) reasons.push(`non_view_file_tool_calls:${badTitles.length}`);
     if (out.toolAudit.callsWithoutAuditablePath.length) reasons.push(`unauditable_tool_calls:${out.toolAudit.callsWithoutAuditablePath.length}`);
+    out.toolAudit.itemsWithoutCallId = idless;
+    if (idless) reasons.push(`tool_calls_without_id:${idless}`);
     if (clientRequests.length) reasons.push(`unexpected_client_requests:${clientRequests.length}`);
     if (permissionRequests.length) out.warnings.push(`permission requests rejected (reject_once): ${permissionRequests.length}`);
     if (cli) {
