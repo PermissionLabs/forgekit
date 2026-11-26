@@ -43,7 +43,7 @@ Its ten ACP rules (isolated `GEMINI_HOME`, `reject_once`, view_file only, `.meta
 
 | Track | Status | Changed paths | Verification | Risks |
 | --- | --- | --- | --- | --- |
-| Modules | Completed | `modules/cross-review/**`, `scripts/test-modules.sh` | `node --test modules/cross-review/test/*.test.mjs`; one real smoke per host | Medium — host CLIs change flags between releases; adapters were verified against Claude Code 2.1.332, codex-cli 0.167.0 (OS sandbox re-verified on 0.172.0), agy_acp_server 1.4.5 |
+| Modules | Completed | `modules/cross-review/**`, `scripts/test-modules.sh` | `node --test modules/cross-review/test/*.test.mjs`; one real smoke per host | Medium — host CLIs change flags between releases; adapters were verified against Claude Code 2.1.332, codex-cli 0.167.0 (OS sandbox re-verified on 0.172.0), agy_acp_server 1.4.5 and the Antigravity 1.5.18 CLI runtime |
 | Docs | Completed | `docs/review-skills/README.md`, `templates/docs/review-skills/README.md`, `README.md`, `docs/PROJECT_CONTEXT.md`, this file | `scripts/check-harness-sync.sh --forgekit`, `scripts/test-check-harness-sync.sh` | Low |
 | Server / Deploy / Frontend / App | Skipped | N/A | N/A | Harness repo only |
 
@@ -251,6 +251,42 @@ and had not refreshed by the end of the session (`stale`), and three other T3-ow
 processes were running at the same time, so the delta of this one run cannot be isolated. By tokens
 it is well under the r5/r6 full reviews that measured ~0.01 weekly.
 
+### Antigravity runtime 1.5 (2026-11-26)
+
+T3 replaced the Antigravity runtime with 1.5.18 (`versions/<releaseId>/` holding one `antigravity`
+executable and `.install-complete.json`; the `agy_acp_server.par` directories are gone), so r10 failed
+with `runtime_not_found`. Launch facts were taken read-only from T3 (`origin/custom/local`:
+`antigravityAuthSupport.ts` `buildAntigravityAcpSpawnInput`, `AntigravitySessionFiles.ts`,
+`Drivers/antigravityUsageReader.ts`), `antigravity --help` / `antigravity acp --help`, the profile's
+`log/acp-server-*.log`, and two isolated probe sessions (their session files were removed after their
+database workspace matched the probe cwd).
+
+| Aspect | ≤1.4 (`par`) | 1.5 (`cli`) | Adapter change |
+| --- | --- | --- | --- |
+| Discovery | dir name = version, `agy_acp_server.par` | `.install-complete.json` `version` + `executable.name` | `runtimeEntry`: plain file name, regular non-symlink executable of the recorded size; highest version of either layout |
+| argv | `agy_acp_server.par` | `antigravity acp --gemini-dir <home> --app-data-dir antigravity-acp` (T3's argv) | + `--log-file <tmp>/agy-server.log --disable-telemetry` |
+| Env | harness path, BROWSER helper | `AGY_CLI_DISABLE_AUTO_UPDATE=1`; ignores BROWSER | no harness var; `open`/`xdg-open` shims on PATH → `auth_required` marker |
+| Sign-in | files in `antigravity-acp/` | OS keyring entry (`ChainedAuth: authenticated via keyring`), same as the running T3 | none needed; the symlink is unchanged and no credential file is read |
+| Model per turn | stderr `Proxy extracted model from path: gemini-4-neon-high` | no proxy, nothing on stderr; `conversations/<id>.db` `gen_metadata` rows: field 19 `gemini-4-neon`, field 21 `Gemini 4 Neon (High)` | every turn must add ≥ 1 row and every row must equal the pin (`model_unconfirmed:*`, `generation_model_mismatch:*`); unreadable DB → incomplete |
+| Errors | stderr | `--log-file` (glog lines) | the log is polled with the same fatal/upstream checks; saved as `raw/antigravity-server.log` with e-mail addresses removed |
+| Tool allowlist | `enabledTools:["view_file"]` honoured | ignored (probe: `run_command`, `update_steps` offered with `enabledTools:["read_file"]`); read tool is `read_file` with ACP `name`/`args` | audit by `name`: `read_file`/`view_file` (paths audited), `update_steps` (no path); anything else → `non_view_file_tool_calls`. Commands still need a permission (probe: `run_command` asked, `reject_once`, failed). Session must start in mode `default` |
+| Session cleanup | `.meta` cwd | no `.meta`; `trajectory_metadata_blob` session id + workspace URIs | delete `.db*`, `brain/<id>`, `annotations/<id>.pbtxt` only when the DB's session id matches and every workspace URI realpath equals the snapshot |
+| Process match | `agy_acp_server`/`localharness_external` | `…/antigravity acp …` | `isAgy` also matches `antigravity acp` and this run's executable (ps args kept to 1000 chars) |
+| 300 s TTFB wall | local proxy | no proxy (none observed) | turn/chunk budgeting unchanged (still bounds each turn) |
+
+Safety properties kept: isolated GEMINI_HOME with only `antigravity-acp/` linked, runner as ACP
+client with fs/terminal off and `reject_once` for every permission, process-group cleanup, pinned vs
+reported model with `incomplete` on mismatch or when the model cannot be read, turn and chunk
+budgeting, session cleanup only on proven ownership. Weakened: the runtime-level `enabledTools`
+allowlist (1.5 ignores it); the restriction is now the after-the-fact audit plus the permission gate
+(see Residuals).
+
+Smoke (1.5.18, 7613dcc, `lib/plan.mjs` 4-line diff, correctness): `complete`, verdict pass, reported
+`gemini-4-neon`/`high`, `gen_metadata` `gemini-4-neon/gemini-4-neon-high` ×2 on the one turn, 89 s,
+1 `read_file` call inside the snapshot, 0 permission requests, exit 0, session `.db`/`-wal`/`-shm`,
+`brain/`, `annotations/` removed by workspace match, no leftover runtime process. Evidence:
+`stem-d/reviews/smoke-agy15/out/`.
+
 ## Review Cycles
 
 | Cycle | Type | Findings | Resolution |
@@ -429,7 +465,10 @@ it is well under the r5/r6 full reviews that measured ~0.01 weekly.
 | Design | Codex read-only sandbox does not confine reads to the snapshot | `fixed` (r2) | Runner-generated Seatbelt permission profile, self-tested per run |
 | r2 A46 (part) | Multi-turn `prior_verification` merging / last-turn mustCover through the ACP stub | `filed_followup` | Covered by schema/validator unit tests; stub needs prior-aware replies |
 | Design | Claude effort level is not reported by the host | `accepted_with_reason` | Recorded as pinned only; listed in `hostLimits` |
-| Design | Antigravity session persistence cannot be disabled | `accepted_with_reason` | Files deleted after the run when `.meta` cwd matches (same as T3) |
+| Design | Antigravity session persistence cannot be disabled | `accepted_with_reason` | Files deleted after the run when `.meta` cwd (≤1.4) or the session database's workspace (1.5) matches (same as T3); 1.5 also keeps a summary row in the profile's `conversation_summaries.db`, which is not touched |
+| Runtime 1.5 | `enabledTools` is ignored by the runtime, so a non-read tool (e.g. `search_web`, `invoke_subagent`) could run before the audit sees it | `accepted_with_reason` | Edits and commands still need a permission (always `reject_once`); any other tool makes the run `incomplete`; the prompt names `read_file` as the only allowed tool |
+| Runtime 1.5 | The model check depends on the undocumented `gen_metadata` protobuf layout (fields 1/19/21, as decoded by T3) | `accepted_with_reason` | A layout change yields an unreadable or mismatching record → `incomplete`, never a silent pass |
+| Runtime 1.5 | Sign-in comes from the OS keyring; if T3 later forces file storage (`SSH_CONNECTION`, `antigravity-oauth-token`) the keyring may be stale | `accepted_with_reason` | Fails closed as `auth_required`; the runner never opens a browser (PATH shims) |
 | antigravity-host-support C6 | Shared review contract and per-host adapters | `fixed` | This change |
 
 ## Compound Capture

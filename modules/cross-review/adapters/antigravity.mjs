@@ -1,22 +1,33 @@
-// Antigravity reviewer adapter: the runner is the ACP client of the T3-managed `agy_acp_server`.
+// Antigravity reviewer adapter: the runner is the ACP client of the T3-managed Antigravity runtime.
+// Two runtime layouts are supported (findRuntime):
+//  - "cli" (T3 runtime 1.5+): versions/<releaseId>/.install-complete.json names the executable (`antigravity`);
+//    it is started as `antigravity acp --gemini-dir <isolated home> --app-data-dir antigravity-acp --log-file <tmp>
+//    --disable-telemetry`. No local proxy; sign-in comes from the OS keyring (or the profile dir) as in T3.
+//  - "par" (runtime <= 1.4): versions/<version>/agy_acp_server.par with the Python proxy.
 // Ported from the proven view_file runner (ag-review-vf.ts, cycles r5-r8). Rules it enforces:
 //  - Isolated GEMINI_HOME holding only an `antigravity-acp` symlink to the T3 profile (no config/, so no global
 //    MCP config is merged). Token files are never opened. mcpServers: [].
 //  - Client capabilities fs/terminal false; every session/request_permission -> reject_once (never allow_*, never
-//    reject_always); any other client request -> -32601 and the run is incomplete.
-//  - Session _meta.antigravity.enabledTools = ["view_file"]; cwd = the read-only snapshot. Every tool call's
-//    locations[].path and rawInput path fields must resolve inside the snapshot; otherwise incomplete.
-//  - Model pin: set_config_option model + thinking level, verified from the response and from the stderr
-//    "Proxy extracted model from path: <model>-<thinking>" line, which every turn must carry (missing -> incomplete).
-//  - The local proxy aborts a model call whose first byte takes > 300 s (HTTP 502), so the review is split into one
-//    turn per dimension group, and a large scope is further split into file chunks per turn
-//    (max_files_per_turn / max_bytes_per_turn), in the same session, then merged. The first upstream failure
-//    cancels the run.
+//    reject_always); any other client request -> -32601 and the run is incomplete. The cli session must start in
+//    mode "default" (ask before edits and commands).
+//  - cwd = the read-only snapshot. "par": session _meta.antigravity.enabledTools = ["view_file"]. "cli": 1.5 ignores
+//    enabledTools, so the allowlist is enforced by the audit only: read_file/view_file (paths audited) and
+//    update_steps (no path); any other tool -> incomplete. Every tool call's locations[].path and rawInput/args path
+//    fields must resolve inside the snapshot; otherwise incomplete. A `open`/`xdg-open` shim on PATH turns a
+//    browser launch (sign-in) into auth_required instead of opening a URL.
+//  - Model pin: set_config_option model + thinking level, verified from the response and, per turn, from
+//    "par": the stderr "Proxy extracted model from path: <model>-<thinking>" line;
+//    "cli": the session database's gen_metadata rows (lib/agy-session-db.mjs), each of which must name the pinned
+//    model and thinking level. A turn without a confirming record, or an unreadable database -> incomplete.
+//  - "par": the local proxy aborts a model call whose first byte takes > 300 s (HTTP 502). The review is split into
+//    one turn per dimension group, and a large scope is further split into file chunks per turn
+//    (max_files_per_turn / max_bytes_per_turn), in the same session, then merged (kept for "cli": it bounds each
+//    turn's budget). The first upstream failure cancels the run.
 //  - Every turn (first and retry) is checked for timeout, upstream failure, RPC error, non-end_turn stop reason,
 //    fatal agent errors and auth prompts before its text is used; any of them withholds the review.
 //  - Per-turn schema validation with contiguous ids across turns and at most one corrective re-ask.
 //  - Process-group cleanup signals the group only while it is provably ours; session files removed only when
-//    the .meta cwd equals this run's cwd.
+//    the .meta cwd ("par") or every workspace URI in the session database ("cli", no .meta) equals this run's cwd.
 import { spawn, execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -25,12 +36,18 @@ import { expandHome } from "../lib/policy.mjs";
 import { insideRoot, redact, sha256 } from "../lib/inputs.mjs";
 import { groupMembers, ownedMembers } from "../lib/proc.mjs";
 import { groupsFor, planTurns, runTurns, totalBudget } from "../lib/turns.mjs";
+import { countGenerations, readGenerations, readTrajectoryOwner } from "../lib/agy-session-db.mjs";
 
 export { groupsFor, planTurns, totalBudget }; // re-exported for callers/tests of the adapter
 
 export const ENABLED_TOOLS = ["view_file"];
 export const CLIENT_CAPABILITIES = { fs: { readTextFile: false, writeTextFile: false }, terminal: false, session: { notices: {} } };
 const ALLOWED_TOOL_TITLE = /^(Running |Ran )?view_file\b/;
+/** "cli" tool names (ACP `name`): read tools whose paths are audited, and bookkeeping tools without a path. */
+export const READ_TOOLS = new Set(["read_file", "view_file"]);
+export const NO_PATH_TOOLS = new Set(["update_steps"]);
+const INSTALL_RECORD = ".install-complete.json";
+const PAR_NAMES = new Set(["agy_acp_server.par", "agy_acp_server.exe"]);
 const SESSION_SUFFIXES = [".db", ".db-wal", ".db-shm", ".db-journal", ".meta"];
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export const REMOVED_ENV = new Set([
@@ -38,6 +55,7 @@ export const REMOVED_ENV = new Set([
   "GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_QUOTA_PROJECT", "GOOGLE_GENAI_USE_VERTEXAI", "GCLOUD_PROJECT",
   "CLOUDSDK_CORE_PROJECT", "AGY_ACP_CCPA_PROJECT", "AGY_ACP_ENABLE_OAUTH", "GEMINI_HOME",
   "AGY_ACP_FORCE_FILE_STORAGE", "ANTIGRAVITY_HARNESS_PATH", "BROWSER", "PYTHONUNBUFFERED", "ELECTRON_RUN_AS_NODE",
+  "AGY_CLI_DISABLE_AUTO_UPDATE", "CHROME_CRASHPAD_PIPE_NAME",
 ]);
 const BROWSER_MARKER = "__CROSS_REVIEW_AUTH_URL__";
 const AUTH_PREFIX = "Open the following link to authenticate the ACP server: ";
@@ -53,20 +71,42 @@ export function sessionNewParams(cwd) {
   return { cwd, mcpServers: [], _meta: { antigravity: { enabledTools: ENABLED_TOOLS } } };
 }
 
-export function buildEnv(base, { geminiHome, tmpDir, harness }) {
+export function buildEnv(base, { geminiHome, tmpDir, harness, layout = "par", shimDir = null }) {
   const q = (s) => `'${s.replaceAll("'", `'"'"'`)}'`;
   const helper = `process.stderr.on("error",()=>process.exit(0)).write("${BROWSER_MARKER}"+"\\n",()=>process.exit(0))`;
   const env = {};
   for (const [k, v] of Object.entries(base)) if (v !== undefined && !REMOVED_ENV.has(k.toUpperCase())) env[k] = v;
-  return Object.assign(env, {
+  Object.assign(env, {
     GEMINI_HOME: geminiHome,
     AGY_ACP_FORCE_FILE_STORAGE: "1",
     BROWSER: [process.execPath, "-e", helper, "--", "%s"].map(q).join(" "), // an auth URL is never opened or logged
     PYTHONUNBUFFERED: "1",
     ELECTRON_RUN_AS_NODE: "1",
     TMPDIR: tmpDir,
-    ANTIGRAVITY_HARNESS_PATH: harness,
   });
+  if (layout === "par") env.ANTIGRAVITY_HARNESS_PATH = harness;
+  else {
+    env.AGY_CLI_DISABLE_AUTO_UPDATE = "1";
+    // The 1.5 CLI ignores BROWSER: `open`/`xdg-open` on PATH are shims that only record the attempt (no URL).
+    if (shimDir) { const pk = Object.keys(env).find((k) => k.toUpperCase() === "PATH") ?? "PATH"; env[pk] = env[pk] ? `${shimDir}${path.delimiter}${env[pk]}` : shimDir; }
+  }
+  return env;
+}
+
+/** argv for the runtime: "par" takes none; "cli" runs the ACP stdio server against the isolated home. */
+export function launchArgs(layout, { geminiHome, logFile }) {
+  if (layout === "par") return [];
+  // --app-data-dir is joined beneath --gemini-dir by the CLI (T3 passes the same pair).
+  return ["acp", "--gemini-dir", geminiHome, "--app-data-dir", "antigravity-acp", "--log-file", logFile, "--disable-telemetry"];
+}
+
+/** Browser shims: write a marker file and fail, so a sign-in attempt can never open a URL. */
+export function writeBrowserShims(shimDir, markerFile) {
+  fs.mkdirSync(shimDir, { recursive: true, mode: 0o700 });
+  const q = (s) => `'${s.replaceAll("'", `'"'"'`)}'`;
+  for (const name of ["open", "xdg-open"]) {
+    fs.writeFileSync(path.join(shimDir, name), `#!/bin/sh\n: > ${q(markerFile)}\nexit 1\n`, { mode: 0o700 });
+  }
 }
 
 function findProfile(profileRoot) {
@@ -78,12 +118,45 @@ function findProfile(profileRoot) {
 export function psList() {
   try {
     return execFileSync("ps", ["-eo", "pid=,pgid=,args="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).split("\n")
-      .map((l) => l.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/)).filter(Boolean).map((m) => ({ pid: +m[1], pgid: +m[2], cmd: m[3].slice(0, 160) }));
+      .map((l) => l.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/)).filter(Boolean).map((m) => ({ pid: +m[1], pgid: +m[2], cmd: m[3].slice(0, 1000) }));
   } catch { return []; }
 }
-const isAgy = (cmd) => /agy_acp_server|localharness_external/.test(cmd);
+/** An Antigravity runtime process: the 1.4 server/harness, a 1.5 `antigravity acp`, or this run's executable. */
+export const isAgy = (cmd, executable = null) => /agy_acp_server|localharness_external/.test(cmd)
+  || /(^|\/)antigravity(\.exe)?\s+acp(\s|$)/.test(cmd) || (!!executable && (cmd === executable || cmd.startsWith(`${executable} `)));
 
-/** Runtime directory: `{platform}-{arch}` placeholders expanded; the highest version holding agy_acp_server.par. */
+/**
+ * One version directory -> { version, dir, executable, layout } or null.
+ * "cli": `.install-complete.json` gives the version and executable name (a plain file name, a regular non-symlink
+ * executable file of the recorded size). A record naming agy_acp_server.par is the "par" layout. Without a record,
+ * a directory holding agy_acp_server.par is "par" with the directory name as version (pre-record installs).
+ */
+export function runtimeEntry(root, name) {
+  const dir = path.join(root, name);
+  const rec = path.join(dir, INSTALL_RECORD);
+  const exeOk = (exe, bytes) => {
+    try {
+      const st = fs.lstatSync(exe);
+      if (!st.isFile() || (Number.isSafeInteger(bytes) && st.size !== bytes)) return false;
+      fs.accessSync(exe, fs.constants.X_OK);
+      return true;
+    } catch { return false; }
+  };
+  if (fs.existsSync(rec)) {
+    let j;
+    try { j = JSON.parse(fs.readFileSync(rec, "utf8")); } catch { return null; }
+    const exeName = j?.executable?.name;
+    if (typeof j?.version !== "string" || !/^\d+(\.\d+)*([.+_-][0-9A-Za-z]+)*$/.test(j.version)) return null;
+    if (typeof exeName !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(exeName)) return null;
+    const executable = path.join(dir, exeName);
+    if (!exeOk(executable, j.executable.bytes)) return null;
+    return { version: j.version, dir, executable, layout: PAR_NAMES.has(exeName) ? "par" : "cli" };
+  }
+  const par = path.join(dir, "agy_acp_server.par");
+  return fs.existsSync(par) ? { version: name, dir, executable: par, layout: "par" } : null;
+}
+
+/** Runtime: `{platform}-{arch}` placeholders expanded; the highest version of either layout (runtimeEntry). */
 export function findRuntime(runtimeRootSetting) {
   const root = expandHome(String(runtimeRootSetting ?? "~/.t3/tools/antigravity-acp/{platform}-{arch}/versions").replaceAll("{platform}", process.platform).replaceAll("{arch}", process.arch));
   if (!fs.existsSync(root)) return { root, version: null };
@@ -97,8 +170,9 @@ export function findRuntime(runtimeRootSetting) {
     }
     return 0;
   };
-  const versions = fs.readdirSync(root).filter((d) => fs.existsSync(path.join(root, d, "agy_acp_server.par"))).sort(cmp);
-  return { root, version: versions.at(-1) ?? null, candidates: versions };
+  const entries = fs.readdirSync(root).map((d) => runtimeEntry(root, d)).filter(Boolean).sort((a, b) => cmp(a.version, b.version));
+  const best = entries.at(-1) ?? null;
+  return { root, version: best?.version ?? null, dir: best?.dir ?? null, executable: best?.executable ?? null, layout: best?.layout ?? null, candidates: entries.map((e) => `${e.version} (${e.layout})`) };
 }
 
 /**
@@ -143,7 +217,7 @@ export async function run(ctx) {
   const { input, pin, validateGroup, log, prefix, idStart, priorIds, dimensions } = ctx;
   const cfg = pin.config;
   const rt = cfg.runtime ?? {};
-  const out = { attempts: [], reasons: [], warnings: [], toolAudit: null, reported: { model: null, effort: null, source: "set_config_option currentValue; stderr proxy model on every turn", proxyModels: [] } };
+  const out = { attempts: [], reasons: [], warnings: [], toolAudit: null, reported: { model: null, effort: null, source: null, proxyModels: [], generationModels: [] } };
   const reasons = out.reasons;
   const t0 = Date.now();
   const ms = () => Date.now() - t0;
@@ -160,12 +234,17 @@ export async function run(ctx) {
   out.budget = { turns: turns.length, ...budget };
   if (budget.capped) out.warnings.push(`time budget capped: ${turns.length} turns x ${budget.perTurnSec} s > max_total_sec ${budget.capSec} s`);
 
-  // ---- runtime + profile (directory names only; files inside are never opened, except a session's .meta)
-  const { root: runtimeRoot, version } = findRuntime(rt.runtime_root);
+  // ---- runtime + profile (directory names only; files inside are never opened, except a session's .meta/.db)
+  const runtime = findRuntime(rt.runtime_root);
+  const { root: runtimeRoot, version, layout } = runtime;
   if (!version) { reasons.push(`runtime_not_found:${runtimeRoot}`); return out; }
-  const runtimeDir = path.join(runtimeRoot, version);
-  const serverBin = path.join(runtimeDir, "agy_acp_server.par");
-  out.argv = [serverBin];
+  const runtimeDir = runtime.dir;
+  const serverBin = runtime.executable;
+  const cli = layout === "cli";
+  out.runtime = { layout, version, dir: runtimeDir, executable: serverBin, candidates: runtime.candidates };
+  out.reported.source = cli
+    ? "set_config_option currentValue; session database gen_metadata model on every turn"
+    : "set_config_option currentValue; stderr proxy model on every turn";
   let profile;
   try { profile = rt.profile ? expandHome(rt.profile) : findProfile(expandHome(rt.profile_root ?? "~/.t3/userdata/providers/antigravity")); }
   catch (e) { reasons.push(`profile_not_found:${e.message}`); return out; }
@@ -175,6 +254,7 @@ export async function run(ctx) {
   const cwd = input.snapshot;
   let home = null, tmpDir = null, child = null, exitInfo = null, spawnFailed = null, sessionId, spawnedWall = 0;
   let authRequired = false, nextId = 1, collecting = null, upstreamFailures = 0, upstreamInTurns = 0, cleanupStartedWall = null;
+  let logFile = null, browserMarker = null, logOffset = 0, logBuf = "", logAll = "", genCount = 0, genReadError = null;
   const msgLines = [];
   let errAll = "", errBuf = "";
   const pending = new Map();
@@ -220,10 +300,11 @@ export async function run(ctx) {
     const u = m.params?.update ?? {};
     if (u.sessionUpdate === "agent_message_chunk" && u.content?.type === "text" && collecting) collecting.push(u.content.text);
     if (u.sessionUpdate === "tool_call" || u.sessionUpdate === "tool_call_update") {
-      toolItems.push({ update: u.sessionUpdate, id: u.toolCallId, title: u.title, kind: u.kind, status: u.status });
-      // Full values are audited; only the messages log is size-limited.
-      if (u.rawInput || u.locations) toolInputs.push({ id: u.toolCallId,
+      toolItems.push({ update: u.sessionUpdate, id: u.toolCallId, name: u.name, title: u.title, kind: u.kind, status: u.status });
+      // Full values are audited; only the messages log is size-limited. 1.5 sends `args`, 1.4 `rawInput`.
+      if (u.rawInput || u.args || u.locations) toolInputs.push({ id: u.toolCallId,
         rawInput: u.rawInput && typeof u.rawInput === "object" ? u.rawInput : undefined,
+        args: u.args && typeof u.args === "object" ? u.args : undefined,
         locations: Array.isArray(u.locations) ? u.locations.map((l) => l?.path) : undefined });
     }
   };
@@ -248,6 +329,36 @@ export async function run(ctx) {
     if (/^E\d{4}\s/.test(line) || /Agent run failed|AntigravityExecutionError|MCP load failed|RESOURCE_EXHAUSTED/.test(line)) agentErrors.push(redact(line).slice(0, 400));
   };
   const isFatal = (l) => /Agent run failed|AntigravityExecutionError|MCP load failed|RESOURCE_EXHAUSTED/.test(l);
+  // "cli": the runtime logs to --log-file instead of stderr; new lines are fed to the same checks.
+  const pollLog = () => {
+    if (!logFile) return;
+    let chunk = "";
+    try {
+      const fd = fs.openSync(logFile, "r");
+      try {
+        const size = fs.fstatSync(fd).size;
+        if (size > logOffset) { const b = Buffer.alloc(size - logOffset); fs.readSync(fd, b, 0, b.length, logOffset); logOffset = size; chunk = b.toString("utf8"); }
+      } finally { fs.closeSync(fd); }
+    } catch { return; }
+    if (!chunk) return;
+    logAll += chunk;
+    logBuf += chunk;
+    let nl;
+    while ((nl = logBuf.indexOf("\n")) !== -1) { const line = logBuf.slice(0, nl); logBuf = logBuf.slice(nl + 1); onStderrLine(line); }
+  };
+  const sessionDb = () => (sessionId && UUID_V4.test(sessionId) ? path.join(acpDir, "conversations", `${sessionId}.db`) : null);
+  // After a cli turn: wait briefly for its generation record(s) to be committed, then remember the count.
+  const settleGenerations = async (before) => {
+    const db = sessionDb();
+    if (!db) return before;
+    let n = before;
+    for (let i = 0; i < 12; i++) {
+      try { n = await countGenerations(db); genReadError = null; } catch (e) { genReadError = e.message; }
+      if (n > before) break;
+      await sleep(250);
+    }
+    return n;
+  };
 
   const runPrompt = async (blocks, label, timeoutMs) => {
     collecting = [];
@@ -257,6 +368,7 @@ export async function run(ctx) {
     const proxyStart = proxyModels.length;
     let timedOut = false, upstream = false;
     const watchdog = setInterval(() => {
+      pollLog();
       if (timedOut || upstream) return;
       if (ms() - started > timeoutMs) { timedOut = true; send({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId } }); }
       else if (upstreamFailures > failBefore) { upstream = true; send({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId } }); }
@@ -264,12 +376,14 @@ export async function run(ctx) {
     let resp, err;
     try { resp = await request("session/prompt", { sessionId, prompt: blocks }, timeoutMs + 60_000); } catch (e) { err = e; }
     clearInterval(watchdog);
+    pollLog();
     if (!upstream && upstreamFailures > failBefore) upstream = true;
     upstreamInTurns += upstreamFailures - failBefore; // A55: failures outside any turn are caught at cleanup
     const text = collecting.join("");
     collecting = null;
     if (resp?.usage) promptUsage.push({ label, ...resp.usage });
     const rec = { label, durationMs: ms() - started, timedOut, upstreamFailure: upstream, stopReason: resp?.stopReason ?? null, error: err ? String(err.message ?? err) : null, agentErrors: agentErrors.slice(errBefore), outputChars: text.length, promptSha256: sha256(JSON.stringify(blocks)), proxyStart };
+    if (cli) { rec.genStart = genCount; genCount = await settleGenerations(genCount); rec.genEnd = genCount; }
     out.attempts.push(rec);
     return { rec, text };
   };
@@ -289,11 +403,20 @@ export async function run(ctx) {
     home = fs.mkdtempSync(path.join(os.tmpdir(), "cross-review-gemini-home-"));
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cross-review-agy-tmp-"));
     fs.symlinkSync(acpDir, path.join(home, "antigravity-acp"));
-    out.isolation = { geminiHome: home, antigravityAcpLink: acpDir, cwd, clientCapabilities: CLIENT_CAPABILITIES, sessionMeta: { antigravity: { enabledTools: ENABLED_TOOLS } }, permissionPolicy: "reject_once", runtime: version };
-    psBefore = psList().filter((p) => isAgy(p.cmd)).map((p) => p.pid);
-    const env = buildEnv(process.env, { geminiHome: home, tmpDir, harness: path.join(runtimeDir, "localharness_external") });
+    let shimDir = null;
+    if (cli) {
+      logFile = path.join(tmpDir, "agy-server.log");
+      browserMarker = path.join(tmpDir, "browser-open-attempted");
+      shimDir = path.join(tmpDir, "browser-shim");
+      writeBrowserShims(shimDir, browserMarker);
+    }
+    const args = launchArgs(layout, { geminiHome: home, logFile });
+    out.argv = [serverBin, ...args];
+    out.isolation = { geminiHome: home, antigravityAcpLink: acpDir, cwd, clientCapabilities: CLIENT_CAPABILITIES, sessionMeta: { antigravity: { enabledTools: ENABLED_TOOLS } }, enabledToolsEnforcedBy: cli ? "audit only (1.5 ignores enabledTools)" : "runtime + audit", permissionPolicy: "reject_once", runtime: version, layout, browserShim: shimDir };
+    psBefore = psList().filter((p) => isAgy(p.cmd, serverBin)).map((p) => p.pid);
+    const env = buildEnv(process.env, { geminiHome: home, tmpDir, harness: path.join(runtimeDir, "localharness_external"), layout, shimDir });
     spawnedWall = Date.now();
-    child = spawn(serverBin, [], { cwd, env, stdio: ["pipe", "pipe", "pipe"], detached: true });
+    child = spawn(serverBin, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"], detached: true });
     child.on("exit", (code, signal) => { exitInfo = { code, signal, atMs: ms(), wall: Date.now(), duringCleanup: cleanupStartedWall !== null }; failPending(`agent exited (${code ?? signal})`); resolveExited(); });
     child.on("error", (e) => { spawnFailed = e.message; reasons.push(`spawn_error:${e.message}`); failPending(`spawn failed: ${e.message}`); resolveExited(); resolveErrClosed(); });
     child.stdin.on("error", () => {});
@@ -317,10 +440,17 @@ export async function run(ctx) {
     out.agent = { name: init?.agentInfo?.name ?? null, version: init?.agentInfo?.version ?? null, runtimeDir: version };
     if (rt.expect_agent_version && out.agent.version !== rt.expect_agent_version) { reasons.push(`agent_version_mismatch:${out.agent.version}`); return; }
     try { await request("authenticate", { methodId: "oauth-personal" }, 60_000); }
-    catch (e) { reasons.push(authRequired || e.message === "AUTH_REQUIRED" ? "auth_required" : `authenticate_failed:${e.message}`); return; }
+    catch (e) {
+      // 1.5 answers a missing sign-in with -32000 or "No browser is available here..." (T3 antigravityAuthSupport).
+      const signIn = /AUTH_REQUIRED|No browser is available|not logged in/i.test(e.message ?? "");
+      reasons.push(authRequired || signIn ? "auth_required" : `authenticate_failed:${e.message}`); return;
+    }
     const ns = await request("session/new", sessionNewParams(cwd), 120_000);
     sessionId = ns.sessionId;
     out.sessionId = sessionId;
+    // 1.5 advertises session modes; anything but "default" (ask before edits and commands) is refused.
+    out.sessionMode = ns.modes?.currentModeId ?? null;
+    if (cli && out.sessionMode !== "default") { reasons.push(`session_mode_not_default:${out.sessionMode}`); return; }
     let opts = ns.configOptions ?? [];
     const r1 = await request("session/set_config_option", { sessionId, configId: "model", value: pin.model });
     opts = r1?.configOptions ?? opts;
@@ -337,7 +467,10 @@ export async function run(ctx) {
     const turnMs = (cfg.turn_timeout_sec ?? 600) * 1000;
     const retryMs = (cfg.retry_timeout_sec ?? 280) * 1000;
     const fileList = input.files.map((f) => `${path.join(cwd, f.path)}  (${f.lines} lines${f.kind === "context" ? ", context only" : ""})`).join("\n");
-    const toolNote = `You have exactly ONE tool: view_file. Read files with view_file using the absolute paths listed below (snapshot root ${cwd}); read only those files, in several small steps. No shell, no web, no writes.`;
+    const tool = cli ? "read_file" : "view_file";
+    const toolNote = cli
+      ? `Use ONLY the ${tool} tool. Read files with ${tool} using the absolute paths listed below (snapshot root ${cwd}); read only those files, in several small steps. Any other tool (commands, edits, web search, subagents, questions) invalidates the review. No shell, no web, no writes.`
+      : `You have exactly ONE tool: view_file. Read files with view_file using the absolute paths listed below (snapshot root ${cwd}); read only those files, in several small steps. No shell, no web, no writes.`;
     const parts = [];
     const priorSeen = new Set();
     let nextFinding = idStart;
@@ -416,58 +549,105 @@ export async function run(ctx) {
       // An unterminated last stderr line (e.g. RESOURCE_EXHAUSTED at exit) is flushed and checked here, before
       // the review can be accepted: any fatal agent error or upstream failure seen anywhere invalidates the run.
       if (errBuf) { onStderrLine(errBuf); errBuf = ""; }
+      pollLog();
+      if (logBuf) { onStderrLine(logBuf); logBuf = ""; }
       if (agentErrors.some(isFatal) && !reasons.some((r) => r.startsWith("agent_error:"))) reasons.push(`agent_error:stderr (${agentErrors.filter(isFatal).at(-1).slice(0, 120)})`);
       if (upstreamFailures > upstreamInTurns && !reasons.some((r) => r.startsWith("upstream_502:"))) reasons.push(`upstream_502:stderr outside a turn (${upstreamFailures - upstreamInTurns})`);
       // The server must exit cleanly after stdin closes; a non-zero code, or a signal we did not send, is a failure.
       const er = exitReason({ exitInfo, cleanupStartedWall, signals, pid });
       if (er) reasons.push(er);
       // agy processes outside our group may belong to another session: reported, never signalled.
-      const strays = psList().filter((p) => isAgy(p.cmd) && p.pgid !== pid && !psBefore.includes(p.pid)).map((p) => p.pid);
+      const strays = psList().filter((p) => isAgy(p.cmd, serverBin) && p.pgid !== pid && !psBefore.includes(p.pid)).map((p) => p.pid);
       if (strays.length) out.warnings.push(`agy processes outside this run's process group (not signalled): ${strays.join(",")}`);
       out.process = { exit: exitInfo, signals, straysOutsideGroup: strays.length };
     }
-    // Session files: only when the .meta cwd is this run's snapshot.
+    if (browserMarker && fs.existsSync(browserMarker)) authRequired = true; // a sign-in tried to open a browser
+    // "cli" model confirmation source: every generation the session recorded (read before the files are removed).
+    let generations = null;
+    if (cli && sessionDb()) {
+      try { generations = await readGenerations(sessionDb()); } catch (e) { genReadError = e.message; }
+    }
+    // Session files: only when the session provably belongs to this run's snapshot: the .meta cwd ("par"), or,
+    // without .meta ("cli"), the session database's own session id and every workspace URI.
     const sc = { sessionId: sessionId ?? null, removed: [], skipped: null };
     try {
       if (!sessionId || !UUID_V4.test(sessionId)) sc.skipped = "no native session id";
       else {
         const base = path.join(acpDir, "conversations", sessionId);
         const brain = path.join(acpDir, "brain", sessionId);
-        let metaCwd;
-        if (!fs.existsSync(`${base}.meta`)) sc.skipped = ".meta missing";
-        else {
+        const annotation = path.join(acpDir, "annotations", `${sessionId}.pbtxt`);
+        if (fs.existsSync(`${base}.meta`)) {
+          let metaCwd;
           try { metaCwd = JSON.parse(fs.readFileSync(`${base}.meta`, "utf8"))?.cwd; } catch (e) { sc.skipped = `.meta unreadable: ${e.message}`; }
           if (!sc.skipped && metaCwd !== cwd) sc.skipped = ".meta cwd differs from runner cwd";
+          if (!sc.skipped) sc.ownedBy = ".meta cwd";
+        } else if (!cli) sc.skipped = ".meta missing";
+        else if (!fs.existsSync(`${base}.db`)) sc.skipped = ".meta and session database missing";
+        else {
+          let owner;
+          try { owner = await readTrajectoryOwner(`${base}.db`); } catch (e) { sc.skipped = `session database ownership unreadable: ${e.message}`; }
           if (!sc.skipped) {
-            for (const s of SESSION_SUFFIXES) if (fs.existsSync(base + s)) { fs.rmSync(base + s, { force: true }); sc.removed.push(sessionId + s); }
-            if (fs.existsSync(brain)) { fs.rmSync(brain, { recursive: true, force: true }); sc.removed.push(`brain/${sessionId}/`); }
+            const real = (p) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
+            const want = real(cwd);
+            if (owner.sessionId !== null && owner.sessionId !== sessionId) sc.skipped = "session database belongs to another session id";
+            else if (!owner.workspacePaths.length) sc.skipped = "session database has no workspace";
+            else if (!owner.workspacePaths.every((w) => real(w) === want)) sc.skipped = "session database workspace differs from runner cwd";
+            else sc.ownedBy = "session database workspace";
           }
+        }
+        if (!sc.skipped) {
+          for (const s of SESSION_SUFFIXES) if (fs.existsSync(base + s)) { fs.rmSync(base + s, { force: true }); sc.removed.push(sessionId + s); }
+          if (fs.existsSync(brain)) { fs.rmSync(brain, { recursive: true, force: true }); sc.removed.push(`brain/${sessionId}/`); }
+          if (fs.existsSync(annotation)) { fs.rmSync(annotation, { force: true }); sc.removed.push(`annotations/${sessionId}.pbtxt`); }
         }
       }
     } catch (e) { sc.error = e.message; }
     out.sessionCleanup = sc;
     if (sc.skipped && sessionId) out.warnings.push(`session files not removed: ${sc.skipped}`);
     // Tool/path audit (snapshot still exists; the runner removes it after this adapter returns).
-    const pathsOf = (t) => [...(t.locations ?? []), ...Object.entries(t.rawInput ?? {}).filter(([k, x]) => typeof x === "string" && /path|file|uri|dir/i.test(k)).map(([, x]) => x)].filter(Boolean);
+    const pathFields = (o) => Object.entries(o ?? {}).filter(([k, x]) => typeof x === "string" && /path|file|uri|dir/i.test(k)).map(([, x]) => x);
+    const pathsOf = (t) => [...(t.locations ?? []), ...pathFields(t.rawInput), ...pathFields(t.args)].filter(Boolean);
     const all = [...new Set(toolInputs.flatMap(pathsOf))];
     const callIds = [...new Set(toolItems.map((t) => t.id).filter((x) => x !== undefined))];
     const withPath = new Set(toolInputs.filter((t) => pathsOf(t).length).map((t) => t.id));
-    // Titles from tool_call and tool_call_update: an update may introduce or change the tool.
-    const badTitles = toolItems.filter((t) => (t.update === "tool_call" || t.title !== undefined) && !ALLOWED_TOOL_TITLE.test(String(t.title ?? ""))).map((t) => t.title ?? null);
+    // An item is allowed by its ACP `name` (1.5) when it has one, otherwise by its title (1.4 view_file). Names and
+    // titles from tool_call and tool_call_update are both checked: an update may introduce or change the tool.
+    const allowedItem = (t) => (t.name !== undefined ? READ_TOOLS.has(t.name) || NO_PATH_TOOLS.has(t.name) : ALLOWED_TOOL_TITLE.test(String(t.title ?? "")));
+    const badTitles = toolItems.filter((t) => (t.update === "tool_call" || t.title !== undefined || t.name !== undefined) && !allowedItem(t)).map((t) => t.name ?? t.title ?? null);
+    // Bookkeeping tools carry no path; every other call must have one, and only if ALL its items are bookkeeping.
+    const noPathIds = new Set(callIds.filter((id) => { const its = toolItems.filter((t) => t.id === id && t.name !== undefined); return its.length && its.every((t) => NO_PATH_TOOLS.has(t.name)); }));
     const outside = all.filter((p) => !insideRoot(cwd, p));
-    out.toolAudit = { enabledTools: ENABLED_TOOLS, toolCallCount: callIds.length, pathsTouched: all.map((p) => String(p).slice(0, 500)), outsideSnapshot: outside.map((p) => String(p).slice(0, 500)), nonViewFileCalls: badTitles, callsWithoutAuditablePath: callIds.filter((id) => !withPath.has(id)), permissionRequests, clientRequests };
+    out.toolAudit = { enabledTools: ENABLED_TOOLS, toolCallCount: callIds.length, pathsTouched: all.map((p) => String(p).slice(0, 500)), outsideSnapshot: outside.map((p) => String(p).slice(0, 500)), nonViewFileCalls: badTitles, callsWithoutAuditablePath: callIds.filter((id) => !withPath.has(id) && !noPathIds.has(id)), permissionRequests, clientRequests };
     if (outside.length) reasons.push(`tool_read_outside_snapshot:${outside.length}`);
     if (badTitles.length) reasons.push(`non_view_file_tool_calls:${badTitles.length}`);
     if (out.toolAudit.callsWithoutAuditablePath.length) reasons.push(`unauditable_tool_calls:${out.toolAudit.callsWithoutAuditablePath.length}`);
     if (clientRequests.length) reasons.push(`unexpected_client_requests:${clientRequests.length}`);
     if (permissionRequests.length) out.warnings.push(`permission requests rejected (reject_once): ${permissionRequests.length}`);
-    // Per-turn model confirmation: every prompt turn must carry at least one matching proxy line.
-    out.attempts.forEach((rec, i) => {
-      const end = out.attempts[i + 1]?.proxyStart ?? proxyModels.length;
-      rec.proxyModels = proxyModels.slice(rec.proxyStart, end);
-      if (!rec.proxyModels.length) reasons.push(`proxy_model_unconfirmed:${rec.label}`);
-    });
-    if (!proxyModels.every((m) => m === expectedProxyModel)) reasons.push(`proxy_model_mismatch:${[...new Set(proxyModels)].join(",")}`);
+    if (cli) {
+      // Per-turn model confirmation from the session database: every prompt turn must add at least one generation,
+      // and every generation must be the pinned model at the pinned thinking level. Rows committed after a turn's
+      // settle window count for the last turn they could belong to; all rows are checked either way.
+      if (generations === null && out.attempts.length) reasons.push(`model_unconfirmed:session database unreadable (${genReadError ?? "no session"})`);
+      else if (generations !== null) {
+        const shown = (g) => `${g.model ?? "?"}/${g.normalized ?? "?"}`;
+        out.reported.generationModels = generations.map(shown);
+        out.attempts.forEach((rec, i) => {
+          const end = i === out.attempts.length - 1 ? generations.length : rec.genEnd;
+          rec.generationModels = generations.slice(rec.genStart, end).map(shown);
+          if (!rec.generationModels.length) reasons.push(`model_unconfirmed:${rec.label}`);
+        });
+        const bad = generations.filter((g) => g.model !== pin.model || g.normalized !== expectedProxyModel);
+        if (bad.length) reasons.push(`generation_model_mismatch:${[...new Set(bad.map(shown))].join(",")}`);
+      }
+    } else {
+      // Per-turn model confirmation: every prompt turn must carry at least one matching proxy line.
+      out.attempts.forEach((rec, i) => {
+        const end = out.attempts[i + 1]?.proxyStart ?? proxyModels.length;
+        rec.proxyModels = proxyModels.slice(rec.proxyStart, end);
+        if (!rec.proxyModels.length) reasons.push(`proxy_model_unconfirmed:${rec.label}`);
+      });
+      if (!proxyModels.every((m) => m === expectedProxyModel)) reasons.push(`proxy_model_mismatch:${[...new Set(proxyModels)].join(",")}`);
+    }
     const keys = ["totalTokens", "inputTokens", "outputTokens", "thoughtTokens", "cachedReadTokens", "cachedWriteTokens"];
     out.usage = Object.fromEntries(keys.map((k) => [k, promptUsage.reduce((a, u) => a + (Number(u[k]) || 0), 0)]));
     out.authRequired = authRequired;
@@ -486,6 +666,8 @@ export async function run(ctx) {
     } catch (e) { out.warnings.push(`isolation cleanup: ${e.message}`); }
     log("messages.jsonl", msgLines.join("\n") + "\n");
     log("stderr.log", redact(errAll));
+    // Account e-mail addresses are dropped from the saved runtime log as well.
+    if (cli) log("server.log", redact(logAll).replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]"));
   };
 
   const hard = setTimeout(() => { reasons.push("hard_timeout"); failPending("hard_timeout"); }, budget.totalMs + 120_000);
@@ -494,7 +676,11 @@ export async function run(ctx) {
     clearTimeout(hard);
     await finish();
   }
-  out.limits = [
+  out.limits = cli ? [
+    "Antigravity does not report the model per response; the pin is checked from set_config_option and from the session database's per-generation model records (gen_metadata), whose layout may change between runtime versions.",
+    "Runtime 1.5 ignores the enabledTools allowlist: the tool restriction is enforced after the fact by the audit (any non-read tool makes the run incomplete) and, for edits and commands, by rejecting every permission request.",
+    "Session persistence cannot be disabled; session files are deleted after the run when the session database's workspace matches.",
+  ] : [
     "Antigravity does not report the model per response; the pin is checked from set_config_option and the local proxy's stderr line on every turn, which may change between runtime versions.",
     "Session persistence cannot be disabled; session files are deleted after the run when their .meta cwd matches.",
   ];

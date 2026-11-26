@@ -8,13 +8,14 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadPolicy, defaultPolicyPath } from "../lib/policy.mjs";
 import { runReview } from "../lib/run.mjs";
-import { exitReason, findRuntime, planTurns, stopGroup, totalBudget } from "../adapters/antigravity.mjs";
+import { buildEnv, exitReason, findRuntime, isAgy, launchArgs, planTurns, stopGroup, totalBudget } from "../adapters/antigravity.mjs";
+import { decodeGeneration, normalizeModelName, protoFields } from "../lib/agy-session-db.mjs";
 import { plan } from "../lib/plan.mjs";
 import { runTurns } from "../lib/turns.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const { policy: basePolicy } = loadPolicy(defaultPolicyPath());
-let tmp, repo, rev, policyPath, diffPath, briefPath, profileAcp, runtimeRoot;
+let tmp, repo, rev, policyPath, diffPath, briefPath, profileAcp, runtimeRoot, cliRoot;
 const git = (...a) => execFileSync("git", ["-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "-C", repo, ...a], { encoding: "utf8" }).trim();
 const DIMS = ["correctness", "tests"];
 
@@ -37,6 +38,25 @@ before(() => {
     fs.writeFileSync(path.join(runtimeRoot, v, "agy_acp_server.par"), `#!/bin/sh\nexec '${process.execPath}' '${path.join(HERE, "fixtures", "fake-agy.mjs")}' "$@"\n`);
     fs.chmodSync(path.join(runtimeRoot, v, "agy_acp_server.par"), 0o755);
   }
+  // 1.5 "cli" layout: release-id directories with .install-complete.json naming the executable.
+  cliRoot = path.join(tmp, "cli-runtime", "versions");
+  const launcher = `#!/bin/sh\nexec '${process.execPath}' --no-warnings '${path.join(HERE, "fixtures", "fake-agy.mjs")}' "$@"\n`;
+  const rel = (dir, rec, exe = "antigravity", body = launcher) => {
+    const d = path.join(cliRoot, dir);
+    fs.mkdirSync(d, { recursive: true });
+    if (body !== null) { fs.writeFileSync(path.join(d, exe), body); fs.chmodSync(path.join(d, exe), 0o755); }
+    fs.writeFileSync(path.join(d, ".install-complete.json"), JSON.stringify({ releaseId: dir, executable: { name: exe, bytes: Buffer.byteLength(body ?? "") }, ...rec }));
+  };
+  rel("aaa-new", { version: "1.5.18" });
+  rel("bbb-old", { version: "1.5.2" });
+  rel("ccc-badsize", { version: "9.9.1", executable: { name: "antigravity", bytes: 1 } });
+  rel("ddd-badname", { version: "9.9.2", executable: { name: "../antigravity", bytes: 1 } }, "x");
+  rel("eee-noversion", { version: "../9" });
+  rel("fff-symlink", { version: "9.9.3" }, "antigravity", null);
+  fs.symlinkSync(path.join(cliRoot, "aaa-new", "antigravity"), path.join(cliRoot, "fff-symlink", "antigravity"));
+  fs.mkdirSync(path.join(cliRoot, "1.4.9"));
+  fs.writeFileSync(path.join(cliRoot, "1.4.9", "agy_acp_server.par"), launcher);
+  fs.chmodSync(path.join(cliRoot, "1.4.9", "agy_acp_server.par"), 0o755);
   profileAcp = path.join(tmp, "profiles", "p1", "antigravity-acp");
   fs.mkdirSync(profileAcp, { recursive: true });
   const p = JSON.parse(JSON.stringify(basePolicy));
@@ -280,4 +300,90 @@ test("planTurns and findRuntime", () => {
   assert.deepEqual(planTurns([["x"], ["y"]], files, { maxFiles: 2 }).map((t) => t.label), ["group:x:files1/2", "group:x:files2/2", "group:y:files1/2", "group:y:files2/2"]);
   assert.equal(findRuntime(runtimeRoot).version, "1.10.0");
   assert.match(findRuntime("/nowhere/{platform}-{arch}/v").root, new RegExp(`${process.platform}-${process.arch}`));
+});
+
+// ---------------------------------------------------------------- 1.5 "cli" runtime layout
+const goCli = (fake = {}, over = {}) => go(fake, { runtime: { ...policy().hosts.antigravity.runtime, runtime_root: cliRoot }, ...over });
+
+test("cli layout: findRuntime reads .install-complete.json, picks the highest valid version, skips bad records", () => {
+  const r = findRuntime(cliRoot);
+  assert.equal(r.version, "1.5.18");
+  assert.equal(r.layout, "cli");
+  assert.equal(r.executable, path.join(cliRoot, "aaa-new", "antigravity"));
+  // size mismatch, a path in the name, a non-numeric version and a symlinked executable are never candidates
+  assert.deepEqual(r.candidates.sort(), ["1.4.9 (par)", "1.5.18 (cli)", "1.5.2 (cli)"]);
+  assert.equal(findRuntime(runtimeRoot).layout, "par");
+  assert.deepEqual(launchArgs("par", { geminiHome: "/h", logFile: "/l" }), []);
+  assert.deepEqual(launchArgs("cli", { geminiHome: "/h", logFile: "/l" }), ["acp", "--gemini-dir", "/h", "--app-data-dir", "antigravity-acp", "--log-file", "/l", "--disable-telemetry"]);
+});
+
+test("cli layout: env drops inherited Antigravity variables, adds the update/browser guards, no harness path", () => {
+  const env = buildEnv({ PATH: "/usr/bin", GEMINI_HOME: "/x", AGY_CLI_DISABLE_AUTO_UPDATE: "0", CHROME_CRASHPAD_PIPE_NAME: "p", GOOGLE_API_KEY: "k" }, { geminiHome: "/h", tmpDir: "/t", harness: "/hx", layout: "cli", shimDir: "/s" });
+  assert.equal(env.GEMINI_HOME, "/h");
+  assert.equal(env.AGY_CLI_DISABLE_AUTO_UPDATE, "1");
+  assert.equal(env.PATH, `/s${path.delimiter}/usr/bin`);
+  assert.equal(env.ANTIGRAVITY_HARNESS_PATH, undefined);
+  assert.equal(env.CHROME_CRASHPAD_PIPE_NAME, undefined);
+  assert.equal(env.GOOGLE_API_KEY, undefined);
+  assert.equal(buildEnv({ PATH: "/usr/bin" }, { geminiHome: "/h", tmpDir: "/t", harness: "/hx" }).ANTIGRAVITY_HARNESS_PATH, "/hx");
+});
+
+test("isAgy matches the 1.4 server, the 1.5 `antigravity acp` process and this run's executable", () => {
+  assert.ok(isAgy("/r/versions/1.4.5/agy_acp_server.par"));
+  assert.ok(isAgy("/Users/u/.t3/tools/antigravity-acp/darwin-arm64/versions/d10e/antigravity acp --gemini-dir /h"));
+  assert.ok(isAgy("/opt/x/runtime-bin --worker", "/opt/x/runtime-bin"));
+  assert.ok(!isAgy("/Applications/Antigravity.app/Contents/MacOS/Antigravity"));
+  assert.ok(!isAgy("vim antigravity.md"));
+});
+
+test("session database decoding: generation model and display name, normalisation", () => {
+  const v = (x) => { const o = []; while (x > 127) { o.push((x & 127) | 128); x = Math.floor(x / 128); } o.push(x); return Buffer.from(o); };
+  const enc = (fs_) => Buffer.concat(fs_.map(([n, s]) => { const b = Buffer.isBuffer(s) ? s : Buffer.from(s); return Buffer.concat([v(n * 8 + 2), v(b.length), b]); }));
+  const g = decodeGeneration(enc([[1, enc([[19, "gemini-4-neon"], [21, "Gemini 4 Neon (High)"]])]]));
+  assert.deepEqual(g, { model: "gemini-4-neon", display: "Gemini 4 Neon (High)", normalized: "gemini-4-neon-high" });
+  assert.equal(normalizeModelName("Gemini 4 Neon (XHigh)"), "gemini-4-neon-xhigh");
+  assert.throws(() => decodeGeneration(enc([[2, "x"]])), /missing/);
+  assert.throws(() => protoFields(Buffer.from([0x0a, 0x05, 0x61])), /truncated/);
+});
+
+test("cli layout happy path: argv, per-turn generation model, read_file audit, session files removed by workspace", async () => {
+  const ev = await goCli({ steps: true });
+  assert.equal(ev.status, "complete", ev.incompleteReasons.join());
+  assert.equal(ev.extra.runtime.layout, "cli");
+  assert.equal(ev.isolation.runtime, "1.5.18");
+  assert.deepEqual(ev.argv.slice(1, 6), ["acp", "--gemini-dir", ev.isolation.geminiHome, "--app-data-dir", "antigravity-acp"]);
+  assert.deepEqual(ev.attempts.map((a) => a.generationModels), [["gemini-4-neon/gemini-4-neon-high"], ["gemini-4-neon/gemini-4-neon-high"]]);
+  assert.equal(ev.reported.model, "gemini-4-neon");
+  assert.deepEqual(ev.toolAudit.nonViewFileCalls, []);
+  assert.deepEqual(ev.toolAudit.callsWithoutAuditablePath, []);
+  assert.equal(ev.extra.sessionCleanup.ownedBy, "session database workspace");
+  assert.deepEqual(ev.extra.sessionCleanup.removed.sort(), ["11111111-1111-4111-8111-111111111111.db", "annotations/11111111-1111-4111-8111-111111111111.pbtxt"]);
+  assert.equal(ev.extra.sessionMode, "default");
+  assert.equal(fs.existsSync(ev.isolation.geminiHome), false);
+});
+
+test("cli layout: a turn without a generation record, a different model or level, or no database -> incomplete", async () => {
+  withheld(await goCli({ noGen: [1] }), /model_unconfirmed:group:tests/);
+  withheld(await goCli({ genDisplay: "Gemini 4 Neon (Low)" }), /generation_model_mismatch:gemini-4-neon\/gemini-4-neon-low/);
+  withheld(await goCli({ genModel: "gemini-3.8-flash" }), /generation_model_mismatch:gemini-3\.8-flash/);
+  withheld(await goCli({ noGen: [0, 1] }), /model_unconfirmed:group:correctness/);
+});
+
+test("cli layout: non-read tools, reads outside the snapshot, log-file errors, auth and session mode are fatal", async () => {
+  withheld(await goCli({ toolName: { 0: "run_command" } }), /non_view_file_tool_calls:1/);
+  withheld(await goCli({ readPath: { 0: "/etc/hosts" } }), /tool_read_outside_snapshot/);
+  withheld(await goCli({ stderrLine: { 0: "E1126 agent.go:1] RESOURCE_EXHAUSTED quota" } }), /agent_error:group:correctness/);
+  withheld(await goCli({ mode: "auto" }), /session_mode_not_default:auto/);
+  const b = await goCli({ browser: true });
+  withheld(b, /auth_required/);
+  assert.equal(b.extra.authRequired, true);
+});
+
+test("cli layout: session files are kept when the database workspace is not this run's snapshot", async () => {
+  const ev = await goCli({ workspace: "/somewhere/else" });
+  assert.equal(ev.status, "complete", ev.incompleteReasons.join());
+  assert.equal(ev.extra.sessionCleanup.skipped, "session database workspace differs from runner cwd");
+  assert.deepEqual(ev.extra.sessionCleanup.removed, []);
+  assert.ok(fs.existsSync(path.join(profileAcp, "conversations", "11111111-1111-4111-8111-111111111111.db")));
+  fs.rmSync(path.join(profileAcp, "conversations", "11111111-1111-4111-8111-111111111111.db"));
 });

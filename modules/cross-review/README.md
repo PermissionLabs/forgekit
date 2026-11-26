@@ -148,15 +148,15 @@ another reviewer or model.
 | Guarantee | Claude (`claude -p`) | Codex (`codex exec`) | Antigravity (ACP) |
 | --- | --- | --- | --- |
 | Model / effort | `--model`, `--effort` from policy | `-m`, `-c model_reasoning_effort=` | `session/set_config_option` model + thinking level |
-| Reported model | stream `init.model` + `modelUsage` keys | stderr header `model:` (client-resolved) | `set_config_option` currentValue + stderr proxy model per call |
-| No writes | `--tools Read,Grep,Glob`, `--restricted`, `--permission-mode dontAsk` | OS sandbox profile with no write entry (header must say `sandbox: read-only`), `approval_policy="never"` | `enabledTools:["view_file"]`, fs/terminal capabilities false, permissions `reject_once` |
-| Reads confined | `--restricted` confines file tools to cwd = snapshot; audit of every tool path, Glob patterns (each brace alternative; over 64 alternatives an automaton decides whether any alternative is absolute, `~` or has `..`: if so the run is `incomplete` with `tool_glob_unauditable`, otherwise it is a relative glob) and Grep `path`/`glob` (Grep's regex `pattern` is not a path); `~` paths are outside | **OS-enforced** (macOS Seatbelt, see below); the shell-command audit is evidence only (warnings) | audit of every `view_file` path (full `rawInput`, `tool_call_update` titles); `~` paths are outside |
-| Code execution | none (no Bash) | interpreters / command substitution may run, always under the same OS sandbox; `hosts.codex.allow_code_execution` (default `true`) only decides whether node's package dir is granted; code execution is recorded as a warning | none (`view_file` only) |
+| Reported model | stream `init.model` + `modelUsage` keys | stderr header `model:` (client-resolved) | `set_config_option` currentValue + per turn: runtime 1.5 session-database `gen_metadata` model (every generation), runtime ≤1.4 stderr proxy model |
+| No writes | `--tools Read,Grep,Glob`, `--restricted`, `--permission-mode dontAsk` | OS sandbox profile with no write entry (header must say `sandbox: read-only`), `approval_policy="never"` | fs/terminal capabilities false, permissions `reject_once`, session mode `default` (1.5); `enabledTools:["view_file"]` (≤1.4 only: 1.5 ignores it, so non-read tools are caught by the audit) |
+| Reads confined | `--restricted` confines file tools to cwd = snapshot; audit of every tool path, Glob patterns (each brace alternative; over 64 alternatives an automaton decides whether any alternative is absolute, `~` or has `..`: if so the run is `incomplete` with `tool_glob_unauditable`, otherwise it is a relative glob) and Grep `path`/`glob` (Grep's regex `pattern` is not a path); `~` paths are outside | **OS-enforced** (macOS Seatbelt, see below); the shell-command audit is evidence only (warnings) | audit of every `read_file`/`view_file` path (full `rawInput`/`args`, `tool_call_update` names and titles); any other tool except `update_steps` → `incomplete`; `~` paths are outside |
+| Code execution | none (no Bash) | interpreters / command substitution may run, always under the same OS sandbox; `hosts.codex.allow_code_execution` (default `true`) only decides whether node's package dir is granted; code execution is recorded as a warning | none (commands need a permission, always rejected; any command tool call → `incomplete`) |
 | No network beyond the model API | no WebFetch/WebSearch/Bash; `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` | the profile has no network entry (model commands have no network); `web_search="disabled"` | web tools not enabled |
 | No MCP | `--strict-mcp-config --mcp-config '{"mcpServers":{}}'`, `--safe-mode` | `--ignore-user-config` (MCP servers live there), `--disable plugins/apps` | `mcpServers: []`, isolated `GEMINI_HOME` without `config/` |
 | No delegation | Agent tool not in `--tools` | `--disable multi_agent[_v2]` | `invoke_subagent` not enabled |
 | Ignore user settings | `--setting-sources ""`, `--restricted`, `--safe-mode`, `--disable-slash-commands` | `--ignore-user-config`, `--ignore-rules` | isolated `GEMINI_HOME` (only `antigravity-acp/` linked) |
-| No session persistence | `--no-session-persistence` | `--ephemeral` | not possible: session files deleted afterwards when `.meta` cwd matches |
+| No session persistence | `--no-session-persistence` | `--ephemeral` | not possible: session files deleted afterwards when `.meta` cwd (≤1.4) or every session-database workspace URI (1.5) matches |
 | Never | `--dangerously-*`, `bypassPermissions`, `acceptEdits`, `--add-dir` | anything outside the exact argv shape the runner builds (flag allowlist; every `-c` byte-identical to a runner-generated value); in particular `-s`/`--sandbox`/`sandbox_mode` in any form, `-p`/`--profile`/`-c profile=`, `--include-managed-config*`, `-P…`, `-a…`, `--enable`, `--sandbox-state*`, `--full-auto`, `--add-dir`, `--dangerously-*` | `allow_*`, `reject_always` |
 
 Every spawned host argv (full, untruncated) is checked against the bypass list before anything is
@@ -248,11 +248,19 @@ its text is used; after the last turn the unterminated last stderr line is flush
 again, and an upstream 5xx seen outside any turn (e.g. during session setup) is a reason too; a
 server exit with a non-zero code, or with a signal other than the one the runner sent to the live
 group after cleanup started (a crash before cleanup, or a different signal), makes the run
-`incomplete`; each turn must carry a matching `Proxy extracted model` line; finding ids continue
+`incomplete`; each turn must carry a matching model record (1.5: at least one `gen_metadata` row, and
+every row must be the pinned model at the pinned thinking level; ≤1.4: a `Proxy extracted model`
+line); finding ids continue
 across turns; a spawn failure or early server exit fails at once. `max_files_per_turn` (8) and
 `max_bytes_per_turn` (120000) split each dimension group into scope-file chunks so a turn stays well
-under the proxy's 300 s first-byte wall. `runtime_root` accepts `{platform}-{arch}`; the highest
-version present is used. Leftover agy processes outside the run's group are reported, never signalled.
+under the ≤1.4 proxy's 300 s first-byte wall (kept for 1.5, which has no proxy, to bound each turn).
+`runtime_root` accepts `{platform}-{arch}`; the highest valid version of either layout is used:
+1.5 directories hold `.install-complete.json` naming the executable (a regular executable file of the
+recorded size, run as `antigravity acp --gemini-dir <isolated home> --app-data-dir antigravity-acp
+--log-file <tmp> --disable-telemetry`, whose log is checked like the old stderr), ≤1.4 directories
+hold `agy_acp_server.par`. On 1.5, `open`/`xdg-open` on the child's `PATH` are shims that record a
+browser launch as `auth_required` instead of opening a sign-in URL. Leftover agy processes outside
+the run's group are reported, never signalled.
 The total budget is `per_turn_budget_sec` (180) × planned turns, at least `min_total_sec` (600;
 default `turn_timeout_sec`) so a 1–3 turn run is never squeezed below one turn's timeout, capped by
 `max_total_sec` (3600) (`timeout_sec` applies only without `per_turn_budget_sec`); r3's 16-turn plan
@@ -275,8 +283,12 @@ Known gaps (also written into each run's `hostLimits`):
 - Claude does not report the effort level it ran at; Claude Code may use a small model for internal
   steps (recorded as a warning; the pinned model must appear in `modelUsage`).
 - Antigravity cannot disable session persistence; the model per response is only visible in the
-  local proxy's stderr, which may change between runtime versions. Its 300 s per-call
-  time-to-first-byte limit is why reviews run in dimension-group turns.
+  session database (1.5) or the local proxy's stderr (≤1.4), whose formats may change between
+  runtime versions. The ≤1.4 proxy's 300 s per-call time-to-first-byte limit is why reviews run in
+  dimension-group turns.
+- Antigravity 1.5 ignores the `enabledTools` allowlist: the tool restriction is the audit (after the
+  fact) plus rejected permissions for edits and commands. 1.5 signs in through the OS keyring entry T3
+  uses, not through files in the linked profile.
 
 ## Tests
 
