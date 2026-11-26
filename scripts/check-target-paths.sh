@@ -26,7 +26,9 @@ resolve_target_root() {
   # cd treats a bare "-" as $OLDPWD (even after --), so a directory named
   # "-" (spelled "-", "-/" or "-/.") is passed as "./-".
   [ "$arg" != "-" ] || arg="./-"
-  logical="$(CDPATH='' cd -- "$arg" && pwd -L)" || return 1
+  # Explicit -L: an inherited `set -P` (SHELLOPTS=physical) would make a
+  # plain cd physical and pwd -L would then see the resolved path.
+  logical="$(CDPATH='' cd -L -- "$arg" && pwd -L)" || return 1
   if [ -L "$arg" ] || [ -L "$logical" ]; then
     echo "error: target is a symlink" >&2
     return 1

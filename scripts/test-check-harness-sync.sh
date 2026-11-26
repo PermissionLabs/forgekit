@@ -497,6 +497,17 @@ for spelling in "target-link/" "target-link//" "target-link/." "target-link/./" 
   done
 done
 
+# The logical check must not depend on the caller's shell mode: with an
+# inherited `set -P` (SHELLOPTS=physical) a plain cd resolves physically.
+for writer in update-harness bootstrap; do
+  LABEL="$writer refuses target-link/docs/.. under SHELLOPTS=physical"
+  CASES=$((CASES + 1))
+  capture env SHELLOPTS=physical bash "$ROOT/scripts/$writer.sh" "$TMP_DIR/target-link/docs/.." --force
+  expect_rc 1
+  expect_has "error: target is a symlink"
+  [ "$(tree_hash "$repo")" = "$repo_tree" ] || fail "files written through target-link/docs/.. (physical mode)"
+done
+
 # 17c-2. X11: a target directory literally named "-" (spelled "-", "-/" or
 #        "-/.") is that directory, never $OLDPWD (cd's "-" operand). OLDPWD
 #        names another repository with drift that must stay untouched.
