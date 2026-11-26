@@ -76,6 +76,12 @@ same_entrypoint_body() {
   diff <(tail -n +2 "$1") <(tail -n +2 "$2") >/dev/null
 }
 
+preserve_mode() {
+  local mode
+  mode="$(stat -c %a "$1" 2>/dev/null)" || mode="$(stat -f %Lp "$1")"
+  chmod "$mode" "$2"
+}
+
 copy_entrypoint_preserving_title() {
   local src="$1" dst="$2" tmp
   mkdir -p "$(dirname "$dst")"
@@ -88,6 +94,7 @@ copy_entrypoint_preserving_title() {
     head -n 1 "$dst"
     tail -n +2 "$src"
   } > "$tmp"
+  preserve_mode "$dst" "$tmp"
   mv "$tmp" "$dst"
 }
 
@@ -219,6 +226,7 @@ elif command -v jq >/dev/null 2>&1; then
       rm -f "$tmp"
       echo "ok:   .context/workflow-state.json resume_protocol"
     else
+      preserve_mode "$state_file" "$tmp"
       mv "$tmp" "$state_file"
       echo "update: .context/workflow-state.json resume_protocol"
     fi

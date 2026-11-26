@@ -1,6 +1,10 @@
 # Sourced by bootstrap and update after resolving the target root.
 check_destination() {
   local path="$1"
+  if [ -e "$path" ] && [ ! -f "$path" ]; then
+    echo "error: managed destination is not a regular file: $path" >&2
+    return 1
+  fi
   while [ "$path" != "$target" ]; do
     if [ -L "$path" ]; then
       echo "error: symlink in managed destination: $path" >&2
