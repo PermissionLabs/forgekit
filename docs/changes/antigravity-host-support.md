@@ -171,9 +171,11 @@ touched the same writers; the rebase keeps every protection from both sides:
   every template `docs/` file, `docs/PROJECT_CONTEXT.md` included) and
   reports every refused path instead of exiting on the first. Callers run it
   in the existing all-paths pre-check (`bootstrap.sh`: before the `LINK`
-  loop; `update-harness.sh`: before any `has_override`/`cmp` read), and a
-  refusal stops the run before any write, even with `--force`, together with
-  this branch's `LINK:` lines and stop summary. The refused set is the union
+  loop; `update-harness.sh`: first in its pre-check, whose later per-file
+  checks still run to report every problem but read a managed file only
+  after `guard_write_target` refused anything resolving outside the target),
+  and a refusal stops the run before any write, even with `--force`,
+  together with this branch's `LINK:` lines and stop summary. The refused set is the union
   of both rules.
 - `preserve_mode` moved into `scripts/lib/repo-paths.sh`: `commit_sibling_tmp`
   gives the temp file the replaced regular file's mode, or the umask default
@@ -244,6 +246,17 @@ touched the same writers; the rebase keeps every protection from both sides:
   bootstrap's `.gitignore` link run by hand), with the explicit `chmod 600`
   removed (mktemp then gives `0400`), and with `worktree-add.sh` applying the
   final mode before `jq` writes the seed.
+- Mutation checks (r9): on a scratch copy, the raw-argument `[ -L ]` target
+  check restored fails the new `target-link/` spelling cases; the trailing
+  strip kept but the logical (`pwd -L`) check removed fails
+  `target-link/docs/..`; the final mode (`preserve_mode` / umask default)
+  moved from `commit_sibling_tmp` into `make_sibling_tmp` fails the new
+  `0444` rewrite case (21b); `trap forgekit_tmp_cleanup EXIT` removed from
+  `bootstrap.sh` fails "bootstrap EXIT trap removes its temp file"; the
+  `.gitignore` link branch disabled in `bootstrap.sh` fails the race cases.
+  The logical check kept with the trailing strip removed still passes: that
+  check alone covers every tested spelling, the strip is kept for the raw
+  argument.
 - Manual checks: Reviewed full `git diff` across root and `templates/`.
 
 ## Review Cycles
@@ -260,6 +273,7 @@ touched the same writers; the rebase keeps every protection from both sides:
 | 8 | Cross-review (Codex, r6) | X7 the `GEMINI.md` pre-check accepted a link chain reaching `AGENTS.md` through a file the updater replaces (`GEMINI.md -> docs/WORKFLOW.md -> ../AGENTS.md`), so `update-harness.sh --force` rewrote `docs/WORKFLOW.md` and only then failed with `LINK: GEMINI.md`. | Fixed in the r6 commit: the pre-check refuses any chain whose hops pass through a path in the updater's write set (`CLAUDE.md`, `scripts/worktree-add.sh`, template `docs/`, `.context/workflow-state.json`, `.gitignore`), before any file changes; the `GEMINI.md -> AGENTS.md -> link` control still passes. Regression test 26b fails before the fix. |
 | 9 | Cross-review (Codex + Antigravity, r7) | X8 the X7 managed-hop check compared path spellings, so on a case-insensitive filesystem `GEMINI.md -> docs/workflow.md` (or `DOCS/WORKFLOW.md`) with `docs/WORKFLOW.md -> ../AGENTS.md` passed the pre-check and `--force` rewrote `docs/WORKFLOW.md` before failing; A10 the membership test `printf "$set" \| grep -qxF` ran under `pipefail`, so an early `grep -q` exit could SIGPIPE `printf` and skip the refusal; A11 no tests for a hard-coded managed hop, an absolute link hop, or an accepted multi-hop unmanaged chain. | Fixed in the r7 commit: hops are matched by directory-entry identity (`same_entry`: parent directories `-ef`, then the entry's own lstat inode via `ls -di`, so a link hop is not followed), in an in-shell `while read` loop with no pipeline or non-literal format string. Tests 26c (case variants; skipped with a message on a case-sensitive temp filesystem) and 26d (`CLAUDE.md` hop, absolute link, unmanaged multi-hop control); each fails under the matching mutation (identity check removed, `CLAUDE.md` dropped from the write set, absolute branch removed, any multi-hop chain refused). |
 | 10 | Cross-review (Codex + Antigravity, r8) | Both reviewers verified X8, A10 and A11 fixed (Codex: case and Unicode-normalisation aliases, odd filenames for `ls -di`, dangling hops, hard links, a 50,001-entry set under `pipefail`). Antigravity: pass, no new findings. Codex X9 (low): a newline in the repository root path splits the newline-delimited managed-path set, so a managed hop can pass the pre-check. | Accepted as a residual (see Residuals); no code change. |
+| 11 | Cross-review (Codex + Antigravity, r9, after the PR #25 rebase) | Both verified X1–X9 and A1–A11 except A7. X10 (Codex, low) / A12, A14 (Antigravity, med): a symlinked target spelled with a trailing slash (`target-link/`) passed the raw-argument `[ -L ]` refusal in both writers (lstat follows the link) while `pwd -P` landed in its destination. A13 (low): tests 21 and 17e rewrote only owner-writable files, so moving the final mode into `make_sibling_tmp` passed and X6 lost its regression test. A7 (regressed): the bootstrap EXIT-trap test used a `.gitignore` link that `check_managed_destinations` now refuses first, so it exercised nothing. Nit (Claude): the `update-harness.sh` pre-check comment said "before reading" while the run continues reading. | Fixed in the r9 commit. X10/A12/A14: `resolve_target_root` in `check-target-paths.sh`, shared by both writers, strips trailing `/` and `/.` (keeping `/`) and also checks the logical path `cd` resolves (`pwd -L`, folds `link/sub/..`); `CDPATH` cleared. Tests: `target-link/`, `//`, `/.`, `/./`, `/docs/..` for both writers. A13: case 21b rewrites existing `0444` `CLAUDE.md` and state file and requires them to stay `0444`. A7: the writers' `.gitignore` link branch (`replace_link_with_copy`) is kept as defence in depth against a link appearing after the pre-check (see the TOCTOU residual) and commented so; a `chmod` shim creates that race, so the bootstrap EXIT-trap test reaches the temp write again (marker from the TERM `mv` shim), and race controls for both writers check that the link becomes a regular `.gitignore` and its target is untouched. Nit: comment corrected to the actual behaviour. Each new test mutation-checked (Verification). |
 
 ## Branch & Merge Evidence
 
@@ -272,7 +286,7 @@ touched the same writers; the rebase keeps every protection from both sides:
 | Source | Finding | Disposition | Link/reason |
 | --- | --- | --- | --- |
 | Cycle 2 / C6 | Shared review contract and per-host review adapters are described but not implemented | `filed_followup` | `docs/review-skills/README.md` states the contract; adapters land in a follow-up change |
-| Cycle 5 / review notes | TOCTOU between the all-paths pre-check and the later writes (a path swapped for a link after the check) | `accepted` | Reviewer judgement: acceptable for a single-user local harness, not an adversarial boundary. Exclusive `mktemp` temp files remove the predictable-name case; the remaining window needs a concurrent writer in the target repo. |
+| Cycle 5 / review notes | TOCTOU between the all-paths pre-check and the later writes (a path swapped for a link after the check) | `accepted` | Reviewer judgement: acceptable for a single-user local harness, not an adversarial boundary. Exclusive `mktemp` temp files remove the predictable-name case; the remaining window needs a concurrent writer in the target repo. The `.gitignore` step still replaces a link that appeared in that window instead of appending through it (r9). If that rename then fails, the link has already been removed and `.gitignore` is left missing, not written through. |
 | Cycle 6 / X6 review | `scripts/worktree-add.sh` does not check whether `$CTX_DIR` (`<worktree>/.context`) is a link resolving outside the repository before seeding state into it (pre-existing, not introduced by this change) | `fixed` | Fixed in cycle 7 (r5 A2): inline `seed_target_problem` guard in `worktree-add.sh`; test "worktree-add refuses a .context link resolving outside" |
 | Cycle 10 / X9 (Codex r8) | A repository root path containing a newline splits the newline-delimited managed-path set in `update-harness.sh`, so a managed GEMINI.md hop can pass the pre-check (`--force` then rewrites before final validation fails) | `accepted` | Reviewer recommended accepting: newline-containing repository roots are not a supported layout for this local harness; the final sync check still fails the run. After the PR #25 rebase the managed hop is itself a symlink on a managed path and is refused by `check_managed_destinations`, which does not split on newlines. |
 

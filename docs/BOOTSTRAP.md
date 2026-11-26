@@ -87,7 +87,8 @@ other than a regular file. This holds for links that resolve **inside** the
 repository too (for example `AGENTS.md -> .harness/AGENTS.md`, or a linked
 `.gitignore`), with an `error: symlink in managed destination: <path>` line;
 a link resolving **outside** the repository is also reported as a `LINK:`
-line. A symlinked target root is refused (`error: target is a symlink`). If
+line. A symlinked target root is refused (`error: target is a symlink`),
+however it is spelled (`link/`, `link/.`, `link/sub/..`). If
 your project keeps harness files behind links:
 
 - decide which copy is canonical, replace the link (or linked directory) with

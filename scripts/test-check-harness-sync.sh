@@ -482,6 +482,20 @@ run_script "bootstrap refuses a symlinked target" \
 expect_rc 1
 expect_has "error: target is a symlink"
 [ "$(tree_hash "$repo")" = "$repo_tree" ] || fail "files written through a symlinked target"
+# X10/A12/A14: [ -L ] follows the link when the name ends in "/" or "/.", so
+# these spellings must be normalised before the check, for both writers.
+# "target-link/docs/.." is caught only by the logical-path (pwd -L) check:
+# cd folds it to target-link, while lstat resolves it to the real repo.
+for spelling in "target-link/" "target-link//" "target-link/." "target-link/./" "target-link/docs/.."; do
+  for writer in update-harness bootstrap; do
+    run_script "$writer refuses a symlinked target spelled $spelling" \
+      "$ROOT/scripts/$writer.sh" "$TMP_DIR/$spelling" --force
+    expect_rc 1
+    expect_has "error: target is a symlink"
+    [ "$(tree_hash "$repo")" = "$repo_tree" ] \
+      || fail "files written through a symlinked target spelled $spelling"
+  done
+done
 
 # 17d. PR #25: a managed destination that exists but is not a regular file
 #      (a directory) is refused by both writers.
@@ -732,6 +746,31 @@ if command -v jq >/dev/null 2>&1; then
   [ "$(mode_of "$repo/CLAUDE.md")" = "644" ] || fail "CLAUDE.md mode $(mode_of "$repo/CLAUDE.md"), want 644 (preserved)"
   [ "$(mode_of "$repo/.context/workflow-state.json")" = "644" ] \
     || fail "workflow-state.json mode $(mode_of "$repo/.context/workflow-state.json"), want 644 (preserved)"
+  [ "$(jq -r .resume_protocol.phase_refs_source "$repo/.context/workflow-state.json")" = "docs/PHASE_REFS.json" ] \
+    || fail "workflow-state.json was not updated"
+  expect_no_tmp "$repo"
+fi
+
+# 21b. X6/A13: an existing read-only (0444) regular file is rewritten through
+#      a temp file and keeps 0444. The temp must stay 0600 while it is written:
+#      applying the final (preserved) mode in make_sibling_tmp instead of
+#      commit_sibling_tmp makes the temp read-only and the write fails.
+if command -v jq >/dev/null 2>&1; then
+  repo="$(new_repo readonly-update)"
+  printf '\nlocal edit\n' >> "$repo/CLAUDE.md"
+  chmod 444 "$repo/CLAUDE.md"
+  jq '.resume_protocol.read_this_file_on = []' "$repo/.context/workflow-state.json" > "$TMP_DIR/ro-state.json"
+  cat "$TMP_DIR/ro-state.json" > "$repo/.context/workflow-state.json"
+  chmod 444 "$repo/.context/workflow-state.json"
+  run_script "update-harness --force rewrites read-only (0444) files and keeps 0444" \
+    "$ROOT/scripts/update-harness.sh" "$repo" --force
+  expect_rc 0
+  expect_has "copy: CLAUDE.md (body updated, title preserved)"
+  expect_has "update: .context/workflow-state.json resume_protocol"
+  same_entry_body "$repo/CLAUDE.md" "$ROOT/templates/CLAUDE.md" || fail "CLAUDE.md body not updated"
+  [ "$(mode_of "$repo/CLAUDE.md")" = "444" ] || fail "CLAUDE.md mode $(mode_of "$repo/CLAUDE.md"), want 444 (preserved)"
+  [ "$(mode_of "$repo/.context/workflow-state.json")" = "444" ] \
+    || fail "workflow-state.json mode $(mode_of "$repo/.context/workflow-state.json"), want 444 (preserved)"
   [ "$(jq -r .resume_protocol.phase_refs_source "$repo/.context/workflow-state.json")" = "docs/PHASE_REFS.json" ] \
     || fail "workflow-state.json was not updated"
   expect_no_tmp "$repo"
@@ -1082,16 +1121,61 @@ capture env PATH="$TMP_DIR/term-mv-shim:$PATH" bash "$ROOT/scripts/update-harnes
 [ "$RC" -ne 0 ] || fail "expected a non-zero exit"
 expect_no_tmp "$repo"
 
+# Since PR #25 a .gitignore link is refused before any write, so the writers'
+# .gitignore temp path (replace_link_with_copy, kept as defence in depth) is
+# reached only when the link appears after the pre-check. A chmod shim
+# simulates that race: on the writers' `chmod +x .../worktree-add.sh` (after
+# the pre-check, before the .gitignore step) it swaps .gitignore for an
+# in-repo link whose target lacks .context/.
+real_chmod="$(command -v chmod)"
+mkdir -p "$TMP_DIR/race-chmod-shim"
+cat > "$TMP_DIR/race-chmod-shim/chmod" <<SHIM
+#!/bin/sh
+if [ "\$1" = "+x" ] && [ -n "\${RACE_REPO:-}" ]; then
+  case "\$2" in */scripts/worktree-add.sh)
+    rm -f "\$RACE_REPO/.gitignore"
+    ln -s .harness/gitignore "\$RACE_REPO/.gitignore" ;;
+  esac
+fi
+exec "$real_chmod" "\$@"
+SHIM
+"$real_chmod" +x "$TMP_DIR/race-chmod-shim/chmod"
+mkdir -p "$TMP_DIR/term-mv-marker-shim"
+printf '#!/bin/sh\n: > "%s"\nkill -TERM "$PPID"\nexit 1\n' "$TMP_DIR/term-mv-reached" \
+  > "$TMP_DIR/term-mv-marker-shim/mv"
+chmod +x "$TMP_DIR/term-mv-marker-shim/mv"
+
 repo="$(new_repo a7-boot-trap)"
 mkdir -p "$repo/.harness"
 printf 'node_modules/\n' > "$repo/.harness/gitignore"
-rm -f "$repo/.gitignore"
-ln -s .harness/gitignore "$repo/.gitignore"
+rm -f "$TMP_DIR/term-mv-reached"
 LABEL="bootstrap EXIT trap removes its temp file"
 CASES=$((CASES + 1))
-capture env PATH="$TMP_DIR/term-mv-shim:$PATH" bash "$ROOT/scripts/bootstrap.sh" "$repo" --force
+capture env RACE_REPO="$repo" PATH="$TMP_DIR/race-chmod-shim:$TMP_DIR/term-mv-marker-shim:$PATH" \
+  bash "$ROOT/scripts/bootstrap.sh" "$repo" --force
 [ "$RC" -ne 0 ] || fail "expected a non-zero exit"
+[ -e "$TMP_DIR/term-mv-reached" ] || fail "the .gitignore temp write was not reached (race shim did not apply)"
+[ "$(cat "$repo/.harness/gitignore")" = "node_modules/" ] || fail "bootstrap wrote through the .gitignore link"
 expect_no_tmp "$repo"
+
+# Control for the same race without TERM: each writer replaces the new link
+# with a regular .gitignore holding the line, and never writes through it.
+for writer in bootstrap update-harness; do
+  repo="$(new_repo "race-gitignore-$writer")"
+  mkdir -p "$repo/.harness"
+  printf 'node_modules/\n' > "$repo/.harness/gitignore"
+  printf '\nlocal edit\n' >> "$repo/CLAUDE.md"
+  LABEL="$writer replaces a .gitignore link that appears after the pre-check"
+  CASES=$((CASES + 1))
+  capture env RACE_REPO="$repo" PATH="$TMP_DIR/race-chmod-shim:$PATH" \
+    bash "$ROOT/scripts/$writer.sh" "$repo" --force
+  expect_rc 0
+  { [ -f "$repo/.gitignore" ] && [ ! -L "$repo/.gitignore" ]; } || fail ".gitignore is not a regular file"
+  [ "$(cat "$repo/.gitignore")" = "$(printf 'node_modules/\n.context/')" ] \
+    || fail ".gitignore content: $(cat "$repo/.gitignore")"
+  [ "$(cat "$repo/.harness/gitignore")" = "node_modules/" ] || fail "$writer wrote through the .gitignore link"
+  expect_no_tmp "$repo"
+done
 
 if command -v jq >/dev/null 2>&1; then
   # A7: worktree-add's own cleanup, observed in a worktree that is kept: a

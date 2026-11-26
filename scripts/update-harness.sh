@@ -54,13 +54,10 @@ if [ ! -d "$templates" ]; then
   exit 1
 fi
 
-if [ -L "$target" ]; then
-  echo "error: target is a symlink" >&2
-  exit 1
-fi
-target="$(cd "$target" && pwd -P)"
 # shellcheck source=check-target-paths.sh
 . "$forgekit_root/scripts/check-target-paths.sh"
+# Refuses a symlinked target, also when spelled "link/" or "link/.".
+resolve_target_root "$target" || exit 1
 
 # shellcheck source=lib/repo-paths.sh
 . "$forgekit_root/scripts/lib/repo-paths.sh"
@@ -293,8 +290,12 @@ would_keep_gemini_alias() {
 
 drift=0
 
-# Before any managed file is read (has_override/cmp) or written: no symlink
-# on a managed path, in-repo or not, and no non-regular file (PR #25).
+# No symlink on a managed path, in-repo or not, and no non-regular file
+# (PR #25). A refusal sets drift, which stops the run below before any write.
+# The per-file checks still run so every problem is reported in one pass;
+# they read a managed file (has_override/cmp) only after guard_write_target
+# has refused any path resolving outside the target, so a refused in-repo
+# link is at most read inside the repository, never written.
 check_managed_destinations || drift=1
 
 for rel in AGENTS.md CLAUDE.md; do
@@ -376,8 +377,11 @@ fi
 gitignore="$target/.gitignore"
 if [ ! -e "$gitignore" ] || ! grep -qxF ".context/" "$gitignore"; then
   if [ -L "$gitignore" ]; then
-    # Write .gitignore itself, not the file an in-repo link points to: the
-    # link becomes a regular copy with the line added in the same temp write.
+    # Defence in depth: check_managed_destinations refused a .gitignore link
+    # before any write, so this runs only if one appeared since (a race with
+    # another process). Write .gitignore itself, not the file the link points
+    # to: the link becomes a regular copy with the line added in the same
+    # temp write (covered by the chmod-race tests, case 28).
     replace_link_with_copy "$gitignore" ".context/"
   else
     # No `touch` first: under umask 0222 it would create a read-only file
