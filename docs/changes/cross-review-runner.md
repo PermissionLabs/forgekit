@@ -43,7 +43,7 @@ Its ten ACP rules (isolated `GEMINI_HOME`, `reject_once`, view_file only, `.meta
 
 | Track | Status | Changed paths | Verification | Risks |
 | --- | --- | --- | --- | --- |
-| Modules | Completed | `modules/cross-review/**`, `scripts/test-modules.sh` | `node --test modules/cross-review/test/*.test.mjs`; one real smoke per host | Medium — host CLIs change flags between releases; adapters were verified against Claude Code 2.1.332, codex-cli 0.167.0, agy_acp_server 1.4.5 |
+| Modules | Completed | `modules/cross-review/**`, `scripts/test-modules.sh` | `node --test modules/cross-review/test/*.test.mjs`; one real smoke per host | Medium — host CLIs change flags between releases; adapters were verified against Claude Code 2.1.332, codex-cli 0.167.0 (OS sandbox re-verified on 0.172.0), agy_acp_server 1.4.5 |
 | Docs | Completed | `docs/review-skills/README.md`, `templates/docs/review-skills/README.md`, `README.md`, `docs/PROJECT_CONTEXT.md`, this file | `scripts/check-harness-sync.sh --forgekit`, `scripts/test-check-harness-sync.sh` | Low |
 | Server / Deploy / Frontend / App | Skipped | N/A | N/A | Harness repo only |
 
@@ -55,10 +55,11 @@ flowchart TD
   D[diff paths + dimensions] --> P
   P -->|ok: hosts| R[run --host h]
   P -->|ask / blocked| H[human decision]
-  R --> S[snapshot at --rev from git objects, 0444/0555]
+  R --> S[snapshot at --rev from git objects, 0400/0500 owner only]
   S --> I[common prompt + JSON schema]
   I --> A1[claude adapter]
-  I --> A2[codex adapter]
+  I --> SB[codex: generated Seatbelt permission profile, self-test via codex sandbox]
+  SB --> A2[codex adapter]
   I --> A3[antigravity ACP adapter]
   A1 & A2 & A3 --> V[validate, 1 retry]
   V --> C[pinned vs reported, tool/path audit, snapshot hash]
@@ -98,7 +99,24 @@ flowchart TD
   one deduplicated summary (same file within a few lines + similar claim/evidence → one group, every
   host's id kept).
 - Codex `allow_code_execution` (policy, default `true`): model-run commands may run interpreters
-  inside the read-only sandbox; `false` makes any such command incomplete. Other hosts cannot enable it.
+  under the OS sandbox; `false` makes any such command incomplete. Other hosts cannot enable it.
+- Codex OS sandbox (r2, user decision "OS-enforced confinement instead of shell parsing"): the runner
+  generates a Codex permission profile (`default_permissions` + `permissions.<name>.filesystem`, a
+  random name per run) that Codex compiles into the Seatbelt profile of every model-run command:
+  read `:minimal` + snapshot + codex/node install roots, `/private/tmp` and `/private/var/tmp`
+  denied, no writes, no network. `codex exec` gets no `-s` (it would override the profile with
+  full-disk read; verified). A self-test through `codex sandbox` (no model call) must show an outside
+  probe read, a Codex-home listing and a snapshot write denied and a snapshot read allowed, else the
+  run is `incomplete` before codex exec starts. No Seatbelt → `no_os_sandbox` unless
+  `hosts.codex.os_sandbox: "audit_only"`. The requested design (an outer `sandbox-exec` around
+  `codex exec` with a runner-written SBPL) was tried first and is impossible: macOS rejects a nested
+  `sandbox_apply` inside any restrictive profile (even `(deny file-write*) (allow file-write*
+  (subpath "/"))`), and Codex starts every command through `sandbox-exec`, so every command failed
+  with exit 71. The generated profile, its hash and the self-test are in the evidence.
+- Shell audit (r2): a secondary signal. Only clear violations the sandbox would have caught anyway
+  (literal outside path to a file-reading command or redirection, `cd` out, cwd outside, disallowed
+  code execution, tool-like lines, unreadable header) are `incomplete`; the rest are warnings. The r1
+  R2 rule (literal paths inside interpreter programs → incomplete) is removed.
 - Dispositions use the requested vocabulary `fixed|followup|accepted|blocked`; the README maps them to
   the change-record vocabulary.
 
@@ -106,9 +124,9 @@ flowchart TD
 
 | Guarantee | Claude | Codex | Antigravity |
 | --- | --- | --- | --- |
-| Read-only tools | `--tools Read,Grep,Glob`, `--allowedTools` same, `--permission-mode dontAsk`, `--permission-prompts none`, `--restricted` | `-s read-only`, `-c approval_policy="never"` | `enabledTools:["view_file"]`, fs/terminal false, `reject_once` |
-| Read confinement | `--restricted` (host-enforced; an outside read was denied in the flag probe) + audit | audit only (gap) | audit |
-| Network | no web/shell tools, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` | sandbox, `-c web_search="disabled"` | web tools not enabled |
+| Read-only tools | `--tools Read,Grep,Glob`, `--allowedTools` same, `--permission-mode dontAsk`, `--permission-prompts none`, `--restricted` | generated permission profile without write entries (header `sandbox: read-only`), `-c approval_policy="never"` | `enabledTools:["view_file"]`, fs/terminal false, `reject_once` |
+| Read confinement | `--restricted` (host-enforced; an outside read was denied in the flag probe) + audit | OS-enforced Seatbelt profile (self-tested per run) + secondary audit | audit |
+| Network | no web/shell tools, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` | profile has no network entry, `-c web_search="disabled"` | web tools not enabled |
 | MCP | `--strict-mcp-config --mcp-config '{"mcpServers":{}}'`, `--safe-mode` | `--ignore-user-config`, `--disable plugins`/`apps` | `mcpServers: []`, isolated home without `config/` |
 | Delegation | no Agent tool | `--disable multi_agent`, `multi_agent_v2` | `invoke_subagent` not enabled |
 | User settings | `--setting-sources ""`, `--restricted`, `--safe-mode`, `--disable-slash-commands` | `--ignore-user-config`, `--ignore-rules` | isolated `GEMINI_HOME` |
@@ -123,6 +141,17 @@ flowchart TD
 
 ## Verification
 
+- After the r2 fixes (2026-11-26): `node --test modules/cross-review/test/*.test.mjs`: 115 tests pass
+  (8 files, new `sandbox.test.mjs`); run against the c8a846c sources, 23 of the new/changed tests fail
+  there (the A43/A24/A46 test-only additions pass on both). `scripts/check-harness-sync.sh --forgekit`
+  in sync; `scripts/test-check-harness-sync.sh` 70 cases pass.
+- OS sandbox proofs (macOS 27.2, no model call): `sandbox-exec -p <deny-read profile> /bin/cat
+  <outside probe>` → EPERM, snapshot file readable (`test/sandbox.test.mjs`); real
+  `codex sandbox` with the generated profile: outside probe read, `~/.codex` listing, `~/.zshrc` read
+  and snapshot write → `Operation not permitted`, snapshot read OK, `nc -z 1.1.1.1 443` refused (it
+  succeeds outside the sandbox); with `-s read-only` added, `~/.zshrc` became readable (why `-s` is
+  never passed). Nested-sandbox probe: any restrictive outer profile → inner `sandbox_apply: Operation
+  not permitted` (exit 71).
 - After the r1 fixes: `node --test modules/cross-review/test/*.test.mjs`: 91 tests pass (7 files, incl.
   new `antigravity.test.mjs` with an ACP stub and `cli.test.mjs`); every new regression test was run
   against the f1780ef sources and fails there. `scripts/test-modules.sh` now globs the test files.
@@ -152,6 +181,13 @@ flowchart TD
 | Codex | 484d0da | complete | gpt-6.1-sol / high (header) | 43 s | 16,149 tokens | 3 med (X1–X3) |
 | Claude | 484d0da | complete | claude-opus-5-5 (init + modelUsage) | 37 s | $0.15 list price, 3,588 output tokens | 3 med, 2 low (C1–C5) |
 | Antigravity | 6ba9ad6 | complete | gemini-4-neon / high (config + proxy `gemini-4-neon-high` on both calls) | 235 s (one turn, 229 s) | 37,728 tokens (23,498 thought); quota delta not measurable, see note | 1 high, 2 med, 1 low (A1–A4) |
+| Codex under the OS sandbox (r2) | scratch repo, 1 file | incomplete by design | gpt-6.1-sol / high (header; codex-cli 0.172.0) | ~1 min | 24,481 tokens | draft: 1 med (X1, the planted `a - b` bug) kept as `reviewIfIncomplete` |
+
+r2 smoke: the brief asked the model to try `cat /etc/hosts | head -1` and `ls ~` once. Self-test ok;
+`ls ~` was refused by the sandbox (the model reported `Operation not permitted`; Codex did not list
+that command in the transcript); `/etc/hosts` is in Codex's `:minimal` platform set and was read, and
+the secondary audit made the run `incomplete` (`tool_read_outside_snapshot:/bin/zsh -lc 'cat
+/etc/hosts | head -1' -> /etc/hosts`) while keeping the correct draft. argv had no `-s`.
 
 Antigravity audit: 1 `view_file` call, 0 paths outside the snapshot, 0 permission requests, 0 client
 requests, isolated home had no `config/`, session files (`.db`, `.meta`, `brain/`) removed after the
@@ -212,6 +248,38 @@ it is well under the r5/r6 full reviews that measured ~0.01 weekly.
 | A33 | fixed | `hosts.codex.disabled_features` override; Codex CLI version recorded (`extra.hostVersion`) |
 | A34 | fixed | fixture repos commit with `-c commit.gpgsign=false -c core.hooksPath=/dev/null` |
 
+| 5 (r2) | Re-review of f1780ef..c8a846c: Antigravity A35–A46 (complete, block); Codex incomplete (`tool_read_outside_snapshot:5`, all literal paths inside its own `node -e` repros = R2), draft X10–X17 read from the raw `-o` file for information only | High: the shell audit kept being bypassed (A35/X11 `$'..'`, A36/X10 assignment pre-pass, A37/X13 redirection/prefix options, A38/X14 `/?` and non-ASCII roots) and false-positived on harmless programs (R2); X12 non-zero Antigravity exit ignored. Med/low: A39, A41, A43/X17, X15, X16, A40, A42, A44–A46. Unverified priors: X1/A11, X3/A19/A6, X6, X8/A15, A10, A24. Operator: draft not saved when incomplete, reasons only counted, merge accepted status-less review.json, gradeReasons/unmatched, cost seeds. | User decision: OS-enforced confinement for Codex (Seatbelt permission profile + self-test; outer sandbox-exec proved impossible), shell audit demoted to warnings except clear violations; every finding fixed with tests (A46 partly followup); operator items implemented. |
+
+### r2 dispositions
+
+| Id | Disposition | Ref |
+| --- | --- | --- |
+| A35 / X11 | fixed | `$'..'`/`$".."` recorded as unauditable expansions (warning); reads are OS-confined (`lib/sandbox.mjs`) |
+| A36 / X10 | fixed | assignments tracked in order and only in command position; `echo HOME=src`, `...; HOME=1`, `true HOME=` tests |
+| A37 / X13 | fixed | redirections keep command position (`2>`-style fds glued), prefix options (`command -p`, `nice -n 0`, `sudo -u`) skipped |
+| A38 / X14 | fixed | only regex-looking roots (`/\`, `/^`, `/$`, `/(`, `/|`) are skipped; `/?tc/passwd` and `/비공개/x` are hard violations |
+| A39 | fixed | Claude audit: Glob `pattern`, Grep `path`/`glob` audited; Grep regex `pattern` never |
+| A40 | fixed | help = leading comment block, however long |
+| A41 | fixed | `hostPace` evaluates every window; skip (cost or pace on any window) beats ask |
+| A42 | fixed | `diff --git` blocks without ---/+++ (mode-only, new empty, binary) add their b/ path unless deleted |
+| A43 / X17 | fixed | symlink-alias test uses an explicit temp symlink |
+| A44 | fixed | fake-agy writes and flushes per-turn stderr before any stdout for that turn |
+| A45 | fixed | diagram shows 0400/0500 owner only |
+| A46 | fixed (partly `filed_followup`) | ACP stub: `session/request_permission` (reject_once warning), unexpected client RPC (`unexpected_client_requests`), `.meta` cwd mismatch guard; multi-turn `prior_verification` merge via the stub → follow-up |
+| X12 | fixed | `agent_exit_nonzero:<code>` / `agent_exit_signal:<sig>` (signal not sent by the runner) |
+| X15 | fixed | repo membership decided lexically (parent resolved only); an in-repo symlink is read as the git object (refused) |
+| X16 | fixed | merge needs `evidence.json` with `status: complete` and a `{verdict, findings[]}` review; evidence.json accepted directly |
+| X1 / A11 (prior, unverified) | fixed | unterminated last stderr line flushed and checked after cleanup (`agent_error:stderr`, `upstream_502:stderr after the last turn`) |
+| X3 / A19 / A6 (prior, unverified) | fixed | `ownedMembers`: start time (`ps lstart`) within [spawn, exit]; per-pid signals, the pgid never after exit; `test/proc.test.mjs:73-74` rewritten to the correct behaviour |
+| X6 (prior, unverified) | fixed | an `exec` line without a complete block is output (counted as `execLinesIgnored`), never a command |
+| X8 / A15 (prior, unverified) | fixed | raw characters encoded per code point (emoji + escaped tab test; glob `infra/😀*` matches) |
+| A10 (prior, unverified) | fixed | `checkOut` checks the output's own repository and `--repo` (now on plan/merge too); output dirs holding tracked files refused |
+| A24 (prior, unverified) | fixed | CLI `run` exit codes 0/1/2 asserted through the real CLI with the fake codex |
+| Operator 2 | fixed | Codex/Claude keep the schema-valid draft as `reviewIfIncomplete` (raw text as `reviewDraftRawIfIncomplete`) |
+| Operator 3 | fixed | incomplete reasons name the command/path (truncated, first 3 + count) |
+| Operator 4 | fixed | = X16 |
+| Operator 5 | fixed | `gradeReasons` ends with `paths: m of n matched a high glob, k unmatched`; expected_cost seeds codex weekly 0.02, gemini weekly 0.013, 5 h 0.03 (provisional) |
+
 ## Branch & Merge Evidence
 
 - Working branch: `agent/cross-review-runner` (based on `agent/antigravity-support` @ f9aa6ff, not yet merged)
@@ -222,14 +290,19 @@ it is well under the r5/r6 full reviews that measured ~0.01 weekly.
 
 | Source | Finding | Disposition | Link/reason |
 | --- | --- | --- | --- |
-| Cycle 3 / A2, r1 X3/A19/A6 | Every post-exit group signal (proc.mjs and Antigravity `stopGroup`) has a window between the `ps` membership check and `kill` | `accepted_with_reason` | A signal is sent only when `ps` shows a live member right before it (or the unreaped child holds the group); the remaining window needs the last member to exit and its id to be reused as a new group leader within microseconds |
-| r1 R1 (operator 1) | With `allow_code_execution: true` (default) a Codex program can read a file without naming it literally | `accepted_with_reason` | Runs only inside the read-only sandbox; literal paths, cwd and expansions are audited; set the flag to `false` to forbid interpreters/command substitution |
-| r1 R2 | Literal outside paths inside model-written programs (e.g. a repro string `/etc/passwd`) make a Codex run incomplete even when nothing was read | `accepted_with_reason` | Conservative by request ("prefer rejection over clever parsing"); seen on the r1 transcript replay; the reason names the command |
+| Cycle 3 / A2, r1 X3/A19/A6, r2 | Every post-exit signal has a window between the `ps` check and `kill` (pid reuse inside it); a descendant forked after the child's exit is not ours by start time and is left alone | `accepted_with_reason` | Signals go only to pids whose start time lies in [spawn, exit] (1 s `lstart` resolution), each by pid, never the reused pgid; the window needs a pid to be reused within microseconds |
+| r1 R1 (operator 1) | With `allow_code_execution: true` (default) a Codex program can read a file without naming it literally | `fixed` (r2) | Reads are OS-confined to the profile's roots whatever the program does |
+| r1 R2 | Literal outside paths inside model-written programs made a Codex run incomplete | `fixed` (r2) | Rule removed; such literals are warnings |
+| r2 R7 | Codex `:minimal` platform set (`/etc`, `/Library/Preferences`, `/System`, `/usr`) is readable by model commands; `none` entries cannot narrow it and Codex aborts at start without it | `accepted_with_reason` | System files, no user data; literal reads by file-reading commands are still `incomplete` (r2 smoke) |
+| r2 R8 | The codex process itself is unconfined (it reads its auth file, writes its state); confinement depends on Codex compiling the profile | `accepted_with_reason` | Verified per run by the `codex sandbox` self-test with the identical profile; the runner never opens token files |
+| r2 R9 | Commands Codex refuses before running them may not appear in the transcript | `accepted_with_reason` | The sandbox decides; the transcript audit is secondary |
+| r2 R10 | OS sandbox on macOS only; Linux/other → `no_os_sandbox` unless `os_sandbox: "audit_only"` | `filed_followup` | Codex's Linux sandbox (Landlock/seccomp) with the same profile is untested |
 | r1 R3 | Merge grouping is a word-overlap heuristic (Jaccard 0.2, 0.1 on overlapping lines, ±3 lines) | `filed_followup` | Calibrate on more cycles; every host id stays visible, so a missed grouping only duplicates a line |
-| r1 R4 / X6 | A tool-like line (`mcp …`, `tool …`) at a paragraph start inside command output is still flagged | `accepted_with_reason` | Plain mode has no output delimiters; flagging errs toward incomplete; prompt echo and mid-paragraph lines are no longer flagged |
+| r1 R4 / X6 | A tool-like line (`mcp …`, `tool …`) at a paragraph start inside command output is still flagged | `accepted_with_reason` | Plain mode has no output delimiters; flagging errs toward incomplete; prompt echo, mid-paragraph lines and stray `exec` lines (r2) are not |
 | r1 R5 / A30 | `ps -eo` path verified on macOS only | `filed_followup` | POSIX syntax; run the suite on Linux CI (procps / BusyBox) |
-| r1 R6 | Expected cost per window and turn-split limits (8 files / 120 KB) are provisional | `filed_followup` | Calibrate from recorded runs (Follow-ups) |
-| Design | Codex read-only sandbox does not confine reads to the snapshot | `accepted_with_reason` | No codex-cli 0.167.0 flag restricts read roots; detected from the transcript and the run is marked incomplete |
+| r1 R6 | Expected cost per window and turn-split limits (8 files / 120 KB) are provisional | `filed_followup` | Calibrate from recorded runs (Follow-ups); r2 seeds recorded in the policy |
+| Design | Codex read-only sandbox does not confine reads to the snapshot | `fixed` (r2) | Runner-generated Seatbelt permission profile, self-tested per run |
+| r2 A46 (part) | Multi-turn `prior_verification` merging / last-turn mustCover through the ACP stub | `filed_followup` | Covered by schema/validator unit tests; stub needs prior-aware replies |
 | Design | Claude effort level is not reported by the host | `accepted_with_reason` | Recorded as pinned only; listed in `hostLimits` |
 | Design | Antigravity session persistence cannot be disabled | `accepted_with_reason` | Files deleted after the run when `.meta` cwd matches (same as T3) |
 | antigravity-host-support C6 | Shared review contract and per-host adapters | `fixed` | This change |
@@ -247,4 +320,7 @@ it is well under the r5/r6 full reviews that measured ~0.01 weekly.
   Antigravity turn-split limits from recorded runs.
 - Run the module tests on Linux (POSIX `ps -eo` path) in CI.
 - Calibrate `merge` grouping thresholds on more review cycles.
+- Codex OS sandbox on Linux (Codex Landlock/seccomp with the same permission profile) and a CI job
+  that runs `test/sandbox.test.mjs` on macOS.
+- ACP stub replies with `prior_verification` to cover multi-turn re-review merging (A46 part).
 - Promote via `modules/manifest.json` after a downstream evaluation.

@@ -16,6 +16,7 @@ modules/cross-review/
   lib/schema.mjs          review / dispositions schemas and validators
   lib/run.mjs             run pipeline, pinned-vs-reported check, evidence, summary
   lib/proc.mjs            child process in its own group, timeout, bypass-flag guard, minimal env
+  lib/sandbox.mjs         Codex OS sandbox: permission profile generation, self-test, runtime discovery
   adapters/{claude,codex,antigravity}.mjs
   test/                   unit tests and fake-host end-to-end tests (no model calls)
 ```
@@ -34,7 +35,7 @@ node modules/cross-review/cross-review.mjs run --host codex --rev <sha> --diff p
   [--context @refs.txt] [--checklist docs/review-skills/code-review.md --checklist docs/review-skills/security-review.md] \
   [--prior r0/codex/review.json --dispositions dispositions.json] [--id-start 9]
 
-# 3. Merge the hosts' reviews into one deduplicated summary.
+# 3. Merge the hosts' reviews into one deduplicated summary (run directories or their evidence.json).
 node modules/cross-review/cross-review.mjs merge --review .context/reviews/r1/codex \
   --review .context/reviews/r1/antigravity [--out .context/reviews/r1/merged.json] [--line-window 3]
 ```
@@ -48,13 +49,17 @@ complete, 1 otherwise. 2 is a usage error (including unknown or repeated options
 - `--checklist` (repeatable, one path each): a relative path, or an absolute path inside the
   repository, is read from the git object at `--rev` (never the working tree); an absolute path
   outside the repository is read from disk. Each checklist's source and sha256 are in the evidence.
-- `--out` (and `plan --out`, `merge --out`) must be outside the repository or git-ignored; a tracked
-  path or anything under `.git/` is refused.
+- `--out` (and `plan --out`, `merge --out`) must be outside every repository it could land in, or
+  git-ignored there: the repository containing the output path itself and `--repo` (also accepted
+  by `plan`/`merge`) are both checked. A tracked path, an output directory that holds tracked
+  (e.g. force-added) files, or anything under `.git/` is refused.
 - `run` writes `evidence.json`, `review.json`, `summary.txt` (the printed summary), `prompt.txt` and
   `raw/` under `--out`.
 - `merge` groups findings from different hosts that point at the same file within `--line-window`
   lines and have similar claim+evidence wording (word Jaccard ≥ 0.2, ≥ 0.1 when the line ranges
-  overlap); each group keeps every host's own id (e.g. `X1=A11`). Incomplete runs are listed, never merged.
+  overlap); each group keeps every host's own id (e.g. `X1=A11`). Only runs whose `evidence.json`
+  says `status: complete` and whose review is a `{ verdict, findings[] }` object are merged; a bare
+  `review.json` without evidence, an incomplete run, or any other JSON is listed as incomplete.
 
 ## Contract
 
@@ -96,15 +101,19 @@ reviewer id, pinned model/effort, reported model and effort (`effortCheck`: veri
 `incomplete`), prompt hash, timeout, status and reasons, token counts summed over attempts,
 tool/path audit, argv, attempts (each with its own reported model and signal log). Any failure, any audit violation, or a
 reported model that differs from (or cannot confirm) the pin makes the run `incomplete` and
-withholds the review (`reviewIfIncomplete` keeps the draft for diagnosis). The runner never
-switches to another reviewer or model.
+withholds the review: `review.json` is `null`, and `evidence.reviewIfIncomplete` keeps the
+schema-valid draft for diagnosis (Codex reads its `-o` reply after the audit whatever the outcome;
+an unparseable reply is kept as `reviewDraftRawIfIncomplete`). Incomplete reasons name the
+offending command or path (truncated, first three plus a count). The runner never switches to
+another reviewer or model.
 
 ## Selection and pace (`plan`)
 
 - The author host is never a reviewer.
 - Grade is `high` when a dimension is in `grade.high_dimensions` (security, migration, deployment,
   contract) or a changed path matches `grade.high_path_globs`; otherwise `standard`. Globs are
-  matched against the full repo-relative path (`**/` for any depth).
+  matched against the full repo-relative path (`**/` for any depth). `gradeReasons` lists every
+  matched file and ends with `paths: <m> of <n> matched a high glob, <n-m> unmatched`.
 - `standard` needs 1 reviewer, `high` needs 2 different hosts. Too few eligible hosts → `blocked`.
 - `host_order` must list configured hosts without duplicates (checked by the policy loader; the
   planner also de-duplicates).
@@ -117,7 +126,8 @@ switches to another reviewer or model.
   checked against every listed window: cost greater than the remaining fraction → skip.
 - A window that resets within `pace.reset_soon_minutes` (60) is not paced (a nearly reset window
   would show a pace of 60+): it only has to cover its expected cost. If it cannot, the plan asks
-  (waiting for the reset is an option) instead of skipping.
+  (waiting for the reset is an option), unless another window fails its cost or pace: every window
+  is evaluated and skip beats ask.
 - pace ≥ `use_at_or_above` (1.0): use. Between `high_only_at_or_above` (0.6) and 1.0: use only for
   high grade. Below 0.6: skip with a one-line question. Usage unavailable: `ask`. `--no-user` turns
   `ask` into `blocked`. Thresholds and cost estimates are provisional (`pace.provisional`).
@@ -128,15 +138,15 @@ switches to another reviewer or model.
 | --- | --- | --- | --- |
 | Model / effort | `--model`, `--effort` from policy | `-m`, `-c model_reasoning_effort=` | `session/set_config_option` model + thinking level |
 | Reported model | stream `init.model` + `modelUsage` keys | stderr header `model:` (client-resolved) | `set_config_option` currentValue + stderr proxy model per call |
-| No writes | `--tools Read,Grep,Glob`, `--restricted`, `--permission-mode dontAsk` | `-s read-only`, `approval_policy="never"` | `enabledTools:["view_file"]`, fs/terminal capabilities false, permissions `reject_once` |
-| Reads confined | `--restricted` confines file tools to cwd = snapshot; audit of every tool path and of absolute/`..`/`~` Glob/Grep patterns | **not enforced by the host**: audit of every command in the transcript | audit of every `view_file` path (full `rawInput`, `tool_call_update` titles) |
-| Code execution | none (no Bash) | `hosts.codex.allow_code_execution` (default `true`): interpreters / command substitution may run, only inside the read-only sandbox; `false` makes any such command `incomplete` | none (`view_file` only) |
-| No network beyond the model API | no WebFetch/WebSearch/Bash; `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` | read-only sandbox has no network; `web_search="disabled"` | web tools not enabled |
+| No writes | `--tools Read,Grep,Glob`, `--restricted`, `--permission-mode dontAsk` | OS sandbox profile with no write entry (header must say `sandbox: read-only`), `approval_policy="never"` | `enabledTools:["view_file"]`, fs/terminal capabilities false, permissions `reject_once` |
+| Reads confined | `--restricted` confines file tools to cwd = snapshot; audit of every tool path, Glob patterns and Grep `path`/`glob` (Grep's regex `pattern` is not a path) | **OS-enforced** (macOS Seatbelt, see below); the transcript audit is a secondary signal | audit of every `view_file` path (full `rawInput`, `tool_call_update` titles) |
+| Code execution | none (no Bash) | `hosts.codex.allow_code_execution` (default `true`): interpreters / command substitution may run, under the same OS sandbox; `false` makes any such command `incomplete` | none (`view_file` only) |
+| No network beyond the model API | no WebFetch/WebSearch/Bash; `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` | the profile has no network entry (model commands have no network); `web_search="disabled"` | web tools not enabled |
 | No MCP | `--strict-mcp-config --mcp-config '{"mcpServers":{}}'`, `--safe-mode` | `--ignore-user-config` (MCP servers live there), `--disable plugins/apps` | `mcpServers: []`, isolated `GEMINI_HOME` without `config/` |
 | No delegation | Agent tool not in `--tools` | `--disable multi_agent[_v2]` | `invoke_subagent` not enabled |
 | Ignore user settings | `--setting-sources ""`, `--restricted`, `--safe-mode`, `--disable-slash-commands` | `--ignore-user-config`, `--ignore-rules` | isolated `GEMINI_HOME` (only `antigravity-acp/` linked) |
 | No session persistence | `--no-session-persistence` | `--ephemeral` | not possible: session files deleted afterwards when `.meta` cwd matches |
-| Never | `--dangerously-*`, `bypassPermissions`, `acceptEdits`, `--add-dir` | `--dangerously-*`, `--full-auto`, `workspace-write`, `danger-full-access`, `--add-dir` | `allow_*`, `reject_always` |
+| Never | `--dangerously-*`, `bypassPermissions`, `acceptEdits`, `--add-dir` | `--dangerously-*`, `--full-auto`, `workspace-write`, `danger-full-access`, `--add-dir`, built-in write profiles (`default_permissions=":workspace"` etc.), `write` filesystem entries, profile network settings | `allow_*`, `reject_always` |
 
 Every spawned host argv (full, untruncated) is checked against the bypass list before anything is
 executed (`refused before spawn`); any `approval_policy` other than `never` or `sandbox_mode` other
@@ -144,24 +154,65 @@ than `read-only` counts, quoted either way. Antigravity has no argv beyond the s
 snapshot hash is compared before/after. Token files (`~/.codex/auth.json`, Claude credentials,
 `acp_token.json`) are never opened by the runner.
 
-**Codex transcript audit (conservative).** Each `exec` block is parsed in full, including multi-line
-commands, up to its `in <cwd>` line; the command is shell-tokenized (wrapper `sh|bash|zsh -lc`
-unwrapped). The run is `incomplete` when the auditor cannot read a command confidently (unbalanced
-quotes, a `$VAR` not assigned in the same script, a missing terminator, a prompt echo that differs
-from the prompt sent), when a cwd is missing or outside the snapshot (realpath, so `/tmp` and
-`/private/tmp` agree), or when a command names a path outside the snapshot: absolute paths
-including flag-attached forms (`-C/x`, `-f/x`, `--file=/x`), `~`, `..`, bare `cd`, `cd ~`, `cd -`.
-Tool-like lines (`mcp`, `tool`, web search, `apply_patch`) are flagged at block starts only; the
-prompt echo is skipped by exact match.
+**Codex OS sandbox (primary control).** Codex runs every model command under its own macOS
+Seatbelt profile. The runner generates that profile as a Codex permission profile and passes it
+with `-c default_permissions="cross_review_<random>"` and
+`-c permissions.<name>.filesystem={...}` (`codex exec` gets no `-s`: `-s read-only` overrides a
+permission profile with full-disk read, verified). The profile is:
+
+| | |
+| --- | --- |
+| Read | `:minimal` (Codex's built-in platform set: system libraries/frameworks, `/bin`, `/usr/bin`, `/etc`, `/Library/Preferences`, `/System`, `/dev`), the snapshot, the codex install root (resolved real path), the node install root (when `allow_code_execution`, or when codex is a node script) |
+| Denied explicitly | `/private/tmp`, `/private/var/tmp` (in `:minimal` otherwise); everything else (home directories, the Codex home and its auth file, other temp dirs, `/Volumes`, `/opt`, `/Applications`) is denied by default |
+| Write | none |
+| Network | none (no network entry) |
+
+Before the review the runner self-tests the profile without a model call, through
+`codex sandbox <same -c args> -- <cmd>`: reading a harmless probe file the runner created outside
+the snapshot, listing the Codex home (names only, discarded) and writing inside the snapshot must
+fail with EPERM, and reading a snapshot file must succeed. Any failed probe makes the run
+`incomplete` (`os_sandbox_not_enforced:<probes>`) and codex exec is never started. The profile
+(TOML) and its sha256, the read/denied roots and the self-test result are in
+`evidence.isolation.osSandbox`; the profile is also `raw/codex-sandbox-profile.toml`. Sandbox
+denials seen in command output are counted there (`deniedOps`, `deniedSample`).
+
+Why not an outer `sandbox-exec` around `codex exec`: macOS refuses a nested `sandbox_apply` inside
+any restrictive profile (an outer profile whose only rule is `(deny file-write*) (allow file-write*
+(subpath "/"))` already makes the inner `sandbox-exec` fail with EPERM / exit 71), and Codex starts
+every model command through `sandbox-exec`, so an outer profile breaks every command.
+
+No Seatbelt (not macOS, or no `/usr/bin/sandbox-exec`): the run is `incomplete` (`no_os_sandbox`)
+unless the policy sets `hosts.codex.os_sandbox: "audit_only"` (default `"required"`), which runs
+with plain `-s read-only` and the transcript audit only.
+
+The codex process itself is not confined (it reads its own auth file and writes its state in the
+Codex home); the runner never opens token files.
+
+**Codex transcript audit (secondary signal).** Each `exec` block is parsed in full, including
+multi-line commands, up to its `in <cwd>` line followed by a status line or a marker; an `exec` line
+without such a block is command output and is only counted. Commands are shell-tokenized (wrapper
+`sh|bash|zsh -lc` unwrapped; `$'..'`/`$".."`, unassigned `$VAR`, assignments only in order and in
+command position, redirections and prefix options keep command position, glob and non-ASCII root
+paths are paths). Only clear violations the sandbox would have caught anyway make the run
+`incomplete`: a literal outside path given to a file-reading command (not an interpreter program,
+not a grep/rg/sed pattern), a redirection to an outside file, `cd`/`pushd`/`popd` leaving the
+snapshot, a cwd outside the snapshot; plus code execution when the policy forbids it, tool-like
+lines (`mcp`, `tool`, web search, `apply_patch`) at block starts, and a transcript whose header or
+prompt echo cannot be read. Everything else (computed paths, literals inside `node -e`/`python -c`
+programs, unusual quoting) is a warning in the evidence.
 
 **Process groups.** A host runs in its own process group. While the child is not reaped it holds
-the group id, so signalling is safe; after it exits, `ps -eo pid,pgid` must show a live member right
-before each signal, otherwise no signal is sent (the id may already be reused). A descendant that
-keeps the host's pipes open after exit makes the run `incomplete` (`pipes_abandoned`).
+the group id, so signalling the group is safe. After it exits, a numeric pgid match is never taken
+as membership: `ps -eo pid,pgid,lstart` is read right before each signal and only members whose
+start time lies between the child's spawn and exit (one-second slack) are signalled, each by pid
+(a replacement group started after the exit is never hit). A descendant that keeps the host's
+pipes open after exit makes the run `incomplete` (`pipes_abandoned`).
 
 **Antigravity turns.** Every turn (first and corrective retry) is checked for timeout, upstream
 failure, RPC error, a stop reason other than `end_turn`, fatal agent errors and auth prompts before
-its text is used; each turn must carry a matching `Proxy extracted model` line; finding ids continue
+its text is used; after the last turn the unterminated last stderr line is flushed and checked
+again, and a server exit with a non-zero code (or a signal the runner did not send) makes the run
+`incomplete`; each turn must carry a matching `Proxy extracted model` line; finding ids continue
 across turns; a spawn failure or early server exit fails at once. `max_files_per_turn` (8) and
 `max_bytes_per_turn` (120000) split each dimension group into scope-file chunks so a turn stays well
 under the proxy's 300 s first-byte wall. `runtime_root` accepts `{platform}-{arch}`; the highest
@@ -169,11 +220,12 @@ version present is used. Leftover agy processes outside the run's group are repo
 
 Known gaps (also written into each run's `hostLimits`):
 
-- Codex's read-only sandbox does not limit which paths a command may read; out-of-snapshot reads are
-  detected from the transcript, not prevented. With code execution allowed, a program can read a
-  file without naming it literally (e.g. a computed path); only literal paths, cwd and expansions
-  are audited. Set `allow_code_execution: false` to forbid interpreters and command substitution.
-  The model is the client-resolved header value, not echoed by the server.
+- Codex model commands can read Codex's `:minimal` platform set (system files under `/etc`,
+  `/Library/Preferences`, `/System`, `/usr`); `none` entries cannot narrow it and Codex aborts at
+  start without it. Literal reads of such paths by file-reading commands are still `incomplete`.
+  The codex process itself is unconfined. Commands Codex refuses before running them (e.g. `ls ~`)
+  may not appear in the transcript at all. On macOS only; elsewhere `no_os_sandbox` unless
+  `audit_only`. The model is the client-resolved header value, not echoed by the server.
 - Claude does not report the effort level it ran at; Claude Code may use a small model for internal
   steps (recorded as a warning; the pinned model must appear in `modelUsage`).
 - Antigravity cannot disable session persistence; the model per response is only visible in the
@@ -187,5 +239,8 @@ node --test modules/cross-review/test/*.test.mjs
 ```
 
 The tests use fake `claude`/`codex` binaries and an ACP stub for Antigravity (`test/fixtures/`) and
-never call a model. Fixture repositories commit with `-c commit.gpgsign=false` so a global signing
+never call a model. On macOS the fake codex's `sandbox` subcommand enforces the generated profile
+with a real `sandbox-exec` SBPL profile, `test/sandbox.test.mjs` proves Seatbelt denies a harmless
+outside file and allows a snapshot file, and, when a native codex is installed, runs the real
+`codex sandbox` self-test (no model call). Fixture repositories commit with `-c commit.gpgsign=false` so a global signing
 setting cannot break them.
