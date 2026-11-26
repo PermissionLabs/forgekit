@@ -193,13 +193,26 @@ make_sibling_tmp() {
   chmod 600 "$FORGEKIT_TMP" || return 1
 }
 
-# Apply the final mode to FORGEKIT_TMP and rename it onto $1. An existing
+# Copy the permission bits of $1 onto $2 (GNU stat, then BSD stat).
+preserve_mode() {
+  local mode
+  mode="$(stat -c %a "$1" 2>/dev/null)" || mode="$(stat -f %Lp "$1")" || return 1
+  chmod "$mode" "$2"
+}
+
+# Apply the final mode to FORGEKIT_TMP and rename it onto $1. The final mode
+# is that of the regular file being replaced (so a 0600 or 0755 file keeps
+# it), or the umask default for a new file or a replaced link. An existing
 # symlink at $1 is removed first: mv onto a link to a directory would move
 # the file into that directory. On failure FORGEKIT_TMP is kept set so the
 # EXIT trap (forgekit_tmp_cleanup) removes the temp file.
 commit_sibling_tmp() {
   local dst="$1"
-  chmod "$(forgekit_default_file_mode)" "$FORGEKIT_TMP" || return 1
+  if [ -f "$dst" ] && [ ! -L "$dst" ]; then
+    preserve_mode "$dst" "$FORGEKIT_TMP" || return 1
+  else
+    chmod "$(forgekit_default_file_mode)" "$FORGEKIT_TMP" || return 1
+  fi
   if [ -L "$dst" ]; then
     rm -f "$dst"
   fi

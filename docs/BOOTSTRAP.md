@@ -80,22 +80,21 @@ The update helper:
 - runs `scripts/check-harness-sync.sh "$TARGET"` at the end
 
 Compatibility note for downstream projects (symlinked harness files):
-`bootstrap.sh` and `update-harness.sh` no longer write through symlinks. A
-harness path that is a symlink resolving **inside** the repository (for
-example `AGENTS.md -> .harness/AGENTS.md`, or a linked `.gitignore`) is
-replaced by a regular file holding the new content; the file the link
-pointed to is left unchanged. A symlink resolving **outside** the repository
-stops the whole run with a `LINK:` line, even with `--force`. If your project
-keeps harness files behind links on purpose:
+`bootstrap.sh` and `update-harness.sh` never write through symlinks, and
+refuse the whole run (even with `--force`) when a managed path is a symlink,
+sits under a symlinked directory inside the target, or exists as something
+other than a regular file. This holds for links that resolve **inside** the
+repository too (for example `AGENTS.md -> .harness/AGENTS.md`, or a linked
+`.gitignore`), with an `error: symlink in managed destination: <path>` line;
+a link resolving **outside** the repository is also reported as a `LINK:`
+line. A symlinked target root is refused (`error: target is a symlink`). If
+your project keeps harness files behind links:
 
-- before updating, decide which copy is canonical; after the update the named
-  path holds ForgeKit's content and the old link target is stale;
-- either delete the old link target and keep the regular file, or re-create
-  the link afterwards and mark the canonical file with `forgekit-override` if
-  it intentionally diverges (`update-harness.sh` will replace the link again
-  on the next update that changes it);
+- decide which copy is canonical, replace the link (or linked directory) with
+  that regular file or directory, and delete or stop using the other copy;
+- mark the file with `forgekit-override` if it intentionally diverges;
 - review `git diff` / `git status` for `typechange` entries (link -> file)
-  before committing.
+  before committing, then re-run the script.
 
 Expected PR contents in the target repo:
 
@@ -278,9 +277,9 @@ pointer.
   repository through a symlink — its own or a parent directory's — fails the
   sync check as `LINK`; its content is not printed. `bootstrap.sh` and
   `update-harness.sh` check every path they would write first and refuse the
-  whole run (even with `--force`) when one resolves outside the repository;
-  a symlink resolving inside it is replaced by a regular file, never written
-  through.
+  whole run (even with `--force`) when one resolves outside the repository,
+  is a symlink or sits under a symlinked directory (even one resolving inside
+  it), or is not a regular file. Rewritten files keep their own mode.
 - Skills under `.agents/skills/<name>/SKILL.md` are natively discovered by both
   Codex and Antigravity.
 

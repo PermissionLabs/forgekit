@@ -19,11 +19,11 @@ Always preserves:
 
 Files carrying a forgekit-override marker are skipped.
 
-Every path it would write is checked first. If any resolves outside the
-target repository (its own symlink, a symlinked parent directory, or a
-`link/..` path), nothing is written, even with --force. A symlink that
-resolves inside the repository is replaced by a regular file, never written
-through.
+Every path it would write is checked first. If any is a symlink, sits under
+a symlinked directory inside the target, is not a regular file, or resolves
+outside the target repository (including a `link/..` path), nothing is
+written, even with --force. This holds for symlinks that resolve inside the
+repository too.
 EOF
 }
 
@@ -59,7 +59,8 @@ if [ -L "$target" ]; then
   exit 1
 fi
 target="$(cd "$target" && pwd -P)"
-source "$forgekit_root/scripts/check-target-paths.sh"
+# shellcheck source=check-target-paths.sh
+. "$forgekit_root/scripts/check-target-paths.sh"
 
 # shellcheck source=lib/repo-paths.sh
 . "$forgekit_root/scripts/lib/repo-paths.sh"
@@ -94,12 +95,6 @@ same_entrypoint_body() {
   diff <(tail -n +2 "$1") <(tail -n +2 "$2") >/dev/null
 }
 
-preserve_mode() {
-  local mode
-  mode="$(stat -c %a "$1" 2>/dev/null)" || mode="$(stat -f %Lp "$1")"
-  chmod "$mode" "$2"
-}
-
 copy_entrypoint_preserving_title() {
   local src="$1" dst="$2"
   mkdir -p "$(dirname "$dst")"
@@ -113,7 +108,6 @@ copy_entrypoint_preserving_title() {
   # unreadable file) commit a body without its title line.
   head -n 1 "$dst" > "$FORGEKIT_TMP" || return 1
   tail -n +2 "$src" >> "$FORGEKIT_TMP" || return 1
-  preserve_mode "$dst" "$FORGEKIT_TMP"
   # Replaces an in-repo symlink itself, never the file it points to.
   commit_sibling_tmp "$dst"
 }
@@ -299,6 +293,10 @@ would_keep_gemini_alias() {
 
 drift=0
 
+# Before any managed file is read (has_override/cmp) or written: no symlink
+# on a managed path, in-repo or not, and no non-regular file (PR #25).
+check_managed_destinations || drift=1
+
 for rel in AGENTS.md CLAUDE.md; do
   would_update_file "$templates/$rel" "$rel" entrypoint || drift=1
 done
@@ -321,6 +319,9 @@ if [ "$drift" -ne 0 ]; then
   echo "Review the drift. DRIFT lines: re-run with --force if those harness files should match ForgeKit." >&2
   echo "LINK lines: apply the fix named on the line first (--force does not repair symlinks" >&2
   echo "or allow writes that resolve outside the repository)." >&2
+  echo "\"error: symlink in managed destination\" / \"not a regular file\" lines: replace that" >&2
+  echo "path (or the symlinked directory above it) with a regular file or directory;" >&2
+  echo "--force does not override this." >&2
   exit 1
 fi
 
@@ -361,7 +362,6 @@ elif command -v jq >/dev/null 2>&1; then
       forgekit_tmp_cleanup
       echo "ok:   .context/workflow-state.json resume_protocol"
     else
-      preserve_mode "$state_file" "$FORGEKIT_TMP"
       commit_sibling_tmp "$state_file"
       echo "update: .context/workflow-state.json resume_protocol"
     fi

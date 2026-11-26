@@ -15,10 +15,10 @@ target's .gitignore.
 Refuses to overwrite existing harness files unless --force is passed.
 docs/PROJECT_CONTEXT.md is never overwritten (project-local content).
 
-Every path it would write is checked first. If any resolves outside the
-target (its own symlink, a symlinked parent directory, or a `link/..` path),
-nothing is written, even with --force. A symlink that resolves inside the
-target is replaced by a regular file, never written through.
+Every path it would write is checked first. If any is a symlink, sits under
+a symlinked directory inside the target, is not a regular file, or resolves
+outside the target (including a `link/..` path), nothing is written, even
+with --force. This holds for symlinks that resolve inside the target too.
 EOF
 }
 
@@ -54,7 +54,8 @@ if [ -L "$target" ]; then
   exit 1
 fi
 target="$(cd "$target" && pwd -P)"
-source "$forgekit_root/scripts/check-target-paths.sh"
+# shellcheck source=check-target-paths.sh
+. "$forgekit_root/scripts/check-target-paths.sh"
 
 # shellcheck source=lib/repo-paths.sh
 . "$forgekit_root/scripts/lib/repo-paths.sh"
@@ -79,6 +80,8 @@ while IFS= read -r src; do
 done < <(find "$templates/docs" -type f | sort)
 
 unsafe=0
+# No symlink on a managed path, in-repo or not, and no non-regular file (PR #25).
+check_managed_destinations || unsafe=1
 for rel in "${write_targets[@]}"; do
   if why="$(write_target_problem "$target/$rel" "$target")"; then
     echo "LINK: $rel $why; --force does not override this" >&2
@@ -86,8 +89,9 @@ for rel in "${write_targets[@]}"; do
   fi
 done
 if [ "$unsafe" -ne 0 ]; then
-  echo "error: bootstrap stopped before changing files. Replace each LINK path with a" >&2
-  echo "       regular file inside the target (or remove it), then re-run." >&2
+  echo "error: bootstrap stopped before changing files. Replace each LINK or managed-" >&2
+  echo "       destination path (and any symlinked directory above it) with a regular" >&2
+  echo "       file or directory inside the target (or remove it), then re-run." >&2
   exit 1
 fi
 

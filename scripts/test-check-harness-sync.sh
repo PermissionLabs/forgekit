@@ -418,9 +418,9 @@ expect_lacks "OUTSIDE_PARENT_MARK_c3d0"
 [ "$(tree_hash "$TMP_DIR/outside-w2")" = "$before_tree" ] \
   || fail "files outside the repository changed through a symlinked parent"
 
-# 17. Write guard control: symlinks resolving inside the repository are
-#     replaced by regular files (the link itself), never written through, so
-#     the in-repo files they pointed to keep their content.
+# 17. PR #25: a symlink on a managed path is refused even when it resolves
+#     inside the repository (check-target-paths.sh). Nothing is written: the
+#     links stay links and the in-repo files they point to keep their content.
 repo="$(new_repo write-inside-links)"
 mkdir -p "$repo/.harness"
 mv "$repo/docs/WORKFLOW.md" "$repo/.harness/WORKFLOW.md"
@@ -432,19 +432,101 @@ ln -s .harness/AGENTS.md "$repo/AGENTS.md"
 printf 'node_modules/\n' > "$repo/.harness/gitignore"
 rm -f "$repo/.gitignore"
 ln -s .harness/gitignore "$repo/.gitignore"
-inside_tree="$(tree_hash "$repo/.harness")"
-run_script "update-harness --force replaces in-repo symlinks" \
+repo_tree="$(tree_hash "$repo")"
+run_script "update-harness --force refuses in-repo symlinks on managed paths" \
+  "$ROOT/scripts/update-harness.sh" "$repo" --force
+expect_rc 1
+for f in AGENTS.md .gitignore docs/WORKFLOW.md; do
+  expect_has "error: symlink in managed destination: "
+  printf '%s\n' "$OUT" | grep -Fq -- "/write-inside-links/$f" || fail "no refusal for $f"
+  [ -L "$repo/$f" ] || fail "$f was replaced despite the refusal"
+done
+expect_has "update stopped before changing files"
+[ "$(tree_hash "$repo")" = "$repo_tree" ] \
+  || fail "partial update: files written despite the refusal"
+
+# 17b. PR #25: a symlinked directory inside the repository above a managed
+#      path is refused too (the destination's ancestors are checked up to the
+#      target root), by both writers.
+repo="$(new_repo write-inside-dirlink)"
+mkdir -p "$repo/.harness"
+mv "$repo/docs/review-skills" "$repo/.harness/review-skills"
+ln -s ../.harness/review-skills "$repo/docs/review-skills"
+repo_tree="$(tree_hash "$repo")"
+run_script "update-harness --force refuses an in-repo symlinked directory" \
+  "$ROOT/scripts/update-harness.sh" "$repo" --force
+expect_rc 1
+expect_has "error: symlink in managed destination: "
+printf '%s\n' "$OUT" | grep -Fq -- "/write-inside-dirlink/docs/review-skills" \
+  || fail "no refusal for docs/review-skills"
+[ "$(tree_hash "$repo")" = "$repo_tree" ] || fail "files written despite the refusal"
+run_script "bootstrap --force refuses an in-repo symlinked directory" \
+  "$ROOT/scripts/bootstrap.sh" "$repo" --force
+expect_rc 1
+expect_has "error: symlink in managed destination: "
+expect_has "bootstrap stopped before changing files"
+[ "$(tree_hash "$repo")" = "$repo_tree" ] || fail "files written despite the refusal"
+
+# 17c. PR #25: a symlinked target root is refused by both writers before
+#      anything is checked or written.
+repo="$(new_repo target-real)"
+ln -s "$repo" "$TMP_DIR/target-link"
+printf '\nlocal edit\n' >> "$repo/CLAUDE.md"
+repo_tree="$(tree_hash "$repo")"
+run_script "update-harness refuses a symlinked target" \
+  "$ROOT/scripts/update-harness.sh" "$TMP_DIR/target-link" --force
+expect_rc 1
+expect_has "error: target is a symlink"
+run_script "bootstrap refuses a symlinked target" \
+  "$ROOT/scripts/bootstrap.sh" "$TMP_DIR/target-link" --force
+expect_rc 1
+expect_has "error: target is a symlink"
+[ "$(tree_hash "$repo")" = "$repo_tree" ] || fail "files written through a symlinked target"
+
+# 17d. PR #25: a managed destination that exists but is not a regular file
+#      (a directory) is refused by both writers.
+repo="$(new_repo write-nonregular)"
+rm -f "$repo/CLAUDE.md"
+mkdir "$repo/CLAUDE.md"
+run_script "update-harness --force refuses a non-regular managed destination" \
+  "$ROOT/scripts/update-harness.sh" "$repo" --force
+expect_rc 1
+expect_has "error: managed destination is not a regular file: "
+[ -d "$repo/CLAUDE.md" ] || fail "CLAUDE.md directory was replaced"
+run_script "bootstrap --force refuses a non-regular managed destination" \
+  "$ROOT/scripts/bootstrap.sh" "$repo" --force
+expect_rc 1
+expect_has "error: managed destination is not a regular file: "
+[ -d "$repo/CLAUDE.md" ] || fail "CLAUDE.md directory was replaced"
+
+# 17e. PR #25: rewriting an existing file through a temp file keeps the
+#      file's own mode (title-preserving entrypoint copy, workflow-state
+#      resume_protocol update); only new files get the umask default.
+repo="$(new_repo mode-preserved)"
+printf '\nlocal edit\n' >> "$repo/CLAUDE.md"
+chmod 600 "$repo/CLAUDE.md"
+printf '\nlocal edit\n' >> "$repo/AGENTS.md"
+chmod 755 "$repo/AGENTS.md"
+if command -v jq >/dev/null 2>&1; then
+  jq 'del(.resume_protocol.phase_refs_source)' "$repo/.context/workflow-state.json" > "$TMP_DIR/mode-state.json"
+  cat "$TMP_DIR/mode-state.json" > "$repo/.context/workflow-state.json"
+  chmod 640 "$repo/.context/workflow-state.json"
+fi
+run_script "update-harness --force preserves file modes" \
   "$ROOT/scripts/update-harness.sh" "$repo" --force
 expect_rc 0
-[ "$(tree_hash "$repo/.harness")" = "$inside_tree" ] \
-  || fail "update-harness wrote through an in-repo symlink"
-for f in docs/WORKFLOW.md AGENTS.md .gitignore; do
-  [ -f "$repo/$f" ] && [ ! -L "$repo/$f" ] || fail "$f is still a symlink"
-done
-cmp -s "$repo/docs/WORKFLOW.md" "$ROOT/templates/docs/WORKFLOW.md" \
-  || fail "docs/WORKFLOW.md does not match the template"
-grep -qxF 'node_modules/' "$repo/.gitignore" && grep -qxF '.context/' "$repo/.gitignore" \
-  || fail ".gitignore lost its content or the .context/ line"
+expect_has "copy: CLAUDE.md (body updated, title preserved)"
+expect_has "copy: AGENTS.md (body updated, title preserved)"
+file_mode() {
+  if stat -f '%Lp' "$1" >/dev/null 2>&1; then stat -f '%Lp' "$1"; else stat -c '%a' "$1"; fi
+}
+[ "$(file_mode "$repo/CLAUDE.md")" = "600" ] || fail "CLAUDE.md mode $(file_mode "$repo/CLAUDE.md"), want 600"
+[ "$(file_mode "$repo/AGENTS.md")" = "755" ] || fail "AGENTS.md mode $(file_mode "$repo/AGENTS.md"), want 755"
+if command -v jq >/dev/null 2>&1; then
+  expect_has "update: .context/workflow-state.json resume_protocol"
+  [ "$(file_mode "$repo/.context/workflow-state.json")" = "640" ] \
+    || fail "workflow-state.json mode $(file_mode "$repo/.context/workflow-state.json"), want 640"
+fi
 
 # 18. bootstrap.sh --force gets the same write guard: an outside file
 #     symlink and an outside parent directory are refused before anything is
@@ -469,20 +551,21 @@ expect_lacks "OUTSIDE_BOOT_MARK_e8f1"
 [ ! -e "$dir/CLAUDE.md" ] && [ ! -e "$dir/.gitignore" ] \
   || fail "partial bootstrap: files written despite the refusal"
 
-# 18b. bootstrap.sh control: an in-repo symlink is replaced, not written through
+# 18b. PR #25: bootstrap refuses an in-repo symlink on a managed path too;
+#      the link and the file it points to are left as they were.
 dir="$TMP_DIR/boot-inside"
 mkdir -p "$dir/.harness"
 git -C "$dir" init -q
 printf 'project notes\n' > "$dir/.harness/agents.md"
 ln -s .harness/agents.md "$dir/AGENTS.md"
-inside_hash="$(hash_of "$dir/.harness/agents.md")"
-run_script "bootstrap --force replaces in-repo symlink" \
+repo_tree="$(tree_hash "$dir")"
+run_script "bootstrap --force refuses an in-repo symlink" \
   "$ROOT/scripts/bootstrap.sh" "$dir" --force
-expect_rc 0
-[ "$(hash_of "$dir/.harness/agents.md")" = "$inside_hash" ] \
-  || fail "bootstrap wrote through an in-repo symlink"
-[ -f "$dir/AGENTS.md" ] && [ ! -L "$dir/AGENTS.md" ] || fail "AGENTS.md is still a symlink"
-cmp -s "$dir/AGENTS.md" "$ROOT/templates/AGENTS.md" || fail "AGENTS.md does not match the template"
+expect_rc 1
+expect_has "error: symlink in managed destination: "
+expect_has "bootstrap stopped before changing files"
+[ -L "$dir/AGENTS.md" ] || fail "AGENTS.md link was replaced despite the refusal"
+[ "$(tree_hash "$dir")" = "$repo_tree" ] || fail "partial bootstrap: files written despite the refusal"
 
 # 19. X5: temp files are created exclusively (mktemp), never at the old
 #     predictable "<file>.tmp.<PID>" / "<file>.forgekit-tmp.<PID>" names.
@@ -522,9 +605,9 @@ repo="$(new_repo tmp-canary-update)"
 mkdir -p "$repo/.harness"
 printf '\nlocal edit\n' >> "$repo/AGENTS.md"
 printf '\nlocal edit\n' >> "$repo/CLAUDE.md"
-printf 'node_modules/\n' > "$repo/.harness/gitignore"
-rm -f "$repo/.gitignore"
-ln -s .harness/gitignore "$repo/.gitignore"
+# A plain .gitignore without .context/ (a .gitignore link is refused since
+# PR #25, so the in-place append path is exercised here).
+printf 'node_modules/\n' > "$repo/.gitignore"
 if command -v jq >/dev/null 2>&1; then
   jq 'del(.resume_protocol.phase_refs_source)' "$repo/.context/workflow-state.json" \
     > "$repo/.harness/state" && mv "$repo/.harness/state" "$repo/.context/workflow-state.json"
@@ -542,21 +625,20 @@ if command -v jq >/dev/null 2>&1; then
 fi
 same_entry_body() { diff <(tail -n +2 "$1") <(tail -n +2 "$2") >/dev/null; }
 same_entry_body "$repo/AGENTS.md" "$ROOT/templates/AGENTS.md" || fail "AGENTS.md body not updated"
-[ -f "$repo/.gitignore" ] && [ ! -L "$repo/.gitignore" ] || fail ".gitignore is still a symlink"
+grep -qxF '.context/' "$repo/.gitignore" && grep -qxF 'node_modules/' "$repo/.gitignore" \
+  || fail ".gitignore lost its content or the .context/ line"
 expect_planted_intact "$repo"
 
 dir="$TMP_DIR/tmp-canary-boot"
 mkdir -p "$dir/.harness" "$dir/.context"
 git -C "$dir" init -q
-printf 'node_modules/\n' > "$dir/.harness/gitignore"
-ln -s .harness/gitignore "$dir/.gitignore"
+printf 'node_modules/\n' > "$dir/.gitignore"
 LABEL="bootstrap ignores pre-placed predictable temp names"
 CASES=$((CASES + 1))
 capture plant_and_exec "$dir" "$ROOT/scripts/bootstrap.sh" "$dir"
 expect_rc 0
 grep -qxF '.context/' "$dir/.gitignore" && grep -qxF 'node_modules/' "$dir/.gitignore" \
   || fail ".gitignore lost its content or the .context/ line"
-[ "$(cat "$dir/.harness/gitignore")" = "node_modules/" ] || fail "bootstrap wrote through an in-repo .gitignore link"
 expect_planted_intact "$dir"
 
 # 19b. X5: a failed state update removes its temp file (the EXIT trap and the
@@ -620,8 +702,10 @@ expect_has "LINK: docs/design-skills/FIGMA.md parent directory resolves outside 
   || fail "partial bootstrap: files written despite the refusal"
 
 # 21. X6: under umask 0222 the temp files must stay writable until their
-#     content is complete; the final mode (umask default, 0444) is applied
-#     just before the rename. Applying it first made every temp write fail.
+#     content is complete; the final mode is applied just before the rename.
+#     Applying it first made every temp write fail. The final mode is the
+#     replaced file's own mode (PR #25 preserve_mode: 0644 here), or the
+#     umask default (0444) for a new file.
 mode_of() {
   if stat -f '%Lp' "$1" >/dev/null 2>&1; then
     stat -f '%Lp' "$1"
@@ -645,9 +729,9 @@ if command -v jq >/dev/null 2>&1; then
   expect_has "copy: CLAUDE.md (body updated, title preserved)"
   expect_has "update: .context/workflow-state.json resume_protocol"
   same_entry_body "$repo/CLAUDE.md" "$ROOT/templates/CLAUDE.md" || fail "CLAUDE.md body not updated"
-  [ "$(mode_of "$repo/CLAUDE.md")" = "444" ] || fail "CLAUDE.md mode $(mode_of "$repo/CLAUDE.md"), want 444"
-  [ "$(mode_of "$repo/.context/workflow-state.json")" = "444" ] \
-    || fail "workflow-state.json mode $(mode_of "$repo/.context/workflow-state.json"), want 444"
+  [ "$(mode_of "$repo/CLAUDE.md")" = "644" ] || fail "CLAUDE.md mode $(mode_of "$repo/CLAUDE.md"), want 644 (preserved)"
+  [ "$(mode_of "$repo/.context/workflow-state.json")" = "644" ] \
+    || fail "workflow-state.json mode $(mode_of "$repo/.context/workflow-state.json"), want 644 (preserved)"
   [ "$(jq -r .resume_protocol.phase_refs_source "$repo/.context/workflow-state.json")" = "docs/PHASE_REFS.json" ] \
     || fail "workflow-state.json was not updated"
   expect_no_tmp "$repo"
@@ -658,14 +742,13 @@ mkdir -p "$repo/.harness"
 printf 'node_modules/' > "$repo/.harness/gitignore"
 rm -f "$repo/.gitignore"
 ln -s .harness/gitignore "$repo/.gitignore"
-LABEL="bootstrap --force under umask 0222 replaces a .gitignore link"
+LABEL="bootstrap --force under umask 0222 refuses a .gitignore link"
 CASES=$((CASES + 1))
 capture bash -c 'umask 0222; exec bash "$0" "$1" --force' "$ROOT/scripts/bootstrap.sh" "$repo"
-expect_rc 0
-[ ! -L "$repo/.gitignore" ] || fail ".gitignore is still a symlink"
-[ "$(cat "$repo/.gitignore")" = "$(printf 'node_modules/\n.context/')" ] || fail ".gitignore content wrong"
+expect_rc 1
+expect_has "error: symlink in managed destination: "
+[ -L "$repo/.gitignore" ] || fail ".gitignore link was replaced despite the refusal"
 [ "$(cat "$repo/.harness/gitignore")" = "node_modules/" ] || fail "bootstrap wrote through the .gitignore link"
-[ "$(mode_of "$repo/.gitignore")" = "444" ] || fail ".gitignore mode $(mode_of "$repo/.gitignore"), want 444"
 expect_no_tmp "$repo"
 
 # worktree-add: git itself cannot create .git/worktrees/<name> or checkout
@@ -877,11 +960,15 @@ mv "$repo/AGENTS.md" "$repo/.harness/AGENTS.md"
 printf '\nlocal edit\n' >> "$repo/.harness/AGENTS.md"
 ln -s .harness/AGENTS.md "$repo/AGENTS.md"
 ln -s AGENTS.md "$repo/GEMINI.md"
-run_script "update-harness --force keeps GEMINI.md -> AGENTS.md -> link" \
+repo_tree="$(tree_state "$repo")"
+# Since PR #25 the AGENTS.md link itself is refused (managed destination);
+# GEMINI.md passes its own check, so only the managed-destination line shows.
+run_script "update-harness --force refuses AGENTS.md link under GEMINI.md -> AGENTS.md" \
   "$ROOT/scripts/update-harness.sh" "$repo" --force
-expect_rc 0
-[ "$repo/GEMINI.md" -ef "$repo/AGENTS.md" ] && [ ! -L "$repo/AGENTS.md" ] \
-  || fail "GEMINI.md no longer resolves to the regular AGENTS.md"
+expect_rc 1
+expect_has "error: symlink in managed destination: "
+expect_lacks "LINK: GEMINI.md"
+[ "$(tree_state "$repo")" = "$repo_tree" ] || fail "files changed despite the refusal"
 
 # 26b. X7: a GEMINI.md chain that reaches AGENTS.md only through a file the
 #      updater replaces (docs/WORKFLOW.md becomes a regular template copy)

@@ -118,7 +118,9 @@ or rewritten through links the same way.
   reason only, even with `--force`, so a refusal never leaves a partial
   update. In `update-harness.sh` the guard runs before `has_override`/`cmp`,
   so an outside file is not read either.
-- A symlink that resolves inside the repository is replaced by a regular
+- (Superseded by the PR #25 rebase below: managed-path symlinks are now
+  refused outright; this replacement code remains as defence in depth.)
+  A symlink that resolves inside the repository is replaced by a regular
   file (the link is removed, then the file written; `.gitignore` is
   materialised from its current content before the append). Writing through
   the link would change a different in-repo file than the one named — for
@@ -152,6 +154,45 @@ or rewritten through links the same way.
   check their status. A `.gitignore` link is materialised with `.context/`
   added in the same temp write, because the committed `0444` copy cannot be
   appended to.
+
+### Rebase onto main (PR #25 security remediation)
+
+`main` gained PR #25 (`b519bef`, `fc3d9b6`) while this branch was open. It
+touched the same writers; the rebase keeps every protection from both sides:
+
+- Kept from PR #25: refusal of a symlinked target root and physical
+  `pwd -P` target resolution (both writers); `scripts/check-target-paths.sh`
+  (`check_destination`: a managed destination that is a symlink, has a
+  symlinked directory between it and the target, or exists as a non-regular
+  file is refused, even when the link resolves inside the repository);
+  `mktemp` temp files; preserved file mode on rewrite.
+- Integration: `check-target-paths.sh` now only defines functions;
+  `check_managed_destinations` checks the same path set (fixed paths plus
+  every template `docs/` file, `docs/PROJECT_CONTEXT.md` included) and
+  reports every refused path instead of exiting on the first. Callers run it
+  in the existing all-paths pre-check (`bootstrap.sh`: before the `LINK`
+  loop; `update-harness.sh`: before any `has_override`/`cmp` read), and a
+  refusal stops the run before any write, even with `--force`, together with
+  this branch's `LINK:` lines and stop summary. The refused set is the union
+  of both rules.
+- `preserve_mode` moved into `scripts/lib/repo-paths.sh`: `commit_sibling_tmp`
+  gives the temp file the replaced regular file's mode, or the umask default
+  for a new file or a replaced link. The X6 order (0600 while writing, final
+  mode just before the rename) is unchanged. Under umask `0222` an existing
+  `0644` file now stays `0644` (test 21 updated).
+- Behaviour change from this branch's earlier rule: an in-repo symlinked
+  harness file is no longer replaced by a regular file; it is refused
+  (`docs/BOOTSTRAP.md` compatibility note updated). Tests 17, 18b, 19, 21 and
+  the `GEMINI.md -> AGENTS.md -> link` control were changed to expect the
+  refusal. The `GEMINI.md` managed-hop check (X7/X8) stays; every
+  intermediate managed hop is a symlink, so PR #25's check now refuses those
+  chains too, independent of path spelling or a newline in the root (X9).
+- New tests: in-repo symlinked managed files and directory (both writers),
+  symlinked target root (both writers), non-regular managed destination
+  (both writers), and preserved modes (`0600`, `0755`, `0640`) on the
+  entrypoint and state rewrites. Each fails under the matching mutation
+  (pre-check call removed from either writer, mode preservation removed,
+  target-link refusal removed, ancestor loop or non-regular check removed).
 
 ## Documentation Updates
 
@@ -233,7 +274,7 @@ or rewritten through links the same way.
 | Cycle 2 / C6 | Shared review contract and per-host review adapters are described but not implemented | `filed_followup` | `docs/review-skills/README.md` states the contract; adapters land in a follow-up change |
 | Cycle 5 / review notes | TOCTOU between the all-paths pre-check and the later writes (a path swapped for a link after the check) | `accepted` | Reviewer judgement: acceptable for a single-user local harness, not an adversarial boundary. Exclusive `mktemp` temp files remove the predictable-name case; the remaining window needs a concurrent writer in the target repo. |
 | Cycle 6 / X6 review | `scripts/worktree-add.sh` does not check whether `$CTX_DIR` (`<worktree>/.context`) is a link resolving outside the repository before seeding state into it (pre-existing, not introduced by this change) | `fixed` | Fixed in cycle 7 (r5 A2): inline `seed_target_problem` guard in `worktree-add.sh`; test "worktree-add refuses a .context link resolving outside" |
-| Cycle 10 / X9 (Codex r8) | A repository root path containing a newline splits the newline-delimited managed-path set in `update-harness.sh`, so a managed GEMINI.md hop can pass the pre-check (`--force` then rewrites before final validation fails) | `accepted` | Reviewer recommended accepting: newline-containing repository roots are not a supported layout for this local harness; the final sync check still fails the run. |
+| Cycle 10 / X9 (Codex r8) | A repository root path containing a newline splits the newline-delimited managed-path set in `update-harness.sh`, so a managed GEMINI.md hop can pass the pre-check (`--force` then rewrites before final validation fails) | `accepted` | Reviewer recommended accepting: newline-containing repository roots are not a supported layout for this local harness; the final sync check still fails the run. After the PR #25 rebase the managed hop is itself a symlink on a managed path and is refused by `check_managed_destinations`, which does not split on newlines. |
 
 ## Compound Capture
 
