@@ -17,13 +17,29 @@ export function scrubEnv(base, passthrough = []) {
 }
 
 // ---------------------------------------------------------------- process groups
-/** Live members of process group `pgid` (POSIX `ps -eo`). An unreadable process table yields []: never signal blind. */
+/**
+ * Live members of process group `pgid` with their start time: [{ pid, startMs }] (POSIX `ps -eo pid,pgid,lstart`,
+ * C locale, one-second resolution). An unreadable process table yields []: never signal blind.
+ */
 export function groupMembers(pgid) {
   if (!pgid) return [];
   try {
-    return execFileSync("ps", ["-eo", "pid=,pgid="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).split("\n")
-      .map((l) => l.trim().split(/\s+/).map(Number)).filter(([p, g]) => p && g === pgid).map(([p]) => p);
+    return execFileSync("ps", ["-eo", "pid=,pgid=,lstart="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, LC_ALL: "C" } }).split("\n")
+      .map((l) => l.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/)).filter(Boolean)
+      .map((m) => ({ pid: Number(m[1]), pgid: Number(m[2]), startMs: Date.parse(m[3]) }))
+      .filter((x) => x.pgid === pgid).map(({ pid, startMs }) => ({ pid, startMs }));
   } catch { return []; }
+}
+
+/**
+ * Members of an exited child's group that are provably ours: a numeric pgid match alone is never enough (the
+ * number may already belong to a replacement group). A member counts only when its start time is known and lies
+ * in [child spawn, child exit] (one-second slack for ps resolution): a replacement group's processes all start
+ * after our child was reaped. Bare numbers or unknown start times are skipped.
+ */
+export function ownedMembers(list, { spawnedAt, exitedAt }) {
+  return (list ?? []).filter((m) => m && typeof m === "object" && Number.isInteger(m.pid) && m.pid > 0 && Number.isFinite(m.startMs)
+    && m.startMs >= Math.floor(spawnedAt / 1000) * 1000 - 1000 && m.startMs <= exitedAt + 1000).map((m) => m.pid);
 }
 
 /**
@@ -32,10 +48,10 @@ export function groupMembers(pgid) {
  * Resolves on 'close' (process exited and its stdio drained), so output is complete. If a descendant that left
  * the group keeps the pipes open, the pipes are dropped ~3 grace periods after the child exits (pipesAbandoned=true).
  *
- * Signal rule: the child's group is signalled only while it is provably ours. Before the child is reaped
- * ('exit' not yet emitted) the child itself holds the pgid. After that, `ps` must show a live member of the
- * group immediately before each signal; otherwise the signal is skipped (the pgid may already be reused).
- * The remaining ps-to-kill window is an accepted residual.
+ * Signal rule: before the child is reaped ('exit' not yet emitted) the child itself holds the pgid, so the group
+ * is signalled. After that, membership is re-read with `ps` right before each signal and only members started
+ * between spawn and exit (ownedMembers) are signalled, each by pid; the pgid itself is never signalled again.
+ * The remaining ps-to-kill window (pid reuse within it) is an accepted residual.
  * deps (tests): { spawn, kill, members, graceMs }.
  */
 export async function runProcess({ bin, args = [], cwd, env, input, timeoutMs }, deps = {}) {
@@ -48,6 +64,7 @@ export async function runProcess({ bin, args = [], cwd, env, input, timeoutMs },
   const refused = bypassFlags(args);
   if (refused.length) return result({ spawnError: `refused before spawn: bypass flags ${refused.join(" ")}`, refusedFlags: refused });
   let child;
+  const spawnedAt = Date.now();
   try {
     child = spawn(bin, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"], detached: true });
   } catch (e) {
@@ -74,19 +91,27 @@ export async function runProcess({ bin, args = [], cwd, env, input, timeoutMs },
   };
   child.stdin.on("error", () => {});
   child.stdin.end(input ?? "");
+  /** Signal our live members (by pid) after exit; returns how many were signalled. */
+  const signalOwned = (sig, why) => {
+    const all = members(child.pid);
+    const mine = ownedMembers(all, { spawnedAt, exitedAt: exitInfo.atMs });
+    if (!mine.length) { signals.push({ sig, why, skipped: all.length ? `no member provably ours (${all.length} in group)` : "no live group member" }); return 0; }
+    let n = 0;
+    for (const pid of mine) { try { kill(pid, sig); n++; } catch {} }
+    signals.push({ sig, why, held: `members:${mine.length}`, pids: mine });
+    return n;
+  };
   const killGroup = (sig, why) => {
     if (done || !child.pid) return;
     if (exitInfo === null) {
       try { kill(-child.pid, sig); signals.push({ sig, why, held: "child not reaped" }); } catch {}
       return;
     }
-    const m = members(child.pid);
-    if (!m.length) { signals.push({ sig, why, skipped: "no live group member" }); return; }
-    try { kill(-child.pid, sig); signals.push({ sig, why, held: `members:${m.length}` }); } catch {}
+    signalOwned(sig, why);
   };
-  // A descendant that keeps stdout/stderr open after the child exits: signal the group (if still populated), then drop the pipes.
+  // A descendant that keeps stdout/stderr open after the child exits: signal our members, then drop the pipes.
   child.on("exit", (code, signal) => {
-    exitInfo = { code, signal };
+    exitInfo = { code, signal, atMs: Date.now() };
     later(() => {
       killGroup("SIGTERM", "pipes open after exit");
       later(() => { killGroup("SIGKILL", "pipes open after exit"); later(abandonPipes, graceMs); }, graceMs);
@@ -101,10 +126,14 @@ export async function runProcess({ bin, args = [], cwd, env, input, timeoutMs },
   const durationMs = Date.now() - t0;
   for (const t of timers) clearTimeout(t);
   timers.clear();
-  // Descendants that closed their stdio but stayed in the group: ps shows them, so the pgid is still ours.
-  const leftovers = members(child.pid);
-  if (leftovers.length) { try { kill(-child.pid, "SIGKILL"); signals.push({ sig: "SIGKILL", why: "leftovers after close", held: `members:${leftovers.length}` }); } catch {} }
-  return result({ code, signal, timedOut, stdout, stderr, durationMs, spawnError, leftoversKilled: leftovers.length, pipesAbandoned });
+  // Descendants that closed their stdio but stayed in the group.
+  let leftoversKilled = 0;
+  if (child.pid && !spawnError) {
+    if (!exitInfo) exitInfo = { code, signal, atMs: Date.now() };
+    leftoversKilled = signalOwned("SIGKILL", "leftovers after close");
+    if (signals.at(-1)?.why === "leftovers after close" && signals.at(-1).skipped === "no live group member") signals.pop(); // keep the log to real events
+  }
+  return result({ code, signal, timedOut, stdout, stderr, durationMs, spawnError, leftoversKilled, pipesAbandoned });
 }
 
 // ---------------------------------------------------------------- bypass guard
@@ -125,6 +154,10 @@ function badModeValue(flag, value) {
       const key = m[1], val = unquote(m[2]);
       if (key === "approval_policy") return val !== "never";
       if (key === "sandbox_mode") return val !== "read-only";
+      // Permission profiles: only runner-generated read-only ones (read/none entries, no built-in write profile).
+      if (key === "default_permissions") return /^:/.test(val) && val !== ":read-only";
+      if (/^permissions\./.test(key)) return !/\.filesystem$/.test(key) || /=\s*"?(write|full|rw)\b/i.test(m[2]);
+      if (/^(permission_profile|allowed_permission_profiles|sandbox_state)/.test(key)) return true;
       if (/^sandbox_workspace_write\b|^sandbox_permissions\b/.test(key)) return true;
       return false;
     }

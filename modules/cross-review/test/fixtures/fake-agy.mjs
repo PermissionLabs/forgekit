@@ -3,7 +3,10 @@
 // Behaviour per prompt turn (0-based, counting retries) comes from FAKE_AGY (JSON):
 //   noProxy: [turn], proxyModel: "m", stopReason: {turn: "cancelled"}, stderrLine: {turn: "..."}, error: {turn: "msg"},
 //   readPath: {turn: "/abs"}, longEscape: true, updateTitle: {turn: "run_command"}, invalid: [turn], restartIds: true,
-//   exitAfter: "initialize", splitStderr: ["first chunk", "second chunk"]
+//   exitAfter: "initialize", splitStderr: ["first chunk", "second chunk"], exitCode: n (on stdin end),
+//   trailingStderr: "text without newline" (written at stdin end, right before exit), metaCwd: "/other",
+//   permission: [turn] (session/request_permission before the reply), clientRpc: {turn: "fs/read_text_file"}
+// Per-turn stderr is written (and flushed) before any stdout for that turn, so the parent always sees it first.
 import * as fs from "node:fs";
 import * as path from "node:path";
 const cfg = JSON.parse(process.env.FAKE_AGY ?? "{}");
@@ -37,7 +40,7 @@ process.stdin.setEncoding("utf8").on("data", (c) => {
       cwd = m.params.cwd;
       const conv = path.join(process.env.GEMINI_HOME, "antigravity-acp", "conversations");
       fs.mkdirSync(conv, { recursive: true });
-      fs.writeFileSync(path.join(conv, `${SID}.meta`), JSON.stringify({ cwd }));
+      fs.writeFileSync(path.join(conv, `${SID}.meta`), JSON.stringify({ cwd: cfg.metaCwd ?? cwd }));
       fs.writeFileSync(path.join(conv, `${SID}.db`), "");
       // splitStderr: one stderr line written in two chunks, 100 ms apart (before the session reply).
       if (cfg.splitStderr) {
@@ -51,17 +54,31 @@ process.stdin.setEncoding("utf8").on("data", (c) => {
     } else if (m.method === "session/prompt") {
       const t = turn++;
       const text = m.params.prompt.filter((b) => b.type === "text").map((b) => b.text).join("\n");
-      if (!has(cfg.noProxy, t)) process.stderr.write(`I1126 proxy.go:1] Proxy extracted model from path: ${cfg.proxyModel ?? `${model}-${thinking}`}\n`);
-      if (cfg.stderrLine?.[t]) process.stderr.write(cfg.stderrLine[t] + "\n");
-      // longEscape: inside the snapshot for the first 500+ characters, then climbs out.
-      const p = cfg.longEscape && t === 0 ? cwd + "/.".repeat(300) + "/../../../../../../../../etc/passwd" : cfg.readPath?.[t] ?? path.join(cwd, "src/a.ts");
-      notify({ sessionUpdate: "tool_call", toolCallId: `t${t}`, title: "view_file", kind: "read", status: "pending", rawInput: { AbsolutePath: p } });
-      if (cfg.updateTitle?.[t]) notify({ sessionUpdate: "tool_call_update", toolCallId: `t${t}`, title: cfg.updateTitle[t], status: "completed" });
-      const body = has(cfg.invalid, t) ? "not json" : JSON.stringify(review(text));
-      notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: body } });
-      if (cfg.error?.[t]) send({ jsonrpc: "2.0", id: m.id, error: { code: -32000, message: cfg.error[t] } });
-      else reply({ stopReason: cfg.stopReason?.[t] ?? "end_turn", usage: { totalTokens: 10, inputTokens: 7, outputTokens: 3 } });
+      let err = "";
+      if (!has(cfg.noProxy, t)) err += `I1126 proxy.go:1] Proxy extracted model from path: ${cfg.proxyModel ?? `${model}-${thinking}`}\n`;
+      if (cfg.stderrLine?.[t]) err += cfg.stderrLine[t] + "\n";
+      const id = m.id;
+      // stderr first, flushed, and a pause: stdout for this turn can never overtake its stderr (A44).
+      process.stderr.write(err, () => setTimeout(() => answer(t, text, id), 30));
+      continue;
     } else send({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: "unknown" } });
   }
 });
-process.stdin.on("end", () => process.exit(0));
+function answer(t, text, id) {
+  const reply = (result) => send({ jsonrpc: "2.0", id, result });
+  // longEscape: inside the snapshot for the first 500+ characters, then climbs out.
+  const p = cfg.longEscape && t === 0 ? cwd + "/.".repeat(300) + "/../../../../../../../../etc/passwd" : cfg.readPath?.[t] ?? path.join(cwd, "src/a.ts");
+  notify({ sessionUpdate: "tool_call", toolCallId: `t${t}`, title: "view_file", kind: "read", status: "pending", rawInput: { AbsolutePath: p } });
+  if (cfg.updateTitle?.[t]) notify({ sessionUpdate: "tool_call_update", toolCallId: `t${t}`, title: cfg.updateTitle[t], status: "completed" });
+  const body = has(cfg.invalid, t) ? "not json" : JSON.stringify(review(text));
+  notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: body } });
+  if (has(cfg.permission, t)) send({ jsonrpc: "2.0", id: `perm${t}`, method: "session/request_permission", params: { sessionId: SID, toolCall: { title: "run_command", kind: "execute" }, options: [{ optionId: "allow", kind: "allow_once" }, { optionId: "reject", kind: "reject_once" }] } });
+  if (cfg.clientRpc?.[t]) send({ jsonrpc: "2.0", id: `rpc${t}`, method: cfg.clientRpc[t], params: { sessionId: SID, path: "/etc/hosts" } });
+  if (cfg.error?.[t]) send({ jsonrpc: "2.0", id, error: { code: -32000, message: cfg.error[t] } });
+  else reply({ stopReason: cfg.stopReason?.[t] ?? "end_turn", usage: { totalTokens: 10, inputTokens: 7, outputTokens: 3 } });
+}
+process.stdin.on("end", () => {
+  const code = cfg.exitCode ?? 0;
+  if (cfg.trailingStderr) process.stderr.write(cfg.trailingStderr, () => process.exit(code));
+  else process.exit(code);
+});

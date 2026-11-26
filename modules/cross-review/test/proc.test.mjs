@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { runProcess } from "../lib/proc.mjs";
+import { ownedMembers, runProcess } from "../lib/proc.mjs";
 
 const node = process.execPath;
 
@@ -51,8 +51,8 @@ test("after the child exits, an empty process group is never signalled (X3/A19)"
   assert.ok(r.signals.every((x) => x.skipped === "no live group member"));
 });
 
-test("after exit, a reused pgid reported by ps is the only case signalled; a stale empty one is skipped (mocked)", async () => {
-  // Mocked spawn: the child "exits" at once while its pipes stay open; members() decides membership.
+test("after exit, a numeric pgid match is never membership: only members started between spawn and exit are signalled, by pid (X3/A19)", async () => {
+  // Mocked spawn: the child "exits" at once while its pipes stay open; members() is what ps would show.
   const { EventEmitter } = await import("node:events");
   const { PassThrough } = await import("node:stream");
   const fake = () => {
@@ -63,16 +63,30 @@ test("after exit, a reused pgid reported by ps is the only case signalled; a sta
     return c;
   };
   const keep = setInterval(() => {}, 1000); // the mock has no real handles keeping the loop alive
-  try {
+  const go = async (members) => {
     const kills = [];
-    const r = await runProcess({ bin: "x", args: [], timeoutMs: 60_000 }, { spawn: fake, kill: (p, s) => kills.push([p, s]), members: () => [], graceMs: 20 });
-    assert.equal(r.pipesAbandoned, true);
-    assert.deepEqual(kills, []);
-    // With a live member shown by ps right before the signal, the group is signalled (accepted ps-to-kill window).
-    const kills2 = [];
-    await runProcess({ bin: "x", args: [], timeoutMs: 60_000 }, { spawn: fake, kill: (p, s) => kills2.push([p, s]), members: () => [7], graceMs: 20 });
-    assert.deepEqual(kills2.map(([, s]) => s), ["SIGTERM", "SIGKILL", "SIGKILL"]);
+    const r = await runProcess({ bin: "x", args: [], timeoutMs: 60_000 }, { spawn: fake, kill: (p, s) => kills.push([p, s]), members, graceMs: 20 });
+    return { r, kills };
+  };
+  try {
+    const empty = await go(() => []);
+    assert.equal(empty.r.pipesAbandoned, true);
+    assert.deepEqual(empty.kills, []);
+    // A bare pid number (no start time) is a numeric match only: never signalled.
+    assert.deepEqual((await go(() => [7])).kills, []);
+    // A replacement group: its member started after our child exited -> never signalled.
+    assert.deepEqual((await go(() => [{ pid: 7, startMs: Date.now() + 60_000 }])).kills, []);
+    // Our own descendant (started before the exit) is signalled individually; the group id never is.
+    const mine = await go(() => [{ pid: 7, startMs: Date.now() - 500 }]);
+    assert.deepEqual(mine.kills, [[7, "SIGTERM"], [7, "SIGKILL"], [7, "SIGKILL"]]);
+    assert.ok(mine.kills.every(([p]) => p > 0));
   } finally { clearInterval(keep); }
+});
+
+test("ownedMembers: start time inside [spawn, exit] with one-second slack; anything else is not ours", () => {
+  const spawnedAt = Date.parse("2026-11-26T05:00:00.400Z"), exitedAt = Date.parse("2026-11-26T05:00:10Z");
+  const at = (iso) => Date.parse(iso);
+  assert.deepEqual(ownedMembers([{ pid: 1, startMs: at("2026-11-26T05:00:00Z") }, { pid: 2, startMs: at("2026-11-26T05:00:11Z") }, { pid: 3, startMs: at("2026-11-26T05:00:12Z") }, { pid: 4, startMs: NaN }, 5], { spawnedAt, exitedAt }), [1, 2]);
 });
 
 test("bypass flags are refused before anything is spawned (A3)", async () => {

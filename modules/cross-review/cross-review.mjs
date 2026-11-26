@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 // cross-review: host-neutral cross-review runner (zero dependencies, Node >= 20).
 //
-//   cross-review.mjs plan  --author <host> --paths-from <diff|list> [--dimensions a,b] [--usage <usage.json>] [--no-user] [--out <file>] [--policy <file>]
+//   cross-review.mjs plan  --author <host> --paths-from <diff|list> [--dimensions a,b] [--usage <usage.json>] [--no-user] [--out <file>] [--repo <dir>] [--policy <file>]
 //   cross-review.mjs run   --host <host> --rev <sha> --diff <patch> --scope <a,b|@list> --brief <md> --out <dir>
 //                          [--repo <dir>] [--dimensions a,b] [--context <a,b|@list>] [--checklist <path>]... [--prior <findings.json> --dispositions <file>] [--id-start <n>] [--policy <file>]
-//   cross-review.mjs merge --review <dir|review.json> --review <...> [--out <file>] [--line-window <n>]
+//   cross-review.mjs merge --review <run dir|evidence.json> --review <...> [--out <file>] [--repo <dir>] [--line-window <n>]
+//                          (only runs whose evidence.json says status=complete are merged)
 //
 // Exit codes: plan ok=0 ask=3 blocked=4; run complete=0 incomplete=1; merge all-complete=0 some-incomplete=1; usage error=2.
+// --out is refused when it is tracked (or holds tracked files) in its own repository or in --repo.
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -19,9 +21,9 @@ import { loadReviewEntry, mergeReviews } from "./lib/merge.mjs";
 
 // Flags per command: value flags, repeatable value flags, boolean flags. Anything else is a usage error.
 export const SPEC = {
-  plan: { values: ["author", "dimensions", "paths-from", "usage", "out", "policy"], multi: [], bool: ["no-user"] },
+  plan: { values: ["author", "dimensions", "paths-from", "usage", "out", "policy", "repo"], multi: [], bool: ["no-user"] },
   run: { values: ["host", "rev", "diff", "scope", "brief", "out", "repo", "dimensions", "context", "prior", "dispositions", "id-start", "policy"], multi: ["checklist"], bool: [] },
-  merge: { values: ["out", "line-window"], multi: ["review"], bool: [] },
+  merge: { values: ["out", "line-window", "repo"], multi: ["review"], bool: [] },
 };
 
 export function parseArgs(argv) {
@@ -53,24 +55,41 @@ const positiveInt = (s, k) => { const n = Number(s); if (!Number.isInteger(n) ||
 const csv = (s) => (s ? s.split(",").map((x) => x.trim()).filter(Boolean) : []);
 
 /**
- * An output location must not be tracked inside the repository (evidence is local and untracked): inside the
- * work tree it must be git-ignored (checked against the index, so a tracked file never passes) and never under .git.
+ * An output location must not be tracked inside a repository (evidence is local and untracked). It is checked
+ * against every repository it could land in: the one containing the output path itself (nearest existing
+ * ancestor), and `repo` when given (--repo, or the run's target repo). Inside a work tree the path must be
+ * git-ignored (checked against the index, so a tracked file never passes), never under .git, and an output
+ * directory must not contain tracked files (an ignored directory can still hold force-added ones).
  */
 export function checkOut(repo, out, { dir = true } = {}) {
   const abs = path.resolve(out);
-  let top;
-  try { top = execFileSync("git", ["-C", repo, "rev-parse", "--show-toplevel"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); } catch { return; }
-  const realTop = realish(top), realAbs = realish(abs);
-  if (!realTop || !realAbs) throw new Error(`--out ${out}: cannot resolve the path`);
-  if (realAbs !== realTop && !realAbs.startsWith(realTop + path.sep)) return;
-  const rel = path.relative(realTop, realAbs);
+  const realAbs = realish(abs);
+  if (!realAbs) throw new Error(`--out ${out}: cannot resolve the path`);
+  const git = (cwd, args) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  const topOf = (d) => { try { return realish(git(d, ["rev-parse", "--show-toplevel"]).trim()); } catch { return null; } };
+  let anc = realAbs;
+  while (!fs.existsSync(anc) && path.dirname(anc) !== anc) anc = path.dirname(anc);
+  if (!fs.statSync(anc).isDirectory()) anc = path.dirname(anc);
+  const tops = new Set([topOf(anc), repo ? topOf(repo) : null].filter(Boolean));
   const bad = () => new Error(`--out ${out} is inside the repository and not git-ignored; use an untracked location (e.g. .context/ or a temp dir)`);
-  if (!rel || rel.split(path.sep).includes(".git")) throw bad();
-  try { execFileSync("git", ["-C", realTop, "check-ignore", "-q", "--", dir ? rel + "/" : rel], { stdio: "ignore" }); }
-  catch { throw bad(); }
+  for (const realTop of tops) {
+    if (realAbs !== realTop && !realAbs.startsWith(realTop + path.sep)) continue;
+    const rel = path.relative(realTop, realAbs);
+    if (!rel || rel.split(path.sep).includes(".git")) throw bad();
+    try { execFileSync("git", ["-C", realTop, "check-ignore", "-q", "--", dir ? rel + "/" : rel], { stdio: "ignore" }); }
+    catch { throw bad(); }
+    let tracked = "";
+    try { tracked = git(realTop, ["ls-files", "-z", "--", rel]); } catch { throw bad(); }
+    if (tracked.length) throw new Error(`--out ${out} contains or is a tracked file (${tracked.split("\0")[0]}); use an untracked location`);
+  }
 }
 
-const HELP = () => fs.readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n").slice(1, 10).map((l) => l.replace(/^\/\/ ?/, "")).join("\n");
+// The usage text is the leading comment block (after the shebang), however many lines it has.
+export const HELP = () => {
+  const lines = fs.readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n").slice(1);
+  const n = lines.findIndex((l) => !l.startsWith("//"));
+  return lines.slice(0, n === -1 ? lines.length : n).map((l) => l.replace(/^\/\/ ?/, "")).join("\n");
+};
 
 export async function main(argv = process.argv.slice(2)) {
   let o;
@@ -80,7 +99,7 @@ export async function main(argv = process.argv.slice(2)) {
     if (o._cmd === "merge") {
       const entries = need(o, "review").map(loadReviewEntry);
       const m = mergeReviews(entries, { lineWindow: o["line-window"] ? positiveInt(o["line-window"], "line-window") : 3 });
-      if (o.out) { checkOut(".", o.out, { dir: false }); fs.writeFileSync(o.out, JSON.stringify(m, null, 2)); }
+      if (o.out) { checkOut(o.repo ?? null, o.out, { dir: false }); fs.writeFileSync(o.out, JSON.stringify(m, null, 2)); }
       console.log(m.text);
       return entries.every((e) => e.status === "complete") ? 0 : 1;
     }
@@ -91,7 +110,7 @@ export async function main(argv = process.argv.slice(2)) {
       const author = need(o, "author");
       const paths = pathsFromDiffText(fs.readFileSync(need(o, "paths-from"), "utf8"));
       const usage = o.usage ? JSON.parse(fs.readFileSync(o.usage, "utf8")) : null;
-      if (o.out) checkOut(".", o.out, { dir: false });
+      if (o.out) checkOut(o.repo ?? null, o.out, { dir: false });
       const p = plan({ policy, author, dimensions: dims.length ? dims : policy.default_dimensions ?? [], paths, usage, noUser: !!o["no-user"] });
       if (o.out) fs.writeFileSync(o.out, JSON.stringify(p, null, 2));
       console.log(JSON.stringify(p, null, 2));

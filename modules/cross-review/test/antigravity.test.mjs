@@ -125,19 +125,43 @@ test("spawn failure and an early server exit fail fast instead of waiting for th
   assert.ok(Date.now() - t1 < 15_000, `took ${Date.now() - t1} ms`);
 });
 
-test("stopGroup never signals an exited child's group unless ps shows a live member (A6/X3)", async () => {
+test("stopGroup: after exit only members started between spawn and exit are signalled, by pid (A6/X3)", async () => {
   const kills = [];
-  const base = { pid: 4242, exited: () => true, waitExit: async () => {}, kill: (p, s) => kills.push([p, s]), sleep: async () => {} };
+  const spawnedAt = Date.now() - 10_000, exitAt = Date.now() - 1000;
+  const base = { pid: 4242, spawnedAt, exitedAt: () => exitAt, exited: () => true, waitExit: async () => {}, kill: (p, s) => kills.push([p, s]), sleep: async () => {} };
   const log = await stopGroup({ ...base, members: () => [] });
   assert.deepEqual(kills, []);
   assert.equal(log[0].skipped, "no live group member after exit");
+  // A bare numeric match, or a replacement group started after the exit: never signalled.
   await stopGroup({ ...base, members: () => [99] });
-  assert.deepEqual(kills, [[-4242, "SIGTERM"], [-4242, "SIGKILL"]]);
-  // While the child is not reaped it holds the group: signalling is safe without ps.
+  await stopGroup({ ...base, members: () => [{ pid: 99, startMs: exitAt + 5000 }] });
+  assert.deepEqual(kills, []);
+  await stopGroup({ ...base, members: () => [{ pid: 99, startMs: spawnedAt + 2000 }] });
+  assert.deepEqual(kills, [[99, "SIGTERM"], [99, "SIGKILL"]]);
+  // While the child is not reaped it holds the group: signalling the group is safe without ps.
   const k2 = [];
   let alive = true;
-  await stopGroup({ ...base, exited: () => !alive, waitExit: async () => {}, kill: (p, s) => { k2.push(s); if (s === "SIGTERM") alive = false; }, members: () => [] });
-  assert.deepEqual(k2, ["SIGTERM"]);
+  await stopGroup({ ...base, exited: () => !alive, waitExit: async () => {}, kill: (p, s) => { k2.push([p, s]); if (s === "SIGTERM") alive = false; }, members: () => [] });
+  assert.deepEqual(k2, [[-4242, "SIGTERM"]]);
+});
+
+test("an unterminated last stderr line is flushed and checked before the review is accepted (X1/A11)", async () => {
+  withheld(await go({ trailingStderr: "E1126 agent.go:9] RESOURCE_EXHAUSTED: quota exceeded" }), /agent_error:stderr/);
+  withheld(await go({ trailingStderr: "Proxy failed to connect to CCPA API" }), /upstream_502:stderr after the last turn/);
+});
+
+test("a non-zero server exit after the last prompt invalidates the review (X12)", async () => {
+  withheld(await go({ exitCode: 17 }), /agent_exit_nonzero:17/);
+});
+
+test("ACP runtime isolation paths: permission requests rejected, unexpected client RPCs, .meta cwd guard (A46)", async () => {
+  const perm = await go({ permission: [0] });
+  assert.equal(perm.status, "complete", perm.incompleteReasons.join());
+  assert.match(perm.warnings.join(), /permission requests rejected \(reject_once\): 1/);
+  withheld(await go({ clientRpc: { 0: "fs/read_text_file" } }), /unexpected_client_requests:1/);
+  const meta = await go({ metaCwd: "/somewhere/else" });
+  assert.equal(meta.extra.sessionCleanup.skipped, ".meta cwd differs from runner cwd");
+  assert.deepEqual(meta.extra.sessionCleanup.removed, []);
 });
 
 test("stderr redaction and auth detection work across chunk boundaries (A9)", async () => {

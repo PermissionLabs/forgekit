@@ -80,7 +80,7 @@ async function reviewWithInput({ opts, adapter, pin, prefix, policyPath, prior, 
   let res;
   try {
     res = await adapter.run({
-      input, pin, prompt, promptFor, jsonSchema, prefix, idStart, priorIds, dimensions, log, workDir: rawDir,
+      input, pin, prompt, promptFor, jsonSchema, prefix, idStart, priorIds, dimensions, log, workDir: rawDir, deps: opts.deps,
       validate: mkValidate(dimensions, priorIds),
       validateGroup: (raw, dims, mustCover, start = idStart) => mkValidate(dims, mustCover, start)(raw),
     });
@@ -136,7 +136,9 @@ async function reviewWithInput({ opts, adapter, pin, prefix, policyPath, prior, 
     hostLimits: res.limits ?? [],
     extra: { groups: res.groups, groupVerdicts: res.groupVerdicts, agent: res.agent, sessionCleanup: res.sessionCleanup, process: res.process, authRequired: res.authRequired, hostVersion: res.hostVersion, codeExecution: res.codeExecution },
     review: status === "complete" ? res.review : null,
+    // An incomplete run's draft is kept for humans (never merged): the schema-valid review, or the raw reply text.
     reviewIfIncomplete: status === "incomplete" ? res.review ?? null : undefined,
+    reviewDraftRawIfIncomplete: status === "incomplete" && !res.review && res.draftRaw ? res.draftRaw : undefined,
   };
   fs.writeFileSync(path.join(opts.out, "evidence.json"), JSON.stringify(evidence, null, 2));
   fs.writeFileSync(path.join(opts.out, "review.json"), JSON.stringify(evidence.review, null, 2));

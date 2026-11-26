@@ -45,6 +45,10 @@ export function policyProblems(policy) {
       if (typeof h.allow_code_execution !== "boolean") errs.push(`hosts.${name}.allow_code_execution must be boolean`);
       else if (h.allow_code_execution && name !== "codex") errs.push(`hosts.${name}.allow_code_execution: only codex runs commands (inside its read-only sandbox)`);
     }
+    if (h?.os_sandbox !== undefined) {
+      if (!["required", "audit_only"].includes(h.os_sandbox)) errs.push(`hosts.${name}.os_sandbox must be "required" or "audit_only"`);
+      else if (name !== "codex") errs.push(`hosts.${name}.os_sandbox: only codex runs model commands under the OS sandbox`);
+    }
     if (h?.env_passthrough !== undefined && (!Array.isArray(h.env_passthrough) || !h.env_passthrough.every((k) => typeof k === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(k))))
       errs.push(`hosts.${name}.env_passthrough must be an array of variable names`);
     for (const [k, v] of Object.entries(h?.expected_cost ?? {})) if (typeof v !== "number" || !(v >= 0 && v <= 1)) errs.push(`hosts.${name}.expected_cost.${k} must be a fraction in [0, 1]`);

@@ -24,15 +24,33 @@ export function locDistance(la, lb) {
   return 0;
 }
 
-/** Read one --review argument: a directory holding review.json (+ evidence.json), or a review.json path. */
+/**
+ * Read one --review argument: a run directory (evidence.json + review.json), an evidence.json, or a review.json
+ * next to its evidence.json. Only a run whose evidence says status=complete is merged: a review.json without
+ * evidence (no status), an incomplete run, or a review that is not { verdict, findings[] } is listed as
+ * incomplete and never merged.
+ */
 export function loadReviewEntry(arg) {
-  const dir = fs.existsSync(arg) && fs.statSync(arg).isDirectory() ? arg : path.dirname(arg);
-  const reviewFile = dir === arg ? path.join(dir, "review.json") : arg;
-  const review = JSON.parse(fs.readFileSync(reviewFile, "utf8"));
-  let ev = null;
-  try { ev = JSON.parse(fs.readFileSync(path.join(dir, "evidence.json"), "utf8")); } catch {}
-  const prefix = review?.findings?.[0]?.id?.[0] ?? ev?.reviewer?.idPrefix ?? null;
-  return { source: path.resolve(reviewFile), host: ev?.reviewer?.host ?? (prefix ? `prefix:${prefix}` : path.basename(dir)), status: ev?.status ?? (review ? "complete" : "incomplete"), incompleteReasons: ev?.incompleteReasons ?? [], review };
+  const isDir = fs.existsSync(arg) && fs.statSync(arg).isDirectory();
+  const dir = isDir ? arg : path.dirname(arg);
+  const file = isDir ? path.join(dir, "review.json") : arg;
+  const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, "utf8")); } catch { return undefined; } };
+  const given = readJson(file);
+  let ev = given?.schema === "cross-review-evidence@1" ? given : readJson(path.join(dir, "evidence.json"));
+  if (ev?.schema !== "cross-review-evidence@1") ev = null;
+  const review = ev ? ev.review ?? (given?.schema ? null : given) : given;
+  const reasons = [];
+  if (given === undefined && !ev) reasons.push(`cannot read ${file}`);
+  if (!ev) reasons.push("no evidence.json: run status unknown (merge needs a complete run's evidence)");
+  else if (ev.status !== "complete") reasons.push(...(ev.incompleteReasons?.length ? ev.incompleteReasons : [`status=${ev.status ?? "missing"}`]));
+  const shapeOk = review && typeof review === "object" && typeof review.verdict === "string" && Array.isArray(review.findings);
+  if (ev?.status === "complete" && !shapeOk) reasons.push("review is not a { verdict, findings[] } object");
+  if (ev?.status === "complete" && given && !given.schema && ev.review && JSON.stringify(given) !== JSON.stringify(ev.review)) reasons.push("review.json differs from evidence.json review");
+  const prefix = ev?.reviewer?.idPrefix ?? review?.findings?.[0]?.id?.[0] ?? null;
+  return {
+    source: path.resolve(file), host: ev?.reviewer?.host ?? (prefix ? `prefix:${prefix}` : path.basename(dir)),
+    status: reasons.length ? "incomplete" : "complete", incompleteReasons: reasons, review: reasons.length ? null : review,
+  };
 }
 
 /**

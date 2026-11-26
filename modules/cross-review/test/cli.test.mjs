@@ -89,18 +89,20 @@ test("exit codes: usage 2, plan ok 0 / ask 3 / blocked 4, plan --out protected (
   assert.equal(fs.readFileSync(path.join(repo, "README.md"), "utf8"), "# r\n");
 });
 
+const EV = "cross-review-evidence@1";
 test("merge: same place + similar claim from two hosts -> one group keeping both ids (operator 3)", () => {
   const mk = (dir, host, findings) => {
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, "review.json"), JSON.stringify({ verdict: "block", coverage: {}, findings, limits: [] }));
-    fs.writeFileSync(path.join(dir, "evidence.json"), JSON.stringify({ reviewer: { host, idPrefix: findings[0]?.id[0] }, status: "complete", incompleteReasons: [] }));
+    const review = { verdict: "block", coverage: {}, findings, limits: [] };
+    fs.writeFileSync(path.join(dir, "review.json"), JSON.stringify(review));
+    fs.writeFileSync(path.join(dir, "evidence.json"), JSON.stringify({ schema: EV, reviewer: { host, idPrefix: findings[0]?.id[0] }, status: "complete", incompleteReasons: [], review }));
   };
   const f = (id, sev, loc, claim, evidence = "e") => ({ id, sev, loc, claim, evidence, check: "k" });
   mk(path.join(tmp, "m", "codex"), "codex", [f("X1", "high", "lib/a.mjs:10-12", "fatalReasons ignored when the reply is schema-valid", "fatalReasons only runs on validation errors"), f("X2", "med", "lib/b.mjs:5", "duplicate host_order entries")]);
   mk(path.join(tmp, "m", "antigravity"), "antigravity", [f("A1", "med", "lib/a.mjs:11", "fatal turn errors ignored when JSON is valid", "fatalReasons is only evaluated when validation fails"), f("A2", "low", "lib/c.mjs:1", "unrelated")]);
   fs.mkdirSync(path.join(tmp, "m", "claude"), { recursive: true });
   fs.writeFileSync(path.join(tmp, "m", "claude", "review.json"), "null");
-  fs.writeFileSync(path.join(tmp, "m", "claude", "evidence.json"), JSON.stringify({ reviewer: { host: "claude" }, status: "incomplete", incompleteReasons: ["timeout"] }));
+  fs.writeFileSync(path.join(tmp, "m", "claude", "evidence.json"), JSON.stringify({ schema: EV, reviewer: { host: "claude" }, status: "incomplete", incompleteReasons: ["timeout"], review: null }));
   const m = mergeReviews(["codex", "antigravity", "claude"].map((h) => loadReviewEntry(path.join(tmp, "m", h))));
   assert.equal(m.groups.length, 3);
   assert.deepEqual(m.groups[0].ids, ["X1", "A1"]);
@@ -111,4 +113,75 @@ test("merge: same place + similar claim from two hosts -> one group keeping both
   assert.match(r.stdout, /\[high\] X1=A1 lib\/a.mjs:10-12 \(2 hosts\)/);
   assert.equal(JSON.parse(fs.readFileSync(path.join(tmp, "merged.json"), "utf8")).groups.length, 3);
   assert.equal(cli(["merge", "--review", path.join(tmp, "m", "codex"), "--review", path.join(tmp, "m", "claude")]).status, 1);
+});
+
+test("merge: only complete runs with evidence are merged; bare or malformed review.json is refused (X16, operator 4)", () => {
+  const d = path.join(tmp, "m2");
+  fs.mkdirSync(path.join(d, "bare"), { recursive: true });
+  const review = { verdict: "block", coverage: {}, findings: [{ id: "X1", sev: "high", loc: "a:1", claim: "c", evidence: "e", check: "k" }], limits: [] };
+  fs.writeFileSync(path.join(d, "bare", "review.json"), JSON.stringify(review));
+  const bare = loadReviewEntry(path.join(d, "bare", "review.json"));
+  assert.equal(bare.status, "incomplete");
+  assert.match(bare.incompleteReasons.join(), /no evidence\.json/);
+  // A policy file or any truthy JSON is never a complete review.
+  fs.mkdirSync(path.join(d, "junk"));
+  fs.writeFileSync(path.join(d, "junk", "review.json"), JSON.stringify({ version: 1, hosts: {} }));
+  fs.writeFileSync(path.join(d, "junk", "evidence.json"), JSON.stringify({ schema: EV, reviewer: { host: "codex" }, status: "complete", incompleteReasons: [], review: { version: 1, hosts: {} } }));
+  assert.match(loadReviewEntry(path.join(d, "junk")).incompleteReasons.join(), /not a \{ verdict, findings\[\] \} object/);
+  // evidence.json itself can be passed; its nested review is what is merged.
+  fs.mkdirSync(path.join(d, "ev"));
+  fs.writeFileSync(path.join(d, "ev", "evidence.json"), JSON.stringify({ schema: EV, reviewer: { host: "codex", idPrefix: "X" }, status: "complete", incompleteReasons: [], review }));
+  const ev = loadReviewEntry(path.join(d, "ev", "evidence.json"));
+  assert.equal(ev.status, "complete");
+  assert.equal(ev.review.findings.length, 1);
+  const m = mergeReviews([bare, ev]);
+  assert.equal(m.groups.length, 1);
+  assert.match(m.text, /status=incomplete .*not merged: no evidence\.json/);
+  assert.equal(cli(["merge", "--review", path.join(d, "bare", "review.json")]).status, 1);
+});
+
+test("checkOut: checked against the output's own repository and --repo; output dirs holding tracked files refused (A10)", () => {
+  // Invoked from outside the target repo: the repository containing the output path still decides.
+  fs.writeFileSync(path.join(tmp, "paths2.txt"), "src/a.ts\n");
+  const r = cli(["plan", "--author", "claude", "--paths-from", path.join(tmp, "paths2.txt"), "--out", path.join(repo, "README.md")], os.tmpdir());
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /not git-ignored|tracked/);
+  assert.equal(fs.readFileSync(path.join(repo, "README.md"), "utf8"), "# r\n");
+  const m = cli(["merge", "--review", path.join(tmp, "m", "codex"), "--out", path.join(repo, "src", "a.ts")], os.tmpdir());
+  assert.equal(m.status, 2);
+  assert.equal(fs.readFileSync(path.join(repo, "src", "a.ts"), "utf8"), "x\n");
+  // `forced/` is ignored by `*` but holds a force-added tracked file: refused as a run --out directory.
+  assert.throws(() => checkOut(repo, path.join(repo, "forced")), /tracked|not git-ignored/);
+  assert.throws(() => checkOut(null, path.join(repo, "forced")), /tracked|not git-ignored/);
+  checkOut(null, path.join(repo, ".context", "plan.json"), { dir: false });
+});
+
+test("help prints the usage comment only (A40)", () => {
+  const r = cli(["help"]);
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /cross-review\.mjs plan/);
+  assert.doesNotMatch(r.stdout, /import /);
+});
+
+test("run exit codes through the CLI: complete 0, incomplete 1, usage error 2 (A24)", () => {
+  const rev = git("rev-parse", "HEAD");
+  const policyFile = path.join(tmp, "cli-policy.json");
+  const p = JSON.parse(fs.readFileSync(path.join(HERE, "..", "review-policy.json"), "utf8"));
+  p.hosts.codex.bin = path.join(HERE, "fixtures", "fake-codex.mjs");
+  p.hosts.codex.env_passthrough = ["FAKE_REVIEW", "FAKE_COMMAND"];
+  if (process.platform !== "darwin") p.hosts.codex.os_sandbox = "audit_only";
+  fs.writeFileSync(policyFile, JSON.stringify(p));
+  fs.writeFileSync(path.join(tmp, "cli.patch"), "diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -0,0 +1 @@\n+x\n");
+  fs.writeFileSync(path.join(tmp, "cli-brief.md"), "Review.\n");
+  const good = JSON.stringify({ verdict: "pass", coverage: { correctness: "checked" }, findings: [], limits: [] });
+  const run = (out, env) => spawnSync(process.execPath, [CLI, "run", "--host", "codex", "--repo", repo, "--rev", rev, "--diff", path.join(tmp, "cli.patch"), "--scope", "src/a.ts", "--brief", path.join(tmp, "cli-brief.md"), "--dimensions", "correctness", "--policy", policyFile, "--out", path.join(tmp, out)], { cwd: tmp, encoding: "utf8", env: { ...process.env, ...env } });
+  const ok = run("cli-run-ok", { FAKE_REVIEW: good });
+  assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+  assert.match(ok.stdout, /status=complete/);
+  const bad = run("cli-run-bad", { FAKE_REVIEW: good, FAKE_COMMAND: "cat /etc/hosts" });
+  assert.equal(bad.status, 1, bad.stdout + bad.stderr);
+  assert.match(bad.stdout, /status=incomplete/);
+  const usage = spawnSync(process.execPath, [CLI, "run", "--host", "codex", "--out", path.join(tmp, "cli-run-usage")], { cwd: tmp, encoding: "utf8" });
+  assert.equal(usage.status, 2);
+  assert.match(usage.stderr, /--rev is required|is required/);
 });

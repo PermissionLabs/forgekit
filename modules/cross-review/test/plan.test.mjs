@@ -10,7 +10,7 @@ const clone = (x) => JSON.parse(JSON.stringify(x));
 const OBS = "2026-11-26T00:00:00.000Z";
 const H = 3600_000;
 const at = (hours) => new Date(Date.parse(OBS) + hours * H).toISOString();
-function usage({ codex = 0.9, codexReset = 84, claude = 0.9, claudeReset = 84, gem5h = 0.98, gemWeek = 0.9, gemWeekReset = 84, extra = {} } = {}) {
+function usage({ codex = 0.9, codexReset = 84, claude = 0.9, claudeReset = 84, gem5h = 0.98, gem5hReset = 2.5, gemWeek = 0.9, gemWeekReset = 84, extra = {} } = {}) {
   return {
     providers: [
       { provider: "codex", instance: "codex:1", status: "ok", observedAt: OBS, windows: [
@@ -20,7 +20,7 @@ function usage({ codex = 0.9, codexReset = 84, claude = 0.9, claudeReset = 84, g
         { id: "claude:seven_day_model:fable", kind: "weekly", remainingFraction: 1, resetsAt: at(84), windowDurationSec: 604800, pace: { computable: true } }] },
       { provider: "antigravity", instance: "antigravity:1", status: "ok", observedAt: OBS, windows: [
         { id: "antigravity:shared_3p_5h", kind: "session", remainingFraction: 1, windowDurationSec: 18000, pace: { computable: false, reason: "notStarted" } },
-        { id: "antigravity:gemini_5h", kind: "session", remainingFraction: gem5h, resetsAt: at(2.5), windowDurationSec: 18000, pace: { computable: true } },
+        { id: "antigravity:gemini_5h", kind: "session", remainingFraction: gem5h, resetsAt: at(gem5hReset), windowDurationSec: 18000, pace: { computable: true } },
         { id: "antigravity:shared_3p_weekly", kind: "weekly", remainingFraction: 1, windowDurationSec: 604800, pace: { computable: false, reason: "notStarted" } },
         { id: "antigravity:gemini_weekly", kind: "weekly", remainingFraction: gemWeek, resetsAt: at(gemWeekReset), windowDurationSec: 604800, pace: { computable: true } }] },
       ...(extra.providers ?? []),
@@ -116,9 +116,9 @@ test("expected cost greater than remaining -> skip even when pace is fine", () =
 });
 
 test("expected cost is checked against the 5 h (session) window too", () => {
-  // weekly is healthy; the 5 h window has 0.03 left, below the session cost estimate.
-  const r = hostPace(policy, "antigravity", usage({ gem5h: 0.03 }), "high");
-  assert.equal(policy.hosts.antigravity.expected_cost.session > 0.03, true);
+  // weekly is healthy; the 5 h window has 0.02 left, below the session cost estimate.
+  const r = hostPace(policy, "antigravity", usage({ gem5h: 0.02 }), "high");
+  assert.equal(policy.hosts.antigravity.expected_cost.session > 0.02, true);
   assert.equal(r.decision, "skip");
   assert.match(r.reason, /antigravity:gemini_5h/);
 });
@@ -226,4 +226,50 @@ test("selection never substitutes the author when others are short", () => {
   const r = plan({ policy, author: "codex", dimensions: ["security"], paths: [], usage: usage({ claude: 0.01, gemWeek: 0.01 }) });
   assert.notEqual(r.status, "ok");
   assert.ok(!r.selected.some((x) => x.host === "codex"));
+});
+
+test("every window is evaluated: a reset-soon window cannot mask a failing other window (skip beats ask) (A41)", () => {
+  // 5 h window under its cost but resetting in 20 min; weekly window paced at 0.10 / 0.5 = 0.2 < 0.6.
+  const u = usage({ gem5h: 0.02, gem5hReset: 1 / 3, gemWeek: 0.10, gemWeekReset: 84 });
+  const r = hostPace(policy, "antigravity", u, "high");
+  assert.equal(r.decision, "skip");
+  assert.equal(r.worstWindow, "antigravity:gemini_weekly");
+  assert.match(r.reason, /pace 0\.20 < 0\.6; also expected cost exceeds remaining on antigravity:gemini_5h/);
+  // Same reset-soon shortfall with a healthy weekly window -> ask (waiting is an option).
+  const ok = hostPace(policy, "antigravity", usage({ gem5h: 0.02, gem5hReset: 1 / 3, gemWeek: 0.9 }), "high");
+  assert.equal(ok.decision, "ask");
+  assert.match(ok.reason, /resets soon/);
+});
+
+test("gradeReasons list every matched file and the unmatched count (operator 5)", () => {
+  const g = gradeOf(policy, ["correctness"], ["modules/cross-review/a.mjs", "modules/cross-review/b.mjs", "src/x.ts"]);
+  assert.deepEqual(g.reasons, ["path:modules/cross-review/a.mjs (modules/cross-review/**)", "path:modules/cross-review/b.mjs (modules/cross-review/**)", "paths: 2 of 3 matched a high glob, 1 unmatched"]);
+  assert.equal(gradeOf(policy, ["correctness"], ["src/x.ts"]).grade, "standard");
+});
+
+test("diff paths: UTF-8 escapes and raw non-BMP characters decode as code points; emoji paths match globs (X8/A15/X14)", async () => {
+  const { unquoteGitPath } = await import("../lib/diff.mjs");
+  // core.quotePath=false keeps the emoji raw; the tab is still escaped.
+  assert.equal(unquoteGitPath('"infra/😀\\t.yml"').value, "infra/😀\t.yml");
+  // Octal UTF-8 bytes for the same emoji (core.quotePath=true).
+  assert.equal(unquoteGitPath('"infra/\\360\\237\\230\\200.yml"').value, "infra/😀.yml");
+  const custom = clone(policy);
+  custom.grade.high_path_globs = ["infra/😀*"];
+  const diff = 'diff --git "a/infra/😀\\t.yml" "b/infra/😀\\t.yml"\n--- "a/infra/😀\\t.yml"\n+++ "b/infra/😀\\t.yml"\n@@ -1 +1 @@\n-a\n+b\n';
+  assert.deepEqual(pathsFromDiffText(diff), ["infra/😀\t.yml"]);
+  assert.equal(gradeOf(custom, ["correctness"], pathsFromDiffText(diff)).grade, "high");
+});
+
+test("diff paths: mode-only, new empty and binary changes are post-change paths; deletions are not (A42)", async () => {
+  const { parseDiffPaths } = await import("../lib/diff.mjs");
+  const d = [
+    "diff --git a/bin/tool b/bin/tool", "old mode 100644", "new mode 100755",
+    "diff --git a/empty.txt b/empty.txt", "new file mode 100644", "index 0000000..e69de29",
+    "diff --git a/img.png b/img.png", "index 1..2 100644", "Binary files a/img.png and b/img.png differ",
+    "diff --git a/gone.txt b/gone.txt", "deleted file mode 100644", "index 1..0",
+    "diff --git a/src/a.ts b/src/a.ts", "--- a/src/a.ts", "+++ b/src/a.ts", "@@ -1 +1 @@", "-x", "+y", "",
+  ].join("\n");
+  const r = parseDiffPaths(d);
+  assert.deepEqual(r.newPaths.sort(), ["bin/tool", "empty.txt", "img.png", "src/a.ts"]);
+  assert.ok(r.paths.includes("gone.txt"));
 });

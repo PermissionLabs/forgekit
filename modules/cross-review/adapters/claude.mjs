@@ -67,9 +67,11 @@ export function auditStream(stdout, snapshot, pin) {
   const paths = [];
   for (const t of a.toolUses) {
     if (!ALLOWED_RUNTIME_TOOLS.includes(t.name)) { a.reasons.push(`non_read_tool_call:${t.name}`); continue; }
-    // Glob/Grep patterns can name directories too: an absolute, ~ or .. pattern is audited like a path.
-    const pat = typeof t.input?.pattern === "string" && /^(\/|~)|(^|\/)\.\.(\/|$)/.test(t.input.pattern) ? ["pattern"] : [];
-    for (const k of ["file_path", "path", "notebook_path", ...pat]) if (typeof t.input?.[k] === "string") {
+    // A Glob pattern names files, so an absolute, ~ or .. pattern is audited like a path. Grep's pattern is a
+    // regular expression matched against file contents (its `path`/`glob` name the files), never a path.
+    const pat = t.name === "Glob" && typeof t.input?.pattern === "string" && /^(\/|~)|(^|\/)\.\.(\/|$)/.test(t.input.pattern) ? ["pattern"] : [];
+    const glob = t.name === "Grep" && typeof t.input?.glob === "string" && /^(\/|~)|(^|\/)\.\.(\/|$)/.test(t.input.glob) ? ["glob"] : [];
+    for (const k of ["file_path", "path", "notebook_path", ...pat, ...glob]) if (typeof t.input?.[k] === "string") {
       const v = t.input[k];
       const inside = !/(^|\/)\.\.(\/|$)/.test(v) && !v.startsWith("~") && insideRoot(snapshot, v);
       paths.push({ tool: t.name, path: t.input[k], inside, denied: denied.has(t.id) });
@@ -129,9 +131,10 @@ export async function run(ctx) {
     if (p.spawnError) { out.reasons.push(`spawn_error:${p.spawnError}`); break; }
     if (p.timedOut) { out.reasons.push("timeout"); break; }
     if (p.pipesAbandoned) { out.reasons.push("pipes_abandoned: a descendant kept the host's stdout/stderr open; the stream may be truncated"); break; }
-    if (a.reasons.length) { out.reasons.push(...a.reasons); break; }   // audit failures are never retried
-    if (a.reported.model !== pin.model) { out.reasons.push(`reported_model_mismatch:${a.reported.model}`); break; } // never retried on another model
-    if (p.code !== 0) { out.reasons.push(`exit_code:${p.code}`); break; }
+    const draft = () => { const v = a.output ? validate(a.output) : { errors: ["no output"] }; if (!v.errors.length) out.review = v.value; }; // withheld draft -> reviewIfIncomplete
+    if (a.reasons.length) { out.reasons.push(...a.reasons); draft(); break; }   // audit failures are never retried
+    if (a.reported.model !== pin.model) { out.reasons.push(`reported_model_mismatch:${a.reported.model}`); draft(); break; } // never retried on another model
+    if (p.code !== 0) { out.reasons.push(`exit_code:${p.code}`); draft(); break; }
     const v = validate(a.output);
     rec.validation = v.errors;
     if (!v.errors.length) { out.review = v.value; break; }

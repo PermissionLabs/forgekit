@@ -44,7 +44,9 @@ export function gradeOf(policy, dimensions, paths) {
     const hit = globs.find((gl) => globMatch(gl, p));
     if (hit) reasons.push(`path:${p} (${hit})`);
   }
-  const grade = reasons.length ? "high" : "standard";
+  const matched = reasons.filter((r) => r.startsWith("path:")).length;
+  if (paths.length) reasons.push(`paths: ${matched} of ${paths.length} matched a high glob, ${paths.length - matched} unmatched`);
+  const grade = reasons.some((r) => !r.startsWith("paths: ")) ? "high" : "standard";
   const required = (g.reviewers ?? { standard: 1, high: 2 })[grade];
   return { grade, reasons, required };
 }
@@ -96,19 +98,25 @@ export function hostPace(policy, host, usage, grade) {
   const paced = rows.filter((r) => r.pace !== null);
   const soonNote = rows.filter((r) => r.resetSoon).map((r) => `${r.id} resets in ${r.resetsInMin} min (not paced)`).join("; ");
   const overText = (list) => list.map((r) => `${r.id} (${cost[r.kind]} > ${r.remainingFraction})`).join(", ");
-  // Cost over a window that resets soon: waiting is an option, so a human decides.
-  if (over.length && over.every((r) => r.resetSoon))
-    return { decision: "ask", pace: null, worstWindow: null, windows: rows, reason: `expected cost exceeds remaining on ${overText(over)}, but it resets soon (${soonNote}); wait or run anyway?` };
-  if (over.length) return { decision: "skip", pace: paced.length ? Math.min(...paced.map((r) => r.pace)) : null, worstWindow: null, windows: rows, reason: `expected cost exceeds remaining on ${overText(over.filter((r) => !r.resetSoon))}` };
-  if (!paced.length) return { decision: "use", pace: null, worstWindow: null, windows: rows, reason: `every window resets soon and covers the expected cost (${soonNote})` };
-  const worst = paced.reduce((a, b) => (b.pace < a.pace ? b : a));
-  const base = { pace: worst.pace, worstWindow: worst.id, windows: rows, ...(soonNote ? { note: soonNote } : {}) };
-  if (worst.pace >= paceCfg.use_at_or_above) return { ...base, decision: "use", reason: `pace ${fmt(worst.pace)} >= ${paceCfg.use_at_or_above}` };
-  if (worst.pace >= paceCfg.high_only_at_or_above)
-    return grade === "high"
-      ? { ...base, decision: "use", reason: `pace ${fmt(worst.pace)} in [${paceCfg.high_only_at_or_above}, ${paceCfg.use_at_or_above}) and grade is high` }
-      : { ...base, decision: "skip", reason: `pace ${fmt(worst.pace)} in [${paceCfg.high_only_at_or_above}, ${paceCfg.use_at_or_above}): used only for high grade` };
-  return { ...base, decision: "skip", reason: `pace ${fmt(worst.pace)} < ${paceCfg.high_only_at_or_above}` };
+  // Every window is evaluated before deciding: skip (any window) beats ask (a window that resets soon).
+  const hardOver = over.filter((r) => !r.resetSoon);
+  if (hardOver.length) return { decision: "skip", pace: paced.length ? Math.min(...paced.map((r) => r.pace)) : null, worstWindow: null, windows: rows, reason: `expected cost exceeds remaining on ${overText(hardOver)}` };
+  let paceVerdict = null;
+  if (paced.length) {
+    const worst = paced.reduce((a, b) => (b.pace < a.pace ? b : a));
+    const base = { pace: worst.pace, worstWindow: worst.id, windows: rows, ...(soonNote ? { note: soonNote } : {}) };
+    if (worst.pace >= paceCfg.use_at_or_above) paceVerdict = { ...base, decision: "use", reason: `pace ${fmt(worst.pace)} >= ${paceCfg.use_at_or_above}` };
+    else if (worst.pace >= paceCfg.high_only_at_or_above)
+      paceVerdict = grade === "high"
+        ? { ...base, decision: "use", reason: `pace ${fmt(worst.pace)} in [${paceCfg.high_only_at_or_above}, ${paceCfg.use_at_or_above}) and grade is high` }
+        : { ...base, decision: "skip", reason: `pace ${fmt(worst.pace)} in [${paceCfg.high_only_at_or_above}, ${paceCfg.use_at_or_above}): used only for high grade` };
+    else paceVerdict = { ...base, decision: "skip", reason: `pace ${fmt(worst.pace)} < ${paceCfg.high_only_at_or_above}` };
+  }
+  if (paceVerdict?.decision === "skip") return over.length ? { ...paceVerdict, reason: `${paceVerdict.reason}; also expected cost exceeds remaining on ${overText(over)} (resets soon)` } : paceVerdict;
+  // Cost over a window that resets soon (and no other window fails): waiting is an option, so a human decides.
+  if (over.length) return { decision: "ask", pace: paceVerdict?.pace ?? null, worstWindow: paceVerdict?.worstWindow ?? null, windows: rows, reason: `expected cost exceeds remaining on ${overText(over)}, but it resets soon (${soonNote}); wait or run anyway?` };
+  if (!paceVerdict) return { decision: "use", pace: null, worstWindow: null, windows: rows, reason: `every window resets soon and covers the expected cost (${soonNote})` };
+  return paceVerdict;
 }
 const fmt = (n) => (Number.isFinite(n) ? n.toFixed(2) : String(n));
 

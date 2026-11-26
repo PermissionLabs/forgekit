@@ -1,7 +1,28 @@
 #!/usr/bin/env node
 // Stand-in for `codex exec` (plain mode): stderr transcript header + -o last message. No model call.
+// `fake-codex sandbox -c default_permissions=.. -c permissions.<p>.filesystem={..} -- cmd...` confines cmd like
+// codex's Seatbelt would: the profile's read/none entries become a real sandbox-exec SBPL profile (macOS only).
+// FAKE_SANDBOX_NOOP=1 runs cmd unconfined (a sandbox that does not enforce).
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 const args = process.argv.slice(2);
+if (args[0] === "sandbox") {
+  const dash = args.indexOf("--");
+  const cmd = args.slice(dash + 1);
+  const fsArg = args.find((a) => /^permissions\.[a-z0-9_]+\.filesystem=/.test(a)) ?? "";
+  const entries = [...fsArg.matchAll(/"([^"]+)"="(read|none|write)"/g)].map((m) => [m[1], m[2]]);
+  if (process.env.FAKE_SANDBOX_NOOP) { const r = spawnSync(cmd[0], cmd.slice(1), { stdio: "inherit" }); process.exit(r.status ?? 1); }
+  if (process.platform !== "darwin") { process.stderr.write("sandbox-exec: Operation not permitted\n"); process.exit(71); }
+  const q = (p) => `"${p}"`;
+  const none = entries.filter(([p, v]) => v === "none" && p.startsWith("/")).map(([p]) => `(subpath ${q(p)})`);
+  const read = entries.filter(([p, v]) => v === "read" && p.startsWith("/")).map(([p]) => `(subpath ${q(p)})`);
+  const sys = ["/usr/lib", "/usr/share", "/System", "/bin", "/usr/bin", "/private/var/db/dyld", "/dev"].map((p) => `(subpath ${q(p)})`);
+  const sbpl = ["(version 1)", "(allow default)", "(deny file-read*)", "(allow file-read-metadata)", `(allow file-read* (literal "/") ${sys.join(" ")})`,
+    none.length ? `(deny file-read* ${none.join(" ")})` : "", read.length ? `(allow file-read* ${read.join(" ")})` : "",
+    "(deny file-write*)", '(allow file-write* (literal "/dev/null"))', "(deny network*)"].join("\n");
+  const r = spawnSync("/usr/bin/sandbox-exec", ["-p", sbpl, ...cmd], { stdio: "inherit" });
+  process.exit(r.status ?? 1);
+}
 const prompt = fs.readFileSync(0, "utf8");
 if (process.env.FAKE_ARGV_OUT) fs.writeFileSync(process.env.FAKE_ARGV_OUT, JSON.stringify(args));
 if (process.env.FAKE_ENV_OUT) fs.writeFileSync(process.env.FAKE_ENV_OUT, JSON.stringify(Object.keys(process.env)));

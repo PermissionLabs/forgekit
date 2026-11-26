@@ -7,7 +7,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadPolicy, defaultPolicyPath } from "../lib/policy.mjs";
-import { buildInput, removeSnapshot } from "../lib/inputs.mjs";
+import { buildInput, readChecklist, removeSnapshot } from "../lib/inputs.mjs";
 import { runReview, summarize } from "../lib/run.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -17,7 +17,7 @@ let tmp, repo, rev, policyPath, diffPath, briefPath;
 const git = (...a) => execFileSync("git", ["-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "-C", repo, ...a], { encoding: "utf8" }).trim();
 const DIMS = ["correctness", "tests"];
 const review = (over = {}) => JSON.stringify({ verdict: "fix", coverage: { correctness: "checked", tests: "n/a:no tests in scope" }, findings: [{ id: "C1", sev: "med", loc: "src/a.ts:2", claim: "c", evidence: "e", check: "k" }], limits: [], ...over });
-const FAKE_KEYS = ["FAKE_REVIEW", "FAKE_OUTPUTS", "FAKE_READ", "FAKE_WRITE", "FAKE_INIT_MODEL", "FAKE_USAGE_MODEL", "FAKE_TOOLS", "FAKE_REPORTED_MODEL", "FAKE_SANDBOX", "FAKE_COMMAND", "FAKE_ARGV_OUT", "FAKE_ENV_OUT", "FAKE_ESCAPE", "FAKE_NO_O", "FAKE_EMPTY_O", "FAKE_STDOUT", "FAKE_NO_EFFORT", "FAKE_PROMPT_ECHO", "FAKE_COMMAND_OUTPUT", "FAKE_APPROVAL"];
+const FAKE_KEYS = ["FAKE_REVIEW", "FAKE_OUTPUTS", "FAKE_READ", "FAKE_WRITE", "FAKE_INIT_MODEL", "FAKE_USAGE_MODEL", "FAKE_TOOLS", "FAKE_REPORTED_MODEL", "FAKE_SANDBOX", "FAKE_COMMAND", "FAKE_ARGV_OUT", "FAKE_ENV_OUT", "FAKE_ESCAPE", "FAKE_NO_O", "FAKE_EMPTY_O", "FAKE_STDOUT", "FAKE_NO_EFFORT", "FAKE_PROMPT_ECHO", "FAKE_COMMAND_OUTPUT", "FAKE_APPROVAL", "FAKE_SANDBOX_NOOP"];
 const setFake = (env) => { for (const k of FAKE_KEYS) delete process.env[k]; Object.assign(process.env, env); };
 
 before(() => {
@@ -44,6 +44,8 @@ before(() => {
   p.hosts.codex.timeout_sec = 60;
   p.hosts.claude.env_passthrough = FAKE_KEYS; // the child env is an allowlist; the fakes need their knobs
   p.hosts.codex.env_passthrough = FAKE_KEYS;
+  // The OS sandbox path is exercised where Seatbelt exists; elsewhere the generic tests run audit-only.
+  if (process.platform !== "darwin") p.hosts.codex.os_sandbox = "audit_only";
   policyPath = path.join(tmp, "policy.json");
   fs.writeFileSync(policyPath, JSON.stringify(p));
   diffPath = path.join(tmp, "pr.patch");
@@ -243,7 +245,7 @@ test("codex: the child env is an allowlist and the prompt echo is not audited as
     const ev = await runReview(opts("codex", "out-codex-env", { brief }), policy(), policyPath);
     assert.ok(!JSON.parse(fs.readFileSync(envOut, "utf8")).includes("GITHUB_TOKEN_CR_TEST"));
     // The tool-like line after a blank line inside command output is still conservatively flagged.
-    assert.match(ev.incompleteReasons.join(), /non_read_tool_calls:1/);
+    assert.match(ev.incompleteReasons.join(), /non_read_tool_calls:mcp is mentioned here/);
     setFake({ FAKE_REVIEW: good });
     const clean = await runReview(opts("codex", "out-codex-mcp", { brief }), policy(), policyPath);
     assert.equal(clean.status, "complete", clean.incompleteReasons.join());
@@ -280,7 +282,84 @@ test("missing host binary -> incomplete, never another reviewer", async () => {
   const ev = await runReview(opts("codex", "out-nobin"), p, policyPath);
   assert.equal(ev.status, "incomplete");
   assert.equal(ev.reviewer.host, "codex");
-  assert.match(ev.incompleteReasons.join(), /spawn_error/);
+  assert.match(ev.incompleteReasons.join(), /spawn_error|os_sandbox_unavailable:codex binary .* not found/);
+});
+
+const DARWIN = process.platform === "darwin";
+
+test("codex: model commands run under the generated OS sandbox profile, self-tested before the run (evidence)", { skip: !DARWIN && "macOS Seatbelt only" }, async () => {
+  const argvOut = path.join(tmp, "codex-sbx-argv.json");
+  setFake({ FAKE_REVIEW: review({ findings: [], verdict: "pass" }), FAKE_ARGV_OUT: argvOut });
+  const ev = await runReview(opts("codex", "out-codex-sbx"), policy(), policyPath);
+  assert.equal(ev.status, "complete", ev.incompleteReasons.join());
+  const sb = ev.isolation.osSandbox;
+  assert.equal(sb.selfTest.ok, true);
+  assert.equal(sb.selfTest.outsideReadDenied, true);
+  assert.equal(sb.selfTest.codexHomeListDenied, true);
+  assert.equal(sb.selfTest.snapshotWriteDenied, true);
+  assert.equal(sb.selfTest.snapshotReadable, true);
+  assert.match(sb.profile, /^default_permissions = "cross_review_[0-9a-f]{8}"/);
+  assert.equal(sb.profileSha256.length, 64);
+  assert.deepEqual(sb.writeRoots, []);
+  assert.ok(sb.deniedRoots.includes("/private/tmp"));
+  assert.ok(fs.existsSync(path.join(tmp, "out-codex-sbx", "raw", "codex-sandbox-profile.toml")));
+  const argv = JSON.parse(fs.readFileSync(argvOut, "utf8"));
+  assert.ok(!argv.includes("-s"), "-s read-only must not be passed: it overrides the profile");
+  assert.ok(argv.some((a) => a.startsWith("default_permissions=")));
+});
+
+test("codex: a sandbox that does not enforce the profile makes the run incomplete before any model call", { skip: !DARWIN && "macOS Seatbelt only" }, async () => {
+  const argvOut = path.join(tmp, "codex-noop-argv.json");
+  setFake({ FAKE_REVIEW: review(), FAKE_SANDBOX_NOOP: "1", FAKE_ARGV_OUT: argvOut });
+  const ev = await runReview(opts("codex", "out-codex-noop"), policy(), policyPath);
+  assert.equal(ev.status, "incomplete");
+  assert.match(ev.incompleteReasons.join(), /os_sandbox_not_enforced:outsideReadDenied,codexHomeListDenied,snapshotWriteDenied/);
+  assert.equal(fs.existsSync(argvOut), false, "codex exec ran although the sandbox self-test failed");
+});
+
+const xReview = () => review({ findings: [{ id: "X1", sev: "med", loc: "src/a.ts:2", claim: "c", evidence: "e", check: "k" }] });
+test("codex: no OS sandbox -> incomplete no_os_sandbox unless the policy opts into audit-only", async () => {
+  setFake({ FAKE_REVIEW: xReview() });
+  const none = await runReview(opts("codex", "out-codex-nosbx", { deps: { sandboxAvailable: () => false } }), policy(), policyPath);
+  assert.equal(none.status, "incomplete");
+  assert.match(none.incompleteReasons.join(), /no_os_sandbox/);
+  const p = policy();
+  p.hosts.codex.os_sandbox = "audit_only";
+  const audit = await runReview(opts("codex", "out-codex-auditonly", { deps: { sandboxAvailable: () => false } }), p, policyPath);
+  assert.equal(audit.status, "complete", audit.incompleteReasons.join());
+  assert.match(audit.warnings.join(), /audit-only mode allowed by policy/);
+});
+
+test("codex: an incomplete run keeps its draft as reviewIfIncomplete; reasons name the command (operator 2, 3)", async () => {
+  setFake({ FAKE_REVIEW: xReview(), FAKE_COMMAND: "cat /etc/hosts" });
+  const ev = await runReview(opts("codex", "out-codex-draft"), policy(), policyPath);
+  assert.equal(ev.status, "incomplete");
+  assert.equal(ev.review, null);
+  assert.match(ev.incompleteReasons.join(), /tool_read_outside_snapshot:\/bin\/zsh -lc 'cat \/etc\/hosts' -> \/etc\/hosts/);
+  assert.equal(ev.reviewIfIncomplete?.findings?.[0]?.id, "X1");
+  assert.equal(JSON.parse(fs.readFileSync(path.join(tmp, "out-codex-draft", "review.json"), "utf8")), null);
+  assert.match(fs.readFileSync(path.join(tmp, "out-codex-draft", "summary.txt"), "utf8"), /unaccepted draft verdict fix/);
+  // An unparseable draft is kept as raw text.
+  setFake({ FAKE_REVIEW: "not json at all", FAKE_COMMAND: "cat /etc/hosts" });
+  const raw = await runReview(opts("codex", "out-codex-draft-raw"), policy(), policyPath);
+  assert.equal(raw.reviewIfIncomplete, null);
+  assert.equal(raw.reviewDraftRawIfIncomplete, "not json at all");
+});
+
+test("checklist: an in-repo path that is a working-tree symlink is read from git, never through the link (X15)", () => {
+  const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "cross-review-outside-"));
+  const outsideFile = path.join(outsideDir, "outside.md");
+  fs.writeFileSync(outsideFile, "OUTSIDE CONTENT\n");
+  const link = path.join(repo, "docs", "linked-check.md");
+  fs.symlinkSync(outsideFile, link);
+  try {
+    // Not in git at --rev: refused (it does not exist there), never read from the link target.
+    assert.throws(() => readChecklist(repo, rev, link), /does not exist at/);
+    // The in-repo path written through a symlinked repo spelling is still a repo path.
+    const c = readChecklist(repo, rev, path.join(repo, "docs", "check.md"));
+    assert.equal(c.source, `git:${rev}`);
+    assert.equal(c.text, "CHECKLIST AT REV\n");
+  } finally { fs.rmSync(link, { force: true }); fs.rmSync(outsideDir, { recursive: true, force: true }); }
 });
 
 test("empty dimensions are refused and never leak a snapshot (A21)", async () => {

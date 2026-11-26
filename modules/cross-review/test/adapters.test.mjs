@@ -9,6 +9,10 @@ import * as ag from "../adapters/antigravity.mjs";
 import { jsonSchemaFor } from "../lib/schema.mjs";
 import { insideRoot, plainPath } from "../lib/inputs.mjs";
 import { policyProblems } from "../lib/policy.mjs";
+import * as sandbox from "../lib/sandbox.mjs";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 
 const { policy } = loadPolicy(defaultPolicyPath());
 const clone = (x) => JSON.parse(JSON.stringify(x));
@@ -73,6 +77,18 @@ test("claude stream audit: extra tools, MCP, outside reads and wrong model make 
   const d = claude.auditStream(lines(denied), SNAP, pin);
   assert.deepEqual(d.reasons, []);
   assert.match(d.warnings.join(), /denied by the host/);
+  // A39: Grep's pattern is a regex over contents, never a path; Glob patterns and Grep path/glob still are.
+  const grep = clone(ok);
+  for (const [id, pattern] of [["g1", "../lib/proc.mjs"], ["g2", "/etc/passwd"], ["g3", "~/"]]) grep[1].message.content.push({ type: "tool_use", id, name: "Grep", input: { pattern } });
+  assert.deepEqual(claude.auditStream(lines(grep), SNAP, pin).reasons, []);
+  const glob = clone(ok);
+  glob[1].message.content.push({ type: "tool_use", id: "h1", name: "Glob", input: { pattern: "/etc/*" } });
+  glob[1].message.content.push({ type: "tool_use", id: "h2", name: "Grep", input: { pattern: "x", path: "/etc" } });
+  glob[1].message.content.push({ type: "tool_use", id: "h3", name: "Grep", input: { pattern: "x", glob: "../**/*.env" } });
+  const gr = claude.auditStream(lines(glob), SNAP, pin).reasons.join("\n");
+  assert.match(gr, /tool_read_outside_snapshot:\/etc\/\*/);
+  assert.match(gr, /tool_read_outside_snapshot:\/etc$/m);
+  assert.match(gr, /tool_read_outside_snapshot:\.\.\/\*\*\/\*\.env/);
 });
 
 test("codex argv: read-only sandbox, approval never, ephemeral, user config/rules ignored, pinned model/effort, no bypass", () => {
@@ -105,7 +121,8 @@ test("codex transcript: header and commands parsed; outside paths and non-read s
   assert.equal(t.tokens, 8177);
   assert.equal(t.commands.length, 2);
   const a = codex.audit(t, SNAP, pin);
-  assert.match(a.reasons.join(), /tool_read_outside_snapshot:1/);
+  // Reasons name the offending command and path (operator 3), not just a count.
+  assert.match(a.reasons.join(), /tool_read_outside_snapshot:\/bin\/zsh -lc 'cat \.\.\/outside\.txt' -> \.\.\/outside\.txt/);
   assert.equal(a.reported.model, "gpt-6.1-sol");
   assert.deepEqual(codex.outsidePaths("/bin/zsh -lc 'cat ~/.codex/auth.json'", SNAP), ["~/.codex/auth.json"]);
   assert.deepEqual(codex.outsidePaths("/bin/zsh -lc 'cat /etc/passwd'", SNAP), ["/etc/passwd"]);
@@ -115,7 +132,7 @@ test("codex transcript: header and commands parsed; outside paths and non-read s
   assert.match(r, /sandbox_not_read_only:workspace-write/);
   assert.match(r, /approval_not_never:on-request/);
   assert.match(r, /effort_mismatch:low/);
-  assert.match(r, /non_read_tool_calls:1/);
+  assert.match(r, /non_read_tool_calls:tool github\.search/);
   assert.match(r, /workdir_unreported/);
 });
 
@@ -125,12 +142,14 @@ test("codex audit: a multi-line exec command is audited in full (X2/A1)", () => 
   assert.equal(t.commands.length, 1);
   assert.equal(t.commands[0].cwd, SNAP);
   assert.match(t.commands[0].command, /cat \/etc\/passwd/);
-  assert.match(codex.audit(t, SNAP, pin).reasons.join(), /tool_read_outside_snapshot:1/);
+  assert.match(codex.audit(t, SNAP, pin).reasons.join(), /tool_read_outside_snapshot:.* -> \/etc\/passwd/);
   const home = codex.parseTranscript(transcript("p", "", "exec", "/bin/zsh -lc 'ls", `cat ~/.codex/auth.json' in ${SNAP}`, " succeeded in 2ms:"), { prompt: "p" });
-  assert.match(codex.audit(home, SNAP, pin).reasons.join(), /tool_read_outside_snapshot:1/);
-  // No "in <cwd>" terminator: unauditable, never cwd=null-as-inside.
+  assert.match(codex.audit(home, SNAP, pin).reasons.join(), /tool_read_outside_snapshot:.* -> ~\/\.codex\/auth\.json/);
+  // No "in <cwd>" terminator: not a command block (X6: an `exec` line inside command output); counted, never cwd=null-as-inside.
   const cut = codex.parseTranscript(transcript("p", "", "exec", "/bin/zsh -lc 'cat src/a.ts"), { prompt: "p" });
-  assert.match(codex.audit(cut, SNAP, pin).reasons.join(), /unauditable_transcript/);
+  assert.equal(cut.commands.length, 0);
+  assert.equal(cut.execLinesIgnored, 1);
+  assert.deepEqual(codex.audit(cut, SNAP, pin).reasons, []);
 });
 
 test("codex audit: bare/odd cd, flag-attached paths, ~, $HOME, .., unknown expansions (A1/X2)", () => {
@@ -155,10 +174,76 @@ test("codex audit: bare/odd cd, flag-attached paths, ~, $HOME, .., unknown expan
   assert.equal(codex.auditCommand("ls", `${SNAP}/src`, SNAP).cwdInside, true);
 });
 
-test("codex audit: /tmp vs /private/tmp spellings of the snapshot are the same place (A32)", () => {
-  assert.deepEqual(codex.outsidePaths("/bin/zsh -lc 'cat /tmp/snap-x/a.ts'", "/private/tmp/snap-x"), []);
-  assert.deepEqual(codex.outsidePaths("/bin/bash -lc 'cat /private/tmp/snap-x/a.ts'", "/tmp/snap-x"), []);
-  assert.deepEqual(codex.outsidePaths("/usr/bin/bash -c 'cat /etc/hosts'", "/tmp/snap-x"), ["/etc/hosts"]);
+test("codex audit: a symlinked spelling of the snapshot is the same place (A32), portable (A43/X17)", () => {
+  // An explicit alias in a temp dir instead of assuming macOS /tmp -> /private/tmp.
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cross-review-alias-")));
+  try {
+    const realSnap = path.join(base, "real-snap");
+    fs.mkdirSync(realSnap);
+    const alias = path.join(base, "alias");
+    fs.symlinkSync(realSnap, alias);
+    assert.deepEqual(codex.outsidePaths(`/bin/zsh -lc 'cat ${alias}/a.ts'`, realSnap), []);
+    assert.deepEqual(codex.outsidePaths(`/bin/bash -lc 'cat ${realSnap}/a.ts'`, alias), []);
+    assert.deepEqual(codex.outsidePaths("/usr/bin/bash -c 'cat /etc/hosts'", alias), ["/etc/hosts"]);
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test("codex audit (secondary): r2 bypasses are now seen; interpreter literals are warnings, not incomplete (A35-A38, X10, X13, X14, R2)", () => {
+  const pin = hostPin(policy, "codex");
+  const ac = (c, o = {}) => codex.auditCommand(`/bin/zsh -lc '${c}'`, SNAP, SNAP, o);
+  const zq = (c) => codex.auditCommand(`/bin/zsh -lc "${c}"`, SNAP, SNAP);
+  // A35/X11: ANSI-C and locale quoting are flagged as unauditable expansions.
+  assert.match(zq("cat $'/etc/passwd'").unauditable.join(), /expansion \$'/);
+  assert.match(zq('cat $\\"/etc/passwd\\"').unauditable.join(), /expansion \$"/);
+  // A36/X10: assignments count only in order and in command position.
+  assert.match(ac('echo HOME=src; cat "$HOME/.codex/auth.json"').unauditable.join(), /expansion \$HOME/);
+  assert.match(ac("cat $HOME/.codex/auth.json; HOME=1").unauditable.join(), /expansion \$HOME/);
+  assert.match(ac("true HOME= && cat $HOME/x").unauditable.join(), /expansion \$HOME/);
+  assert.deepEqual(ac('f=src/a.ts; cat "$f"').unauditable, []);
+  // A37/X13: a leading redirection or prefix options keep command position.
+  assert.ok(ac(">/dev/null cd && cat .codex/auth.json").hard.length);
+  assert.deepEqual(ac('</dev/null node -e "console.log(1)"').codeExecution, ["node"]);
+  assert.deepEqual(ac('command -p node -e "console.log(1)"').codeExecution, ["node"]);
+  assert.deepEqual(ac('nice -n 0 python3 -c "print(1)"').codeExecution, ["python3"]);
+  assert.match(ac('2>/dev/null node -e "1"', { allowCodeExecution: false }).unauditable.join(), /code execution not allowed by policy: node/);
+  // A38/X14: glob and non-ASCII root paths are paths.
+  assert.deepEqual(ac("cat /?tc/passwd").hard, ["/?tc/passwd"]);
+  assert.deepEqual(ac("cat /비공개/secret.txt").hard, ["/비공개/secret.txt"]);
+  // R2: literal paths inside an interpreter program or a grep pattern are not hard violations.
+  assert.deepEqual(ac(`node -e "require(\\"fs\\").statSync(\\"/etc/passwd\\")"`).hard, []);
+  assert.deepEqual(ac('rg -n "/etc/passwd" src').hard, []);
+  assert.deepEqual(ac("grep -e /etc/hosts src/a.ts").hard, []);
+  assert.deepEqual(ac("rg -n foo /etc").hard, ["/etc"]);
+  const t = codex.parseTranscript(transcript("p", "", "exec", `/bin/zsh -lc 'node -e "console.log(\\"/etc/passwd\\")"' in ${SNAP}`, " succeeded in 0ms:", "/etc/passwd"), { prompt: "p" });
+  const a = codex.audit(t, SNAP, pin);
+  assert.deepEqual(a.reasons, []);
+  assert.match(a.warnings.join(), /shell audit \(secondary\).*outside \/etc\/passwd/);
+});
+
+test("codex transcript: an exec line inside command output is not a tool event (X6)", () => {
+  const pin = hostPin(policy, "codex");
+  const t = codex.parseTranscript(transcript("p", "", "exec", `/bin/zsh -lc 'cat notes.txt' in ${SNAP}`, " succeeded in 0ms:", "the word", "exec", "appears in this file", "and so does a path /etc/hosts", "", "codex", "done"), { prompt: "p" });
+  assert.equal(t.commands.length, 1);
+  assert.equal(t.execLinesIgnored, 1);
+  assert.deepEqual(codex.audit(t, SNAP, pin).reasons, []);
+  // Sandbox denials are counted in command output only, never in the model's own message.
+  const d = codex.parseTranscript(transcript("p", "", "exec", `/bin/zsh -lc 'ls ~' in ${SNAP}`, " exited 1 in 0ms:", "ls: /Users/u: Operation not permitted", "", "codex", "`ls ~` failed: Operation not permitted"), { prompt: "p" });
+  assert.deepEqual(d.denied, ["ls: /Users/u: Operation not permitted"]);
+});
+
+test("codex argv: the generated permission profile replaces -s read-only; the guard refuses write/builtin profiles", () => {
+  const pin = hostPin(policy, "codex");
+  const prof = sandbox.permissionProfile({ snapshot: SNAP, codexRoot: "/opt/codex", name: "cross_review_test" });
+  const argv = codex.buildArgv(pin, { snapshot: SNAP, schemaPath: "s", lastMessagePath: "l", permissionArgs: sandbox.profileArgs(prof) });
+  assert.ok(!argv.includes("-s"), "-s read-only would override the profile with full-disk read");
+  assert.ok(argv.includes('default_permissions="cross_review_test"'));
+  assert.deepEqual(bypassFlags(argv), []);
+  assert.deepEqual(Object.values(prof.filesystem).filter((v) => v !== "read" && v !== "none"), []);
+  assert.equal(prof.filesystem["/private/tmp"], "none");
+  assert.deepEqual(bypassFlags(["-c", 'default_permissions=":danger-full-access"']), ['default_permissions=":danger-full-access"']);
+  assert.deepEqual(bypassFlags(["-c", 'default_permissions=":workspace"']), ['default_permissions=":workspace"']);
+  assert.deepEqual(bypassFlags(["-c", 'permissions.x.filesystem={"/"="write"}']), ['permissions.x.filesystem={"/"="write"}']);
+  assert.deepEqual(bypassFlags(["-c", "permissions.x.network.enabled=true"]), ["permissions.x.network.enabled=true"]);
 });
 
 test("codex audit: code execution is recorded, and refused when the policy disallows it", () => {

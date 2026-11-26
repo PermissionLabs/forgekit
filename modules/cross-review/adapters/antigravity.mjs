@@ -23,6 +23,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { expandHome } from "../lib/policy.mjs";
 import { insideRoot, redact, sha256 } from "../lib/inputs.mjs";
+import { groupMembers, ownedMembers } from "../lib/proc.mjs";
 
 export const ENABLED_TOOLS = ["view_file"];
 export const CLIENT_CAPABILITIES = { fs: { readTextFile: false, writeTextFile: false }, terminal: false, session: { notices: {} } };
@@ -124,23 +125,26 @@ export function planTurns(groups, scopeFiles, { maxFiles, maxBytes } = {}) {
 }
 
 /**
- * Stop the server's process group. While the child is not reaped it holds the pgid, so signalling is safe;
- * after it exited, `ps` must show a live member of the group right before each signal, else nothing is sent.
- * deps: { pid, exited(), waitExit(ms), members(pid), kill(pid, sig), sleep(ms) }. Returns the signal log.
+ * Stop the server's process group. While the child is not reaped it holds the pgid, so signalling the group is
+ * safe. After it exited, a numeric pgid match is never enough: `ps` is re-read right before each signal and only
+ * members started between spawn and exit (ownedMembers) are signalled, each by pid.
+ * deps: { pid, spawnedAt, exitedAt(), exited(), waitExit(ms), members(pid) -> [{pid,startMs}], kill(pid, sig), sleep(ms) }.
+ * Returns the signal log.
  */
-export async function stopGroup({ pid, exited, waitExit, members, kill, sleep: nap = sleep }) {
+export async function stopGroup({ pid, spawnedAt = 0, exitedAt = () => Date.now(), exited, waitExit, members, kill, sleep: nap = sleep }) {
   const log = [];
-  const sig = (s, why) => { try { kill(-pid, s); log.push({ sig: s, why }); } catch (e) { log.push({ sig: s, why, error: e.code ?? String(e) }); } };
+  const sig = (target, s, why) => { try { kill(target, s); log.push({ sig: s, why, target }); } catch (e) { log.push({ sig: s, why, target, error: e.code ?? String(e) }); } };
   if (!exited()) await waitExit(3000);
-  if (!exited()) { sig("SIGTERM", "child alive"); await waitExit(5000); }
-  if (!exited()) { sig("SIGKILL", "child alive"); await waitExit(3000); }
+  if (!exited()) { sig(-pid, "SIGTERM", "child alive"); await waitExit(5000); }
+  if (!exited()) { sig(-pid, "SIGKILL", "child alive"); await waitExit(3000); }
   if (!exited()) return log; // still holding the group; nothing else can be done safely
-  let m = members(pid);
-  if (!m.length) { log.push({ skipped: "no live group member after exit" }); return log; }
-  sig("SIGTERM", `group members after exit: ${m.length}`);
+  const owned = () => { const all = members(pid); return { all, mine: ownedMembers(all, { spawnedAt, exitedAt: exitedAt() }) }; };
+  let { all, mine } = owned();
+  if (!mine.length) { log.push({ skipped: all.length ? `no group member provably ours after exit (${all.length} in group)` : "no live group member after exit" }); return log; }
+  for (const p of mine) sig(p, "SIGTERM", `group member after exit`);
   await nap(1500);
-  m = members(pid);
-  if (m.length) sig("SIGKILL", `group members after exit: ${m.length}`);
+  ({ mine } = owned());
+  for (const p of mine) sig(p, "SIGKILL", `group member after exit`);
   return log;
 }
 
@@ -173,8 +177,8 @@ export async function run(ctx) {
   if (!fs.existsSync(acpDir) || !fs.statSync(acpDir).isDirectory()) { reasons.push("profile_acp_dir_missing"); return out; }
 
   const cwd = input.snapshot;
-  let home = null, tmpDir = null, child = null, exitInfo = null, spawnFailed = null, sessionId;
-  let authRequired = false, nextId = 1, collecting = null, upstreamFailures = 0;
+  let home = null, tmpDir = null, child = null, exitInfo = null, spawnFailed = null, sessionId, spawnedWall = 0;
+  let authRequired = false, nextId = 1, collecting = null, upstreamFailures = 0, upstreamCounted = 0;
   const msgLines = [];
   let errAll = "", errBuf = "";
   const pending = new Map();
@@ -265,6 +269,7 @@ export async function run(ctx) {
     try { resp = await request("session/prompt", { sessionId, prompt: blocks }, timeoutMs + 60_000); } catch (e) { err = e; }
     clearInterval(watchdog);
     if (!upstream && upstreamFailures > failBefore) upstream = true;
+    upstreamCounted = upstreamFailures;
     const text = collecting.join("");
     collecting = null;
     if (resp?.usage) promptUsage.push({ label, ...resp.usage });
@@ -291,8 +296,9 @@ export async function run(ctx) {
     out.isolation = { geminiHome: home, antigravityAcpLink: acpDir, cwd, clientCapabilities: CLIENT_CAPABILITIES, sessionMeta: { antigravity: { enabledTools: ENABLED_TOOLS } }, permissionPolicy: "reject_once", runtime: version };
     psBefore = psList().filter((p) => isAgy(p.cmd)).map((p) => p.pid);
     const env = buildEnv(process.env, { geminiHome: home, tmpDir, harness: path.join(runtimeDir, "localharness_external") });
+    spawnedWall = Date.now();
     child = spawn(serverBin, [], { cwd, env, stdio: ["pipe", "pipe", "pipe"], detached: true });
-    child.on("exit", (code, signal) => { exitInfo = { code, signal, atMs: ms() }; failPending(`agent exited (${code ?? signal})`); resolveExited(); });
+    child.on("exit", (code, signal) => { exitInfo = { code, signal, atMs: ms(), wall: Date.now(), duringCleanup: cleaned }; failPending(`agent exited (${code ?? signal})`); resolveExited(); });
     child.on("error", (e) => { spawnFailed = e.message; reasons.push(`spawn_error:${e.message}`); failPending(`spawn failed: ${e.message}`); resolveExited(); resolveErrClosed(); });
     child.stdin.on("error", () => {});
     let buf = "";
@@ -400,10 +406,20 @@ export async function run(ctx) {
     if (pid && !spawnFailed) {
       try { child.stdin.end(); } catch {}
       const signals = await stopGroup({
-        pid, exited: () => exitInfo !== null, waitExit: (n) => Promise.race([childExited, sleep(n)]),
-        members: (g) => psList().filter((p) => p.pgid === g).map((p) => p.pid), kill: (p, s) => process.kill(p, s),
+        pid, spawnedAt: spawnedWall, exitedAt: () => exitInfo?.wall ?? Date.now(),
+        exited: () => exitInfo !== null, waitExit: (n) => Promise.race([childExited, sleep(n)]),
+        members: groupMembers, kill: (p, s) => process.kill(p, s),
       });
       await Promise.race([errClosed, sleep(2000)]);
+      // An unterminated last stderr line (e.g. RESOURCE_EXHAUSTED at exit) is flushed and checked here, before
+      // the review can be accepted: any fatal agent error or upstream failure seen anywhere invalidates the run.
+      if (errBuf) { onStderrLine(errBuf); errBuf = ""; }
+      if (agentErrors.some(isFatal) && !reasons.some((r) => r.startsWith("agent_error:"))) reasons.push(`agent_error:stderr (${agentErrors.filter(isFatal).at(-1).slice(0, 120)})`);
+      if (upstreamFailures > upstreamCounted && !reasons.some((r) => r.startsWith("upstream_502:"))) reasons.push("upstream_502:stderr after the last turn");
+      // The server must exit cleanly after stdin closes; a non-zero code, or a signal we did not send, is a failure.
+      const ourSignal = signals.some((x) => x.sig && !x.error);
+      if (exitInfo && exitInfo.code !== null && exitInfo.code !== 0) reasons.push(`agent_exit_nonzero:${exitInfo.code}`);
+      else if (exitInfo && exitInfo.signal && !ourSignal) reasons.push(`agent_exit_signal:${exitInfo.signal}`);
       // agy processes outside our group may belong to another session: reported, never signalled.
       const strays = psList().filter((p) => isAgy(p.cmd) && p.pgid !== pid && !psBefore.includes(p.pid)).map((p) => p.pid);
       if (strays.length) out.warnings.push(`agy processes outside this run's process group (not signalled): ${strays.join(",")}`);

@@ -69,15 +69,25 @@ export function hashTree(root) {
 
 /**
  * Checklist text. A relative path is a repo path read from the git object at `rev` (never the working tree);
- * an absolute path inside the repository is treated the same way; an absolute path outside the repository is
- * read from disk. Each entry records its source and hash in the evidence.
+ * an absolute path inside the repository is treated the same way. Whether an absolute path is inside the
+ * repository is decided from the path as written (only its parent directory is resolved), never from a
+ * working-tree symlink's target, so an in-repo symlink is read as the git object, which gitBlob refuses
+ * because it is a symlink. An absolute path outside the repository is read from disk.
+ * Each entry records its source and hash in the evidence.
  */
 export function readChecklist(repo, rev, p) {
   const s = String(p);
   let rel = null;
   if (path.isAbsolute(s)) {
-    const top = realish(repo), real = realish(s);
-    if (top && real && (real === top || real.startsWith(top + path.sep))) rel = path.relative(top, real);
+    const top = realish(repo);
+    const lexical = path.resolve(s);
+    const parent = realish(path.dirname(lexical));
+    const candidates = [lexical, parent ? path.join(parent, path.basename(lexical)) : null].filter(Boolean);
+    for (const c of candidates) {
+      for (const t of [top, path.resolve(repo)]) {
+        if (t && rel === null && (c === t || c.startsWith(t + path.sep))) rel = path.relative(t, c);
+      }
+    }
   } else rel = s;
   if (rel !== null) {
     const r = safeRel(rel);

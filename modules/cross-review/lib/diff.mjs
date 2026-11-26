@@ -19,7 +19,12 @@ export function unquoteGitPath(s) {
         i += 3;
       } else if (n in ESC) { bytes.push(ESC[n]); i += 1; }
       else return null;
-    } else bytes.push(...Buffer.from(c, "utf8"));
+    } else {
+      // A raw character (core.quotePath=false) may be a surrogate pair: encode the whole code point, not UTF-16 units.
+      const cp = s.codePointAt(i);
+      bytes.push(...Buffer.from(String.fromCodePoint(cp), "utf8"));
+      if (cp > 0xffff) i++;
+    }
   }
   return null;
 }
@@ -60,10 +65,16 @@ function gitPair(rest) {
   return out;
 }
 
-/** parseDiffPaths(text) -> { paths[] (old and new sides), newPaths[] (post-change side) } */
+/**
+ * parseDiffPaths(text) -> { paths[] (old and new sides), newPaths[] (post-change side) }
+ * A `diff --git` block without ---/+++ lines (mode-only change, new empty file, binary change) still contributes
+ * its b/ path to newPaths unless the block deletes the file.
+ */
 export function parseDiffPaths(text) {
   const all = new Set(), post = new Set();
   let oldLeft = 0, newLeft = 0;
+  let block = null; // { b, deleted, sawPost }
+  const closeBlock = () => { if (block && block.b && !block.deleted && !block.sawPost) post.add(block.b); block = null; };
   for (const raw of String(text).split("\n")) {
     const line = raw.replace(/\r$/, "");
     if (oldLeft > 0 || newLeft > 0) {
@@ -80,16 +91,25 @@ export function parseDiffPaths(text) {
       newLeft = m[2] === undefined ? 1 : Number(m[2]);
       continue;
     }
-    if (line.startsWith("diff --git ")) { for (const p of gitPair(line.slice(11))) all.add(p); continue; }
+    if (line.startsWith("diff --git ")) {
+      closeBlock();
+      const pair = gitPair(line.slice(11));
+      for (const p of pair) all.add(p);
+      block = { b: pair[1] ?? null, deleted: false, sawPost: false };
+      continue;
+    }
+    if (block && /^deleted file mode /.test(line)) { block.deleted = true; continue; }
     if ((m = line.match(/^(---|\+\+\+) (.+)$/))) {
       const p = headerPath(m[2]);
+      if (m[1] === "+++" && block) block.sawPost = true;
       if (p) { all.add(p); if (m[1] === "+++") post.add(p); }
       continue;
     }
     if ((m = line.match(/^(rename|copy) (from|to) (.+)$/))) {
       const p = m[3].startsWith('"') ? unquoteGitPath(m[3])?.value : m[3];
-      if (p) { all.add(p); if (m[2] === "to") post.add(p); }
+      if (p) { all.add(p); if (m[2] === "to") { post.add(p); if (block) block.sawPost = true; } }
     }
   }
+  closeBlock();
   return { paths: [...all], newPaths: [...post] };
 }
