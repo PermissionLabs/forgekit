@@ -367,7 +367,7 @@ ctest("session database decoding: generation model and display name, normalisati
   assert.throws(() => protoFields(Buffer.from([0x0a, 0x05, 0x61])), /truncated/);
 });
 
-test("cli layout happy path: argv, per-turn generation model, read_file audit, session files removed by workspace", async () => {
+ctest("cli layout happy path: argv, per-turn generation model, read_file audit, session files removed by workspace", async () => {
   const ev = await goCli({ steps: true });
   assert.equal(ev.status, "complete", ev.incompleteReasons.join());
   assert.equal(ev.extra.runtime.layout, "cli");
