@@ -33,7 +33,10 @@ resolve_target_root() {
     echo "error: target is a symlink" >&2
     return 1
   fi
-  target="$(CDPATH='' cd -- "$arg" && pwd -P)" || return 1
+  # -L again, so the checked and the resolved directory are the same one: a
+  # physical cd would apply ".." after following a link inside the path
+  # (box/sub/.. with box/sub -> target-link/docs lands in the linked repo).
+  target="$(CDPATH='' cd -L -- "$arg" && pwd -P)" || return 1
 }
 
 #

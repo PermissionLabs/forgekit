@@ -508,6 +508,18 @@ for writer in update-harness bootstrap; do
   [ "$(tree_hash "$repo")" = "$repo_tree" ] || fail "files written through target-link/docs/.. (physical mode)"
 done
 
+# r11 A15: the resolving cd must be logical too. box is a real directory and
+# box/sub links into the symlinked target, so box/sub/.. is box logically but
+# the linked repository physically; the writers must never reach the repo.
+for writer in update-harness bootstrap; do
+  LABEL="$writer resolves box/sub/.. to box under SHELLOPTS=physical"
+  CASES=$((CASES + 1))
+  mkdir "$TMP_DIR/box-$writer"
+  ln -s "$TMP_DIR/target-link/docs" "$TMP_DIR/box-$writer/sub"
+  capture env SHELLOPTS=physical bash "$ROOT/scripts/$writer.sh" "$TMP_DIR/box-$writer/sub/.." --force
+  [ "$(tree_hash "$repo")" = "$repo_tree" ] || fail "files written into the linked repo through box/sub/.. (physical mode)"
+done
+
 # 17c-2. X11: a target directory literally named "-" (spelled "-", "-/" or
 #        "-/.") is that directory, never $OLDPWD (cd's "-" operand). OLDPWD
 #        names another repository with drift that must stay untouched.
