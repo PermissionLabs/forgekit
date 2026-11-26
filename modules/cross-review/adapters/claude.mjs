@@ -1,7 +1,7 @@
 // Claude Code reviewer adapter: `claude -p` with read-only built-in tools, no MCP, no settings, no session file.
 // Flags verified against `claude --help` (Claude Code 2.1.332) and one live run on 2026-11-26.
-import { insideRoot, redact } from "../lib/inputs.mjs";
-import { runProcess } from "../lib/proc.mjs";
+import { insideRoot, realish, redact, sha256 } from "../lib/inputs.mjs";
+import { runProcess, scrubEnv } from "../lib/proc.mjs";
 
 export const READ_TOOLS = ["Read", "Grep", "Glob"];
 // StructuredOutput is how --json-schema returns the answer; it is not a file or network tool.
@@ -28,8 +28,9 @@ export function buildArgv(pin, jsonSchema) {
   ];
 }
 
-export function buildEnv(base = process.env) {
-  const env = { ...base };
+/** Minimal child environment: BASE_ENV, CLAUDE_CONFIG_DIR (auth location) and hosts.claude.env_passthrough. */
+export function buildEnv(base = process.env, passthrough = []) {
+  const env = scrubEnv(base, ["CLAUDE_CONFIG_DIR", ...passthrough]);
   env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"; // no telemetry/autoupdate/error reporting traffic
   env.DISABLE_AUTOUPDATER = "1";
   return env;
@@ -47,21 +48,30 @@ export function auditStream(stdout, snapshot, pin) {
       for (const c of m.message?.content ?? []) if (c.type === "tool_use") a.toolUses.push({ id: c.id, name: c.name, input: c.input });
     } else if (m.type === "result") a.result = m;
   }
+  if (a.parseErrors) a.reasons.push(`stream_parse_errors:${a.parseErrors}`); // a dropped line could be a tool_use
   const init = a.init;
   if (!init) a.reasons.push("no_init_event");
   else {
-    const extraTools = (init.tools ?? []).filter((t) => !ALLOWED_RUNTIME_TOOLS.includes(t));
-    if (extraTools.length) a.reasons.push(`tools_not_read_only:${extraTools.join(",")}`);
-    if ((init.mcp_servers ?? []).length) a.reasons.push(`mcp_servers_present:${init.mcp_servers.map((s) => s.name ?? s).join(",")}`);
+    if (!Array.isArray(init.tools)) a.reasons.push("init_tools_unreported");
+    else {
+      const extraTools = init.tools.filter((t) => !ALLOWED_RUNTIME_TOOLS.includes(t));
+      if (extraTools.length) a.reasons.push(`tools_not_read_only:${extraTools.join(",")}`);
+    }
+    if (!Array.isArray(init.mcp_servers)) a.reasons.push("init_mcp_servers_unreported");
+    else if (init.mcp_servers.length) a.reasons.push(`mcp_servers_present:${init.mcp_servers.map((s) => s.name ?? s).join(",")}`);
     if (init.permissionMode !== "dontAsk") a.reasons.push(`permission_mode:${init.permissionMode}`);
-    if (init.cwd && init.cwd !== snapshot) a.reasons.push("cwd_not_snapshot");
+    if (typeof init.cwd !== "string") a.reasons.push("init_cwd_unreported");
+    else if (realish(init.cwd) !== realish(snapshot)) a.reasons.push("cwd_not_snapshot");
   }
   const denied = new Set((a.result?.permission_denials ?? []).map((d) => d.tool_use_id));
   const paths = [];
   for (const t of a.toolUses) {
     if (!ALLOWED_RUNTIME_TOOLS.includes(t.name)) { a.reasons.push(`non_read_tool_call:${t.name}`); continue; }
-    for (const k of ["file_path", "path", "notebook_path"]) if (typeof t.input?.[k] === "string") {
-      const inside = insideRoot(snapshot, t.input[k]);
+    // Glob/Grep patterns can name directories too: an absolute, ~ or .. pattern is audited like a path.
+    const pat = typeof t.input?.pattern === "string" && /^(\/|~)|(^|\/)\.\.(\/|$)/.test(t.input.pattern) ? ["pattern"] : [];
+    for (const k of ["file_path", "path", "notebook_path", ...pat]) if (typeof t.input?.[k] === "string") {
+      const v = t.input[k];
+      const inside = !/(^|\/)\.\.(\/|$)/.test(v) && !v.startsWith("~") && insideRoot(snapshot, v);
       paths.push({ tool: t.name, path: t.input[k], inside, denied: denied.has(t.id) });
       if (!inside && !denied.has(t.id)) a.reasons.push(`tool_read_outside_snapshot:${t.input[k]}`);
       if (!inside && denied.has(t.id)) a.warnings.push(`outside-snapshot read attempt denied by the host: ${t.input[k]}`);
@@ -86,30 +96,41 @@ export function auditStream(stdout, snapshot, pin) {
   return a;
 }
 
+/** Numeric usage fields summed over attempts (first-attempt usage is never dropped). */
+export function sumUsage(list) {
+  const out = {};
+  for (const u of list.filter(Boolean)) for (const [k, v] of Object.entries(u)) if (typeof v === "number") out[k] = (out[k] ?? 0) + v;
+  return Object.keys(out).length ? out : null;
+}
+
 export async function run(ctx) {
   const { input, pin, prompt, jsonSchema, validate, log } = ctx;
   const bin = pin.config.bin ?? "claude";
   const argv = buildArgv(pin, jsonSchema);
-  const out = { argv: [bin, ...argv.map((x) => (x.length > 200 ? `<${x.length} chars>` : x))], attempts: [], reasons: [], warnings: [], toolAudit: [] };
+  // Evidence keeps long values as length + hash; the bypass guard in runProcess sees the full argv before spawn.
+  const out = { argv: [bin, ...argv.map((x) => (x.length > 200 ? `<${x.length} chars sha256:${sha256(x)}>` : x))], attempts: [], reasons: [], warnings: [], toolAudit: [] };
   const deadline = Date.now() + pin.timeoutMs;
+  const env = buildEnv(process.env, pin.envPassthrough ?? pin.config.env_passthrough ?? []);
   let text = prompt;
   for (let attempt = 0; attempt < 2; attempt++) {
     const remaining = deadline - Date.now();
-    if (remaining < 30_000) { out.reasons.push("timeout_before_retry"); break; }
+    if (attempt > 0 && remaining < 30_000) { out.reasons.push("timeout_before_retry"); break; }
     const label = attempt ? "retry" : "first";
-    const p = await runProcess({ bin, args: argv, cwd: input.snapshot, env: buildEnv(), input: text, timeoutMs: remaining });
+    const p = await runProcess({ bin, args: argv, cwd: input.snapshot, env, input: text, timeoutMs: remaining });
     log(`${label}.stdout.jsonl`, redact(p.stdout));
     log(`${label}.stderr.log`, redact(p.stderr));
     const a = auditStream(p.stdout, input.snapshot, pin);
-    const rec = { label, code: p.code, signal: p.signal, timedOut: p.timedOut, durationMs: p.durationMs, spawnError: p.spawnError, auditReasons: a.reasons, warnings: a.warnings, usage: a.usage };
+    const rec = { label, code: p.code, signal: p.signal, timedOut: p.timedOut, durationMs: p.durationMs, spawnError: p.spawnError, pipesAbandoned: p.pipesAbandoned, leftoversKilled: p.leftoversKilled, signals: p.signals, auditReasons: a.reasons, warnings: a.warnings, usage: a.usage, reported: a.reported };
     out.attempts.push(rec);
     out.toolAudit.push({ attempt: label, initTools: a.init?.tools ?? null, mcpServers: a.init?.mcp_servers ?? null, permissionMode: a.init?.permissionMode ?? null, toolCalls: a.toolUses.map((t) => t.name), paths: a.paths });
-    out.reported = a.reported;
-    out.usage = a.usage;
+    if (!out.reported || a.reported.model !== pin.model) out.reported = a.reported; // a mismatch on any attempt stays visible
+    out.usage = sumUsage(out.attempts.map((x) => x.usage));
     out.warnings.push(...a.warnings);
     if (p.spawnError) { out.reasons.push(`spawn_error:${p.spawnError}`); break; }
     if (p.timedOut) { out.reasons.push("timeout"); break; }
+    if (p.pipesAbandoned) { out.reasons.push("pipes_abandoned: a descendant kept the host's stdout/stderr open; the stream may be truncated"); break; }
     if (a.reasons.length) { out.reasons.push(...a.reasons); break; }   // audit failures are never retried
+    if (a.reported.model !== pin.model) { out.reasons.push(`reported_model_mismatch:${a.reported.model}`); break; } // never retried on another model
     if (p.code !== 0) { out.reasons.push(`exit_code:${p.code}`); break; }
     const v = validate(a.output);
     rec.validation = v.errors;

@@ -1,6 +1,7 @@
 // `plan`: review grade, reviewer selection and pace. Pure functions; no network, no token files.
 // Usage data is whatever the caller saved from the T3 MCP tool `provider_usage_limits`.
 import { HOSTS } from "./policy.mjs";
+import { parseDiffPaths } from "./diff.mjs";
 
 // ---------------------------------------------------------------- globs
 /** Glob -> RegExp over a repo-relative POSIX path. `**` spans directories, `*` and `?` do not. */
@@ -29,14 +30,7 @@ export function pathsFromDiffText(text) {
     for (const l of text.split("\n")) { const t = l.replace(/#.*$/, "").trim(); if (t) out.add(t); }
     return [...out];
   }
-  const strip = (s) => s.replace(/\t.*$/, "").trim().replace(/^"(.*)"$/, "$1");
-  for (const line of text.split("\n")) {
-    let m;
-    if ((m = line.match(/^diff --git a\/(.+?) b\/(.+)$/))) { out.add(m[1]); out.add(m[2]); }
-    else if ((m = line.match(/^(?:\+\+\+|---) (?:[ab]\/)?(.+)$/)) && strip(m[1]) !== "/dev/null") out.add(strip(m[1]));
-    else if ((m = line.match(/^rename (?:from|to) (.+)$/))) out.add(m[1].trim());
-  }
-  return [...out];
+  return parseDiffPaths(text).paths;
 }
 
 // ---------------------------------------------------------------- grade
@@ -59,6 +53,9 @@ export function gradeOf(policy, dimensions, paths) {
 /**
  * Per-host pace from a provider_usage_limits payload.
  * Returns { decision: "use"|"skip"|"ask", pace, worstWindow, windows[], reason }.
+ * Expected cost (hosts.<h>.expected_cost, keyed by window kind, e.g. "session" for a 5 h window and "weekly")
+ * is compared with every window's remaining fraction. A window that resets within pace.reset_soon_minutes is
+ * not paced (rf / tiny remaining time would blow up): it only has to cover the expected cost.
  */
 export function hostPace(policy, host, usage, grade) {
   const hp = policy.hosts[host];
@@ -81,19 +78,31 @@ export function hostPace(policy, host, usage, grade) {
     const rf = w.remainingFraction;
     const reset = Date.parse(w.resetsAt ?? "");
     const dur = Number(w.windowDurationSec) * 1000;
-    if (typeof rf !== "number" || !Number.isFinite(reset) || !(dur > 0) || !Number.isFinite(observedAt))
-      return { id: w.id, computable: false, reason: "missing remainingFraction/resetsAt/windowDurationSec/observedAt" };
+    if (typeof rf !== "number" || !Number.isFinite(rf) || rf < 0 || rf > 1)
+      return { id: w.id, computable: false, reason: `remainingFraction not a number in [0, 1] (${rf})` };
+    if (!Number.isFinite(reset) || !(dur > 0) || !Number.isFinite(observedAt))
+      return { id: w.id, computable: false, reason: "missing resetsAt/windowDurationSec/observedAt" };
     const rtf = (reset - observedAt) / dur;
     if (!(rtf > 0)) return { id: w.id, computable: false, reason: "window already reset at observation time (stale data)" };
-    return { id: w.id, kind: w.kind, computable: true, remainingFraction: rf, remainingTimeFraction: Math.min(rtf, 1), pace: rf / Math.min(rtf, 1) };
+    const resetsInMin = Math.round((reset - observedAt) / 60000);
+    if (typeof paceCfg.reset_soon_minutes === "number" && resetsInMin <= paceCfg.reset_soon_minutes)
+      return { id: w.id, kind: w.kind, computable: true, resetSoon: true, resetsInMin, remainingFraction: rf, remainingTimeFraction: Math.min(rtf, 1), pace: null };
+    return { id: w.id, kind: w.kind, computable: true, resetsInMin, remainingFraction: rf, remainingTimeFraction: Math.min(rtf, 1), pace: rf / Math.min(rtf, 1) };
   });
   const bad = rows.filter((r) => !r.computable);
   if (bad.length) return { decision: "ask", windows: rows, reason: bad.map((r) => `${r.id}: ${r.reason}`).join("; ") };
-  const worst = rows.reduce((a, b) => (b.pace < a.pace ? b : a));
   const cost = hp.expected_cost ?? {};
   const over = rows.filter((r) => typeof cost[r.kind] === "number" && cost[r.kind] > r.remainingFraction);
-  const base = { pace: worst.pace, worstWindow: worst.id, windows: rows };
-  if (over.length) return { ...base, decision: "skip", reason: `expected cost exceeds remaining on ${over.map((r) => `${r.id} (${cost[r.kind]} > ${r.remainingFraction})`).join(", ")}` };
+  const paced = rows.filter((r) => r.pace !== null);
+  const soonNote = rows.filter((r) => r.resetSoon).map((r) => `${r.id} resets in ${r.resetsInMin} min (not paced)`).join("; ");
+  const overText = (list) => list.map((r) => `${r.id} (${cost[r.kind]} > ${r.remainingFraction})`).join(", ");
+  // Cost over a window that resets soon: waiting is an option, so a human decides.
+  if (over.length && over.every((r) => r.resetSoon))
+    return { decision: "ask", pace: null, worstWindow: null, windows: rows, reason: `expected cost exceeds remaining on ${overText(over)}, but it resets soon (${soonNote}); wait or run anyway?` };
+  if (over.length) return { decision: "skip", pace: paced.length ? Math.min(...paced.map((r) => r.pace)) : null, worstWindow: null, windows: rows, reason: `expected cost exceeds remaining on ${overText(over.filter((r) => !r.resetSoon))}` };
+  if (!paced.length) return { decision: "use", pace: null, worstWindow: null, windows: rows, reason: `every window resets soon and covers the expected cost (${soonNote})` };
+  const worst = paced.reduce((a, b) => (b.pace < a.pace ? b : a));
+  const base = { pace: worst.pace, worstWindow: worst.id, windows: rows, ...(soonNote ? { note: soonNote } : {}) };
   if (worst.pace >= paceCfg.use_at_or_above) return { ...base, decision: "use", reason: `pace ${fmt(worst.pace)} >= ${paceCfg.use_at_or_above}` };
   if (worst.pace >= paceCfg.high_only_at_or_above)
     return grade === "high"
@@ -112,7 +121,7 @@ const fmt = (n) => (Number.isFinite(n) ? n.toFixed(2) : String(n));
 export function plan({ policy, author, dimensions, paths, usage, noUser = false }) {
   if (!HOSTS.includes(author)) throw new Error(`--author must be one of ${HOSTS.join(", ")}`);
   const { grade, reasons, required } = gradeOf(policy, dimensions, paths);
-  const order = (policy.host_order ?? Object.keys(policy.hosts)).filter((h) => policy.hosts[h]);
+  const order = [...new Set(policy.host_order ?? Object.keys(policy.hosts))].filter((h) => policy.hosts[h]);
   const eligible = order.filter((h) => h !== author);
   const hosts = {};
   hosts[author] = { decision: "excluded", reason: "author host is never a reviewer" };

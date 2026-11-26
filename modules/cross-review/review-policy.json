@@ -21,7 +21,9 @@
     "provisional": true,
     "note": "Thresholds are provisional until enough real runs are recorded. pace = remainingFraction / remainingTimeFraction, worst window per host.",
     "use_at_or_above": 1.0,
-    "high_only_at_or_above": 0.6
+    "high_only_at_or_above": 0.6,
+    "reset_soon_minutes": 60,
+    "reset_soon_note": "A window that resets within this many minutes is not paced (remaining / tiny remaining time explodes); it only has to cover expected_cost for its kind, otherwise the plan asks."
   },
   "hosts": {
     "claude": {
@@ -32,7 +34,8 @@
       "effort_map": { "high": "high" },
       "timeout_sec": 1800,
       "usage": { "provider": "claudeAgent", "windows": ["claude:seven_day"] },
-      "expected_cost": {}
+      "expected_cost": {},
+      "env_passthrough": []
     },
     "codex": {
       "id_prefix": "X",
@@ -41,7 +44,11 @@
       "effort_map": { "high": "high" },
       "timeout_sec": 1800,
       "usage": { "provider": "codex", "windows": ["codex:primary"] },
-      "expected_cost": {}
+      "expected_cost": { "weekly": 0.01 },
+      "expected_cost_note": "Measured: the 24-file runner review r1 (2026-11-26) used 0.01 of codex:primary (0.55 -> 0.54).",
+      "allow_code_execution": true,
+      "allow_code_execution_note": "Model-run commands may run interpreters/command substitution, always inside codex's read-only sandbox (no writes, no network). Set false to make any such command incomplete. Reads by programs that do not name a path literally cannot be audited.",
+      "env_passthrough": []
     },
     "antigravity": {
       "id_prefix": "A",
@@ -51,11 +58,14 @@
       "turn_timeout_sec": 600,
       "retry_timeout_sec": 280,
       "groups": [["security"], ["correctness"], ["tests", "contract_docs"]],
+      "max_files_per_turn": 8,
+      "max_bytes_per_turn": 120000,
+      "turn_split_note": "Each dimension group is split into scope-file chunks of at most this many files/bytes so one turn stays well under the proxy's 300 s first-byte wall. Provisional values.",
       "usage": { "provider": "antigravity", "windows": ["antigravity:gemini_5h", "antigravity:gemini_weekly"] },
-      "expected_cost": { "weekly": 0.01 },
-      "expected_cost_note": "Measured: one full view_file review used about 0.01 of the Gemini weekly window (r5/r6, 2026-11-25).",
+      "expected_cost": { "weekly": 0.01, "session": 0.04 },
+      "expected_cost_note": "Measured: one full view_file review used about 0.01 of the Gemini weekly window (r5/r6, 2026-11-25); the 24-file runner review r1 (2026-11-26) used 0.032 of gemini_5h (0.9269 -> 0.8945) and 0.006 of gemini_weekly. session = 5 h window, rounded up.",
       "runtime": {
-        "runtime_root": "~/.t3/tools/antigravity-acp/darwin-arm64/versions",
+        "runtime_root": "~/.t3/tools/antigravity-acp/{platform}-{arch}/versions",
         "profile_root": "~/.t3/userdata/providers/antigravity",
         "expect_agent_version": null
       }

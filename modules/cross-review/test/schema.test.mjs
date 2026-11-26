@@ -99,7 +99,10 @@ test("host JSON schema is strict: every object closed, coverage keys are the run
 test("pinned vs reported: mismatch or missing reported model -> incomplete reasons", () => {
   const pin = { model: "gpt-6.1-sol", effort: "high" };
   assert.deepEqual(checkReported(pin, { model: "gpt-6.1-sol", effort: "high" }), []);
-  assert.deepEqual(checkReported(pin, { model: "gpt-6.1-sol", effort: null }), []);
+  // A host that reports effort must report it (A16/A25); only a host that never reports it opts out.
+  assert.match(checkReported(pin, { model: "gpt-6.1-sol", effort: null }).join(), /reported_effort_unavailable/);
+  assert.match(checkReported(pin, { model: "gpt-6.1-sol" }).join(), /reported_effort_unavailable/);
+  assert.deepEqual(checkReported(pin, { model: "gpt-6.1-sol", effort: null }, { effortReported: false }), []);
   assert.match(checkReported(pin, { model: "gpt-6.1-mini", effort: "high" }).join(), /reported_model_mismatch:gpt-6.1-mini/);
   assert.match(checkReported(pin, { model: "gpt-6.1-sol", effort: "low" }).join(), /reported_effort_mismatch:low/);
   assert.match(checkReported(pin, null).join(), /reported_model_unavailable/);

@@ -12,12 +12,18 @@ import * as antigravity from "../adapters/antigravity.mjs";
 
 export const ADAPTERS = { claude, codex, antigravity };
 
-/** Pinned vs reported. A reported value that is missing or different makes the run incomplete. */
+/**
+ * Pinned vs reported. A reported value that is missing or different makes the run incomplete. For a host that
+ * does not report effort at all (effortReported=false, Claude), effort is recorded as "unreported", never as verified.
+ */
 export function checkReported(pin, reported, { effortReported = true } = {}) {
   const reasons = [];
   if (!reported?.model) reasons.push("reported_model_unavailable");
   else if (reported.model !== pin.model) reasons.push(`reported_model_mismatch:${reported.model}`);
-  if (effortReported && reported?.effort != null && reported.effort !== pin.effort) reasons.push(`reported_effort_mismatch:${reported.effort}`);
+  if (effortReported) {
+    if (reported?.effort == null) reasons.push("reported_effort_unavailable");
+    else if (reported.effort !== pin.effort) reasons.push(`reported_effort_mismatch:${reported.effort}`);
+  }
   return reasons;
 }
 
@@ -48,16 +54,25 @@ export async function runReview(opts, policy, policyPath) {
   }
   const idStart = opts.idStart ?? (prior ? nextIdStart(prior, prefix) : 1);
   const dimensions = opts.dimensions;
+  if (!Array.isArray(dimensions) || !dimensions.length || !dimensions.every((d) => typeof d === "string" && d)) throw new Error("dimensions must be a non-empty list");
 
   const input = buildInput({ repo: opts.repo, rev: opts.rev, diffPath: opts.diff, scope: opts.scope, contextRefs: opts.context, checklist: opts.checklist, briefPath: opts.brief, dimensions, prior, dispositions });
+  try {
+    return await reviewWithInput({ opts, adapter, pin, prefix, policyPath, prior, dispositions, priorIds, idStart, dimensions, input, rawDir });
+  } finally {
+    removeSnapshot(input.snapshot);
+  }
+}
+
+async function reviewWithInput({ opts, adapter, pin, prefix, policyPath, prior, dispositions, priorIds, idStart, dimensions, input, rawDir }) {
   const promptFor = (o = {}) => buildPrompt(input, { prefix, idStart, priorIds, ...o });
   const prompt = promptFor();
   const jsonSchema = jsonSchemaFor(dimensions, { prior: priorIds.length > 0 });
   fs.writeFileSync(path.join(opts.out, "prompt.txt"), prompt);
-  const mkValidate = (dims, mustCoverPrior) => (raw) => {
+  const mkValidate = (dims, mustCoverPrior, start = idStart) => (raw) => {
     const p = parseReviewText(raw);
     if (p.error) return { errors: [p.error] };
-    return { value: p.value, errors: validateReview(p.value, { dimensions: dims, prefix, idStart, scope: input.scopeLines, priorIds, mustCoverPrior }) };
+    return { value: p.value, errors: validateReview(p.value, { dimensions: dims, prefix, idStart: start, scope: input.scopeLines, priorIds, mustCoverPrior }) };
   };
   const log = (name, text) => fs.writeFileSync(path.join(rawDir, `${opts.host}-${name}`), text);
   const t0 = Date.now();
@@ -67,7 +82,7 @@ export async function runReview(opts, policy, policyPath) {
     res = await adapter.run({
       input, pin, prompt, promptFor, jsonSchema, prefix, idStart, priorIds, dimensions, log, workDir: rawDir,
       validate: mkValidate(dimensions, priorIds),
-      validateGroup: (raw, dims, mustCover) => mkValidate(dims, mustCover)(raw),
+      validateGroup: (raw, dims, mustCover, start = idStart) => mkValidate(dims, mustCover, start)(raw),
     });
   } catch (e) {
     res = { reasons: [`adapter_error:${e.message}`], warnings: [], attempts: [] };
@@ -82,7 +97,8 @@ export async function runReview(opts, policy, policyPath) {
   try { snapshotUnchanged = JSON.stringify(hashTree(input.snapshot)) === JSON.stringify(input.snapshotHashBefore); } catch { snapshotUnchanged = false; }
   if (!snapshotUnchanged) reasons.push("snapshot_modified");
   removeSnapshot(input.snapshot);
-  reasons.push(...checkReported(pin, res.reported, { effortReported: res.effortReported !== false }));
+  const effortReported = res.effortReported !== false;
+  reasons.push(...checkReported(pin, res.reported, { effortReported }));
   if (res.review) {
     const final = validateReview(res.review, { dimensions, prefix, idStart, scope: input.scopeLines, priorIds });
     if (final.length) reasons.push(...final.map((e) => `merged_review_invalid:${e}`));
@@ -99,7 +115,8 @@ export async function runReview(opts, policy, policyPath) {
     warnings,
     pinned: { model: pin.model, effort: pin.effort, review_effort: pin.review_effort, policyFile: policyPath, policySha256: sha256(fs.readFileSync(policyPath)) },
     reported: res.reported ?? null,
-    matchesPinned: checkReported(pin, res.reported, { effortReported: res.effortReported !== false }).length === 0,
+    matchesPinned: checkReported(pin, res.reported, { effortReported }).length === 0,
+    effortCheck: effortReported ? "verified against host report" : "unreported (host does not report effort; pinned value only)",
     prompt: { sha256: sha256(prompt), chars: prompt.length, file: "prompt.txt", jsonSchemaSha256: sha256(JSON.stringify(jsonSchema)) },
     timeoutMs: pin.timeoutMs,
     startedAt, finishedAt: new Date().toISOString(), durationMs: Date.now() - t0,
@@ -108,7 +125,7 @@ export async function runReview(opts, policy, policyPath) {
       repo: input.repo, rev: input.rev, resolvedRev: input.resolvedRev,
       diff: { path: path.resolve(opts.diff), sha256: input.diffSha256, files: input.diffFiles },
       brief: { path: path.resolve(opts.brief), sha256: input.briefSha256 },
-      checklist: input.checklist.map((c) => ({ path: path.resolve(c.path), sha256: sha256(c.text) })),
+      checklist: input.checklist.map((c) => ({ path: c.path, source: c.source, sha256: c.sha256 })),
       files: input.files, dimensions,
       reReview: prior ? { priorIds, idStart, dispositions } : null,
     },
@@ -117,12 +134,13 @@ export async function runReview(opts, policy, policyPath) {
     toolAudit: res.toolAudit ?? null,
     attempts: res.attempts ?? [],
     hostLimits: res.limits ?? [],
-    extra: { groups: res.groups, groupVerdicts: res.groupVerdicts, agent: res.agent, sessionCleanup: res.sessionCleanup, process: res.process, authRequired: res.authRequired },
+    extra: { groups: res.groups, groupVerdicts: res.groupVerdicts, agent: res.agent, sessionCleanup: res.sessionCleanup, process: res.process, authRequired: res.authRequired, hostVersion: res.hostVersion, codeExecution: res.codeExecution },
     review: status === "complete" ? res.review : null,
     reviewIfIncomplete: status === "incomplete" ? res.review ?? null : undefined,
   };
   fs.writeFileSync(path.join(opts.out, "evidence.json"), JSON.stringify(evidence, null, 2));
   fs.writeFileSync(path.join(opts.out, "review.json"), JSON.stringify(evidence.review, null, 2));
+  fs.writeFileSync(path.join(opts.out, "summary.txt"), summarize(evidence, path.join(opts.out, "evidence.json")) + "\n");
   return evidence;
 }
 

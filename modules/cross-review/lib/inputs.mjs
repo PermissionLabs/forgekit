@@ -5,6 +5,8 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+import { parseDiffPaths } from "./diff.mjs";
 import { schemaText } from "./schema.mjs";
 
 export const sha256 = (b) => crypto.createHash("sha256").update(b).digest("hex");
@@ -16,10 +18,13 @@ export function safeRel(p) {
   return n;
 }
 
-/** A list argument: an existing file holding one path per line (# comments), or a comma-separated list. */
+/**
+ * A list argument: `@<file>` reads one path per line (# comments) from that file; anything else is a
+ * comma-separated list. A bare file name is never guessed to be a list file (it may be a repo path).
+ */
 export function readList(arg) {
   if (!arg) return [];
-  const text = fs.existsSync(arg) && fs.statSync(arg).isFile() ? fs.readFileSync(arg, "utf8") : arg.split(",").join("\n");
+  const text = arg.startsWith("@") ? fs.readFileSync(arg.slice(1), "utf8") : arg.split(",").join("\n");
   const out = [];
   for (const raw of text.split("\n")) {
     const l = raw.replace(/#.*$/, "").trim();
@@ -62,6 +67,27 @@ export function hashTree(root) {
   return out;
 }
 
+/**
+ * Checklist text. A relative path is a repo path read from the git object at `rev` (never the working tree);
+ * an absolute path inside the repository is treated the same way; an absolute path outside the repository is
+ * read from disk. Each entry records its source and hash in the evidence.
+ */
+export function readChecklist(repo, rev, p) {
+  const s = String(p);
+  let rel = null;
+  if (path.isAbsolute(s)) {
+    const top = realish(repo), real = realish(s);
+    if (top && real && (real === top || real.startsWith(top + path.sep))) rel = path.relative(top, real);
+  } else rel = s;
+  if (rel !== null) {
+    const r = safeRel(rel);
+    const buf = gitBlob(repo, rev, r);
+    return { path: r, source: `git:${rev}`, text: buf.toString("utf8"), sha256: sha256(buf) };
+  }
+  const buf = fs.readFileSync(s);
+  return { path: path.resolve(s), source: "file", text: buf.toString("utf8"), sha256: sha256(buf) };
+}
+
 export function removeSnapshot(dir) {
   if (!dir || !fs.existsSync(dir)) return;
   try { chmodTree(dir, 0o600, 0o700); } catch {}
@@ -73,7 +99,8 @@ const lineCount = (buf) => { const s = buf.toString("utf8"); if (!s) return 0; c
 /**
  * buildInput(opts) -> ReviewInput
  * opts: { repo, rev, diffPath, scope[], contextRefs[], checklist[], briefPath, dimensions[], prior?, dispositions? }
- * The snapshot is a fresh 0555/0444 directory outside the repository; the caller removes it with removeSnapshot().
+ * The snapshot is a private mkdtemp directory (0500 dirs / 0400 files, owner only) outside the repository;
+ * the caller removes it with removeSnapshot().
  */
 export function buildInput(opts) {
   const repo = path.resolve(opts.repo);
@@ -83,7 +110,7 @@ export function buildInput(opts) {
   const scope = opts.scope.map(safeRel);
   if (!scope.length) throw new Error("--scope is empty");
   const contextRefs = (opts.contextRefs ?? []).map(safeRel).filter((p) => !scope.includes(p));
-  const checklist = (opts.checklist ?? []).map((p) => ({ path: p, text: fs.readFileSync(p, "utf8") }));
+  const checklist = (opts.checklist ?? []).map((p) => readChecklist(repo, resolvedRev, p));
 
   const snapshot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cross-review-snap-")));
   const files = [];
@@ -100,11 +127,11 @@ export function buildInput(opts) {
     fs.writeFileSync(path.join(meta, "diff.patch"), diffText);
     fs.writeFileSync(path.join(meta, "brief.md"), briefText);
     if (checklist.length) fs.writeFileSync(path.join(meta, "checklist.md"), checklist.map((c) => c.text).join("\n\n"));
-    chmodTree(snapshot, 0o444, 0o555);
+    chmodTree(snapshot, 0o400, 0o500);
   } catch (e) { removeSnapshot(snapshot); throw e; }
 
   const scopeLines = new Map(files.filter((f) => f.kind === "scope").map((f) => [f.path, f.lines]));
-  const diffFiles = [...new Set([...diffText.matchAll(/^\+\+\+ (?:b\/)?(.+)$/gm)].map((m) => m[1].trim()).filter((p) => p !== "/dev/null"))];
+  const diffFiles = parseDiffPaths(diffText).newPaths;
   return {
     repo, rev: opts.rev, resolvedRev, snapshot, files, scope, contextRefs, scopeLines,
     diffText, diffSha256: sha256(diffText), diffFiles, diffFilesNotInScope: diffFiles.filter((p) => !scope.includes(p)),
@@ -162,17 +189,42 @@ export function redact(s) {
     .replace(/https:\/\/accounts\.google\.com\/\S+/g, "[auth-url-redacted]");
 }
 
-/** Real path of `p`, resolving the longest existing prefix (so not-yet-existing paths still compare correctly). */
+/**
+ * Real path of `p`, resolving the longest existing prefix (so not-yet-existing paths still compare correctly).
+ * null when the path cannot be resolved (e.g. a dangling symlink on the way): callers treat that as outside.
+ */
 export function realish(p) {
   let base = path.resolve(p);
   const rest = [];
-  while (!fs.existsSync(base) && path.dirname(base) !== base) { rest.unshift(path.basename(base)); base = path.dirname(base); }
-  try { return path.join(fs.realpathSync(base), ...rest); } catch { return path.resolve(p); }
+  const present = (x) => { try { fs.lstatSync(x); return true; } catch { return false; } };
+  while (!present(base) && path.dirname(base) !== base) { rest.unshift(path.basename(base)); base = path.dirname(base); }
+  try { return path.join(fs.realpathSync(base), ...rest); } catch { return null; }
 }
 
-/** True when `p` (absolute, or relative to root) resolves inside root; existing symlinks along the path are resolved. */
+/**
+ * A tool-reported path as a plain filesystem path, or null when it is not confidently one: any URI scheme
+ * other than file: (case-insensitive), a file: URI with a non-local host or encoded separators, NUL bytes.
+ */
+export function plainPath(p) {
+  const s = String(p);
+  if (s.includes("\0")) return null;
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(s)) {
+    if (!/^file:/i.test(s)) return null;
+    try {
+      const u = new URL(s);
+      if (u.protocol !== "file:" || (u.host && u.host !== "localhost")) return null;
+      return fileURLToPath(u);
+    } catch { return null; }
+  }
+  return s;
+}
+
+/** True when `p` (absolute, relative to root, or a file: URI) resolves inside root; symlinks along the path are resolved. */
 export function insideRoot(root, p) {
+  const plain = plainPath(p);
+  if (plain === null) return false;
   const r = realish(root);
-  const real = realish(path.resolve(root, String(p).replace(/^file:\/\//, "")));
+  const real = realish(path.resolve(root, plain));
+  if (!r || !real) return false;
   return real === r || real.startsWith(r + path.sep);
 }

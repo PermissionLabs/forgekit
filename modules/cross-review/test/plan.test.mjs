@@ -109,10 +109,71 @@ test("pace thresholds: >=1 use; 0.6-1 high only; <0.6 skip", () => {
 });
 
 test("expected cost greater than remaining -> skip even when pace is fine", () => {
-  // gemini weekly 0.005 remaining, reset in 0.5h -> pace huge, but expected cost 0.01 > 0.005
-  const r = hostPace(policy, "antigravity", usage({ gemWeek: 0.005, gemWeekReset: 0.5 }), "high");
+  // gemini weekly 0.005 remaining, reset in 5h -> pace large, but expected cost 0.01 > 0.005
+  const r = hostPace(policy, "antigravity", usage({ gemWeek: 0.005, gemWeekReset: 5 }), "high");
   assert.equal(r.decision, "skip");
   assert.match(r.reason, /expected cost exceeds remaining/);
+});
+
+test("expected cost is checked against the 5 h (session) window too", () => {
+  // weekly is healthy; the 5 h window has 0.03 left, below the session cost estimate.
+  const r = hostPace(policy, "antigravity", usage({ gem5h: 0.03 }), "high");
+  assert.equal(policy.hosts.antigravity.expected_cost.session > 0.03, true);
+  assert.equal(r.decision, "skip");
+  assert.match(r.reason, /antigravity:gemini_5h/);
+});
+
+test("a window that resets within reset_soon_minutes is not paced (no 60x pace blow-up)", () => {
+  // Codex 0.55 left, resets in 30 min: rf / rtf would be ~185. It is reported as reset-soon instead.
+  const r = hostPace(policy, "codex", usage({ codex: 0.55, codexReset: 0.5 }), "standard");
+  assert.equal(r.decision, "use");
+  assert.equal(r.pace, null);
+  assert.equal(r.windows[0].resetSoon, true);
+  assert.match(r.reason, /resets soon/);
+  // Not enough left for the expected cost and it resets soon -> a human decides (wait or run).
+  const low = hostPace(policy, "codex", usage({ codex: 0.005, codexReset: 0.5 }), "standard");
+  assert.equal(low.decision, "ask");
+  assert.match(low.reason, /resets soon/);
+  // Without the knob the old arithmetic applies.
+  const p = clone(policy);
+  delete p.pace.reset_soon_minutes;
+  assert.ok(hostPace(p, "codex", usage({ codex: 0.55, codexReset: 0.5 }), "standard").pace > 60);
+});
+
+test("pace: NaN or out-of-range remainingFraction -> ask, never skip", () => {
+  for (const bad of [NaN, -0.1, 1.5]) {
+    const r = hostPace(policy, "codex", usage({ codex: bad }), "standard");
+    assert.equal(r.decision, "ask", String(bad));
+    assert.match(r.reason, /remainingFraction/);
+  }
+});
+
+test("host_order duplicates are rejected by the policy check and never double-select a host", () => {
+  const p = clone(policy);
+  p.host_order = ["codex", "codex", "antigravity", "claude"];
+  assert.match(policyProblems(p).join(), /host_order: codex listed twice/);
+  const r = plan({ policy: p, author: "claude", dimensions: ["security"], paths: [], usage: usage() });
+  assert.equal(new Set(r.selected.map((x) => x.host)).size, r.selected.length);
+  assert.deepEqual(r.selected.map((x) => x.host), ["codex", "antigravity"]);
+  p.host_order = ["codex", "nope"];
+  assert.match(policyProblems(p).join(), /host_order: nope is not a configured host/);
+});
+
+test("git-quoted diff headers are decoded before path rules apply", () => {
+  const q = '"a/.github/workflows/\\353\\260\\260\\355\\217\\254.yml"';
+  const qb = q.replace('"a/', '"b/');
+  const diff = `diff --git ${q} ${qb}\n--- ${q}\n+++ ${qb}\n@@ -1 +1 @@\n-a\n+b\n`;
+  const paths = pathsFromDiffText(diff);
+  assert.deepEqual(paths, [".github/workflows/배포.yml"]);
+  const g = gradeOf(policy, ["correctness"], paths);
+  assert.equal(g.grade, "high");
+  assert.equal(g.required, 2);
+});
+
+test("hunk body lines starting with --- / +++ are not file headers", () => {
+  const diff = "diff --git a/doc.sql b/doc.sql\n--- a/doc.sql\n+++ b/doc.sql\n@@ -1,2 +1,2 @@\n--- auth comment\n+++ migration note\n ctx\n";
+  assert.deepEqual(pathsFromDiffText(diff), ["doc.sql"]);
+  assert.equal(gradeOf(policy, ["correctness"], pathsFromDiffText(diff)).grade, "standard");
 });
 
 test("selection: author is never a reviewer; standard -> 1, high -> 2 distinct hosts", () => {
