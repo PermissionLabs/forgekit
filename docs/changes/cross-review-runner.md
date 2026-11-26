@@ -99,7 +99,8 @@ flowchart TD
   one deduplicated summary (same file within a few lines + similar claim/evidence → one group, every
   host's id kept).
 - Codex `allow_code_execution` (policy, default `true`): model-run commands may run interpreters
-  under the OS sandbox; `false` makes any such command incomplete. Other hosts cannot enable it.
+  under the OS sandbox. Since r3 it only decides whether node's package dir is granted; code execution
+  seen in the transcript is an evidence warning. Other hosts cannot enable it.
 - Codex OS sandbox (r2, user decision "OS-enforced confinement instead of shell parsing"): the runner
   generates a Codex permission profile (`default_permissions` + `permissions.<name>.filesystem`, a
   random name per run) that Codex compiles into the Seatbelt profile of every model-run command:
@@ -107,8 +108,8 @@ flowchart TD
   denied, no writes, no network. `codex exec` gets no `-s` (it would override the profile with
   full-disk read; verified). A self-test through `codex sandbox` (no model call) must show an outside
   probe read, a Codex-home listing and a snapshot write denied and a snapshot read allowed, else the
-  run is `incomplete` before codex exec starts. No Seatbelt → `no_os_sandbox` unless
-  `hosts.codex.os_sandbox: "audit_only"`. The requested design (an outer `sandbox-exec` around
+  run is `incomplete` before codex exec starts. No Seatbelt → always `no_os_sandbox` (r3 removed the
+  `audit_only` mode). The requested design (an outer `sandbox-exec` around
   `codex exec` with a runner-written SBPL) was tried first and is impossible: macOS rejects a nested
   `sandbox_apply` inside any restrictive profile (even `(deny file-write*) (allow file-write*
   (subpath "/"))`), and Codex starts every command through `sandbox-exec`, so every command failed
@@ -117,6 +118,26 @@ flowchart TD
   (literal outside path to a file-reading command or redirection, `cd` out, cwd outside, disallowed
   code execution, tool-like lines, unreadable header) are `incomplete`; the rest are warnings. The r1
   R2 rule (literal paths inside interpreter programs → incomplete) is removed.
+- r3 simplification (orchestrator decision: "the OS sandbox is the primary control"): once the
+  self-test has passed, the Codex shell-command audit is **evidence only** and never makes a run
+  incomplete (every command finding is a `shell audit (evidence only)` warning). Incomplete reasons
+  stay only for what the sandbox does not govern: the header (model, effort, `sandbox`, `approval`,
+  workdir), an unreadable transcript, and non-shell tool sections (MCP, web search, `apply_patch`).
+  `os_sandbox: "audit_only"` is removed: without an OS sandbox the run is always `no_os_sandbox`. The
+  sandbox denial counter (`deniedOps`) is dropped: plain-mode output has no marker that separates a
+  real denial from printed text ("not counted" is recorded in the evidence). Why: r1–r3 each found new
+  audit bypasses and false positives (A35–A38, A36/X10, A49, A51, X21; r3's only incomplete reason was
+  `ls -l` of the allowed node binary), while the self-tested profile already decides what any command
+  can read.
+- r3 sandbox profile: runtime grants are the exact versioned package dir (basename starts with a
+  version, ≤ 3 levels above the binary) or npm package dir, otherwise the binary file itself — never a
+  shared prefix; grants that are or contain `/`, `$HOME`, `CODEX_HOME` or a denied path, and runtime
+  grants inside a denied path, are refused (`os_sandbox_profile_refused`); denials are written after
+  the grants. The self-test runs `codex sandbox` with the exact exec config flags
+  (`configArgs`: profile, approval, web_search, every `--disable`) and `CODEX_HOME` = an empty private
+  dir (`codex sandbox` has no `--ignore-user-config`), and also probes harmless files in
+  `/private/tmp` and `$HOME`. The bypass guard accepts a sensitive `-c` only when it is byte-for-byte a
+  value the runner generated (`allowedConfig`).
 - Dispositions use the requested vocabulary `fixed|followup|accepted|blocked`; the README maps them to
   the change-record vocabulary.
 
@@ -125,7 +146,7 @@ flowchart TD
 | Guarantee | Claude | Codex | Antigravity |
 | --- | --- | --- | --- |
 | Read-only tools | `--tools Read,Grep,Glob`, `--allowedTools` same, `--permission-mode dontAsk`, `--permission-prompts none`, `--restricted` | generated permission profile without write entries (header `sandbox: read-only`), `-c approval_policy="never"` | `enabledTools:["view_file"]`, fs/terminal false, `reject_once` |
-| Read confinement | `--restricted` (host-enforced; an outside read was denied in the flag probe) + audit | OS-enforced Seatbelt profile (self-tested per run) + secondary audit | audit |
+| Read confinement | `--restricted` (host-enforced; an outside read was denied in the flag probe) + audit | OS-enforced Seatbelt profile (self-tested per run); shell audit is evidence only | audit |
 | Network | no web/shell tools, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` | profile has no network entry, `-c web_search="disabled"` | web tools not enabled |
 | MCP | `--strict-mcp-config --mcp-config '{"mcpServers":{}}'`, `--safe-mode` | `--ignore-user-config`, `--disable plugins`/`apps` | `mcpServers: []`, isolated home without `config/` |
 | Delegation | no Agent tool | `--disable multi_agent`, `multi_agent_v2` | `invoke_subagent` not enabled |
@@ -141,6 +162,11 @@ flowchart TD
 
 ## Verification
 
+- After the r3 fixes (2026-11-26): `node --test modules/cross-review/test/*.test.mjs`: 126 tests pass
+  (8 files; the real-codex `codex sandbox` self-test with the exact exec flags ran, not skipped). Run
+  against the e64a80c sources (new tests, old code; Antigravity/plan helpers shimmed so the file
+  loads), 29 of the new/changed tests fail there. `scripts/check-harness-sync.sh --forgekit` in sync;
+  `scripts/test-check-harness-sync.sh` passes (see the r3 cycle row).
 - After the r2 fixes (2026-11-26): `node --test modules/cross-review/test/*.test.mjs`: 115 tests pass
   (8 files, new `sandbox.test.mjs`); run against the c8a846c sources, 23 of the new/changed tests fail
   there (the A43/A24/A46 test-only additions pass on both). `scripts/check-harness-sync.sh --forgekit`
@@ -182,6 +208,13 @@ flowchart TD
 | Claude | 484d0da | complete | claude-opus-5-5 (init + modelUsage) | 37 s | $0.15 list price, 3,588 output tokens | 3 med, 2 low (C1–C5) |
 | Antigravity | 6ba9ad6 | complete | gemini-4-neon / high (config + proxy `gemini-4-neon-high` on both calls) | 235 s (one turn, 229 s) | 37,728 tokens (23,498 thought); quota delta not measurable, see note | 1 high, 2 med, 1 low (A1–A4) |
 | Codex under the OS sandbox (r2) | scratch repo, 1 file | incomplete by design | gpt-6.1-sol / high (header; codex-cli 0.172.0) | ~1 min | 24,481 tokens | draft: 1 med (X1, the planted `a - b` bug) kept as `reviewIfIncomplete` |
+| Codex, narrowed r3 profile | scratch repo, 1 file | complete | gpt-6.1-sol / high (header; codex-cli 0.172.0) | 11 s | 12,296 tokens | 1 med (X1, the planted `a + b` in `sub`) |
+
+r3 smoke: read roots `:minimal`, the snapshot, `~/.codex/packages/standalone/releases/0.172.0-aarch64-apple-darwin`,
+`~/.local/share/node/v22.23.5`; denied `/private/tmp`, `/private/var/tmp`. Self-test: outside,
+`/private/tmp` and `$HOME` probe reads, Codex-home listing and snapshot write denied, snapshot read
+ok, user config not loaded. One command (`cat sub.mjs`), no warnings, argv without `-s`; the probe
+directories were removed.
 
 r2 smoke: the brief asked the model to try `cat /etc/hosts | head -1` and `ls ~` once. Self-test ok;
 `ls ~` was refused by the sandbox (the model reported `Operation not permitted`; Codex did not list
@@ -250,6 +283,38 @@ it is well under the r5/r6 full reviews that measured ~0.01 weekly.
 
 | 5 (r2) | Re-review of f1780ef..c8a846c: Antigravity A35–A46 (complete, block); Codex incomplete (`tool_read_outside_snapshot:5`, all literal paths inside its own `node -e` repros = R2), draft X10–X17 read from the raw `-o` file for information only | High: the shell audit kept being bypassed (A35/X11 `$'..'`, A36/X10 assignment pre-pass, A37/X13 redirection/prefix options, A38/X14 `/?` and non-ASCII roots) and false-positived on harmless programs (R2); X12 non-zero Antigravity exit ignored. Med/low: A39, A41, A43/X17, X15, X16, A40, A42, A44–A46. Unverified priors: X1/A11, X3/A19/A6, X6, X8/A15, A10, A24. Operator: draft not saved when incomplete, reasons only counted, merge accepted status-less review.json, gradeReasons/unmatched, cost seeds. | User decision: OS-enforced confinement for Codex (Seatbelt permission profile + self-test; outer sandbox-exec proved impossible), shell audit demoted to warnings except clear violations; every finding fixed with tests (A46 partly followup); operator items implemented. |
 
+| 6 (r3) | Re-review of c8a846c..e64a80c: Codex ran to completion under the first production OS sandbox (922 s, 222,195 tokens) but was incomplete only by the secondary audit (`ls -l` of the allowed node binary, a false positive); its draft X18–X23 (block) was kept as `reviewIfIncomplete`. Antigravity incomplete `total_timeout_before:group:tests+contract_docs:files4/4` (fixed 1500 s budget; 11 of 16 turns); partial turns A47–A57 extracted for information. Merge: 0 groups (both incomplete); manual overlaps X18 = A52, X19 ≈ A49, X3/A6/A19 unverified. | Orchestrator decision: simplify so the loop converges — shell audit evidence-only, `audit_only` removed, denial counter dropped. Real fixes with regression tests for every r3 id and every unverified prior (dispositions below). |
+
+### r3 dispositions
+
+| Id | Disposition | Ref |
+| --- | --- | --- |
+| X18 / A52 (high) | fixed | `lib/sandbox.mjs` `installRoot`: versioned package dir / npm package dir / the binary file, never a shared prefix; `grantProblem` refuses grants that are or contain `/`, `$HOME`, `CODEX_HOME`, a denied path, and runtime grants inside a denied path; denials written last. Tests: installRoot table, refused grants, fake shared prefix + sentinel (sentinel EPERM through the profile-enforcing stand-in), run evidence `readRoots` |
+| X19 / A49 (audit_only part) | fixed | `audit_only` removed: `prepareSandbox` has no fallback, the policy loader rejects it; test: no sandbox → `no_os_sandbox`, zero attempts |
+| A49 (wellFormed / `sh -c '..' _` / cwd part) | accepted_with_reason | Shell audit is evidence only (r3 decision); such commands are warnings; reads are OS-confined |
+| X20 | fixed | `grep/rg/sed -f FILE`, `--file FILE`, `--file=FILE` treat FILE as a read; after `-f` the first positional is a file. Test `codex audit: grep/rg/sed -f FILE` |
+| X21 | fixed | warnings only; `echo`/`printf` operands are literals, not reads (test) |
+| X22 | fixed | tests never depend on platform defaults: generic codex run tests use an explicit self-test stand-in; the no-sandbox test sets `os_sandbox: "required"` explicitly; the CLI exit-code test uses the Claude stand-in |
+| X23 / A54 | fixed | Claude keeps the draft on timeout, abandoned pipes and `schema_invalid_after_retry` (`reviewIfIncomplete` / `reviewDraftRawIfIncomplete`); timeout + raw-draft tests |
+| A47 | fixed | `insideRoot` refuses `~`-prefixed paths (all callers); ACP stub test `readPath: "~/.codex/auth.json"` → `tool_read_outside_snapshot:1` |
+| A48 | fixed | Claude Glob `pattern` / Grep `glob` audited per brace alternative (`braceAlternatives`); test with `{/etc/passwd,src/*}`, `{../outside/*,src/*}`, `{~/.codex/*,src/*}` |
+| A50 (high) | fixed | `bypassFlags(argv, { allowedConfig })`: any `-c`/`--config` (separate, `=`-joined or `-ckey=`) mentioning permissions/sandbox/approval/network/features/web_search is refused unless it is byte-for-byte a runner-generated value; `--enable`, `-P`, `--permission-profile`, `--sandbox-state*` refused; run.mjs re-checks the reported argv with the same allowlist. Tests: the three A50 spellings and more |
+| A51 | accepted_with_reason (audit is evidence only); `cd >/dev/null` operand fixed | `cd`'s operand skips a redirection and its target (test); `for` word lists stay warnings |
+| A53 | fixed | `selfTest` uses `configArgs` (identical to codex exec), `CODEX_HOME` = empty private dir, probes `/private/tmp` and `$HOME` probe files; tests: stand-in and real codex |
+| A55 | fixed | `upstreamInTurns` counts only failures inside turns; any other → `upstream_502:stderr outside a turn (n)`; stub test with a 502 during `session/new` |
+| A56 | fixed | Codex `reported` follows the latest attempt unless an earlier one mismatched; test: retry without effort → `matchesPinned: false` |
+| A57 | fixed | policy notes rewritten (`os_sandbox_note`, `allow_code_execution_note`) |
+| Antigravity draft (operator) | fixed | incomplete runs keep the merged accepted turns as `reviewIfIncomplete` (missing dimensions `n/a:not reviewed ...`) |
+| Antigravity budget (operator) | fixed | `per_turn_budget_sec` (180) × planned turns, capped by `max_total_sec` (3600); evidence `timeoutMs` = the scaled budget; `plan` reports `hosts.antigravity.budget` and warns when estimated turns × per-turn > cap |
+| X3 / A6 / A19 (prior, unverified) | fixed | `ownedMembers` window [spawn second, exit], no +1000 ms; a process started after the exit second is never ours; docs state the remaining same-second residual accurately |
+| X6 (prior, unverified) | fixed | an `exec` lookahead stops at the next `exec` marker; test: stray `exec` in output followed by a real `cat /etc/hosts` block parses as two commands |
+| X12 (prior, unverified) | fixed | `exitReason`: a signal is ours only when the server exited after cleanup started and that signal was sent to its live group; a crash before cleanup or a different signal → `agent_exit_signal`; pure tests + stub `signalOnStdinEnd: SIGABRT` |
+| X16 (prior, unverified) | fixed | `reviewShapeProblems`: verdict enum, findings array of objects with id/sev/loc/claim/evidence/check; `mergeReviews` skips malformed reviews (no crash on `null`) |
+| A10 (prior, unverified) | fixed | `--out` under any `.git` component refused before any git lookup (plan/merge/run, with or without `--repo`) |
+| A36 / X10 (prior, unverified) | accepted_with_reason | Assignment-tracking gaps (`echo read HOME`, per-command `HOME=1 true`) only change evidence warnings now; the OS sandbox decides reads |
+| A44 (prior, unverified) | accepted_with_reason | A mis-ordered proxy line can only move to the next turn's window, which makes the run fail closed (`proxy_model_unconfirmed`), never a false complete; the real server writes it seconds before the reply. The stub keeps its write callback + 30 ms |
+| A35 / X11, A37–A43, A45, A46, X1/A11, X8/A15, X13–X15, X17, A24 (priors) | fixed (verified in r3) | — |
+
 ### r2 dispositions
 
 | Id | Disposition | Ref |
@@ -290,13 +355,18 @@ it is well under the r5/r6 full reviews that measured ~0.01 weekly.
 
 | Source | Finding | Disposition | Link/reason |
 | --- | --- | --- | --- |
-| Cycle 3 / A2, r1 X3/A19/A6, r2 | Every post-exit signal has a window between the `ps` check and `kill` (pid reuse inside it); a descendant forked after the child's exit is not ours by start time and is left alone | `accepted_with_reason` | Signals go only to pids whose start time lies in [spawn, exit] (1 s `lstart` resolution), each by pid, never the reused pgid; the window needs a pid to be reused within microseconds |
+| Cycle 3 / A2, r1 X3/A19/A6, r2, r3 | Every post-exit signal has a window between the `ps` check and `kill` (pid reuse inside it); a process started after the exit but within the same wall-clock second is indistinguishable at `lstart`'s 1 s resolution; a descendant forked after the child's exit is not ours by start time and is left alone | `accepted_with_reason` | Signals go only to pids whose start time lies in [spawn second, exit] (no slack after exit since r3), each by pid, never the reused pgid |
 | r1 R1 (operator 1) | With `allow_code_execution: true` (default) a Codex program can read a file without naming it literally | `fixed` (r2) | Reads are OS-confined to the profile's roots whatever the program does |
 | r1 R2 | Literal outside paths inside model-written programs made a Codex run incomplete | `fixed` (r2) | Rule removed; such literals are warnings |
-| r2 R7 | Codex `:minimal` platform set (`/etc`, `/Library/Preferences`, `/System`, `/usr`) is readable by model commands; `none` entries cannot narrow it and Codex aborts at start without it | `accepted_with_reason` | System files, no user data; literal reads by file-reading commands are still `incomplete` (r2 smoke) |
+| r2 R7 | Codex `:minimal` platform set (`/etc`, `/Library/Preferences`, `/System`, `/usr`) is readable by model commands; `none` entries cannot narrow it and Codex aborts at start without it | `accepted_with_reason` | System files, no user data; since r3 literal reads are evidence warnings |
 | r2 R8 | The codex process itself is unconfined (it reads its auth file, writes its state); confinement depends on Codex compiling the profile | `accepted_with_reason` | Verified per run by the `codex sandbox` self-test with the identical profile; the runner never opens token files |
 | r2 R9 | Commands Codex refuses before running them may not appear in the transcript | `accepted_with_reason` | The sandbox decides; the transcript audit is secondary |
-| r2 R10 | OS sandbox on macOS only; Linux/other → `no_os_sandbox` unless `os_sandbox: "audit_only"` | `filed_followup` | Codex's Linux sandbox (Landlock/seccomp) with the same profile is untested |
+| r2 R10 | OS sandbox on macOS only; Linux/other → always `no_os_sandbox` (r3 removed `audit_only`) | `filed_followup` | Codex's Linux sandbox (Landlock/seccomp) with the same profile is untested |
+| r3 | Codex shell-command audit is evidence only: audit bypasses and gaps (A36/X10, A49, A51 `for` lists) no longer matter for status | `accepted_with_reason` | Orchestrator decision: the self-tested OS sandbox is the control; findings stay visible as warnings |
+| r3 | Sandbox denials are not counted | `accepted_with_reason` | Plain codex output has no reliable denial marker (r3 counted 8 printed "Operation not permitted" lines); evidence says "not counted" |
+| r3 | A versioned runtime grant exposes the whole package dir (e.g. a node version's `lib/node_modules`, a codex release dir) | `accepted_with_reason` | Package files only; a bare binary in a shared bin/ is granted as one file; `/`, `$HOME`, `CODEX_HOME` and denied paths are refused |
+| r3 A44 | Proxy-line attribution in the ACP stub relies on stderr-before-stdout ordering (write callback + 30 ms) | `accepted_with_reason` | Mis-attribution fails closed (`proxy_model_unconfirmed`) |
+| r3 X12 | The crash-before-cleanup case is covered by the pure `exitReason` tests; the stub only exercises a different signal during cleanup | `accepted_with_reason` | Deterministic timing of a spontaneous crash before cleanup is not reproducible in the stub |
 | r1 R3 | Merge grouping is a word-overlap heuristic (Jaccard 0.2, 0.1 on overlapping lines, ±3 lines) | `filed_followup` | Calibrate on more cycles; every host id stays visible, so a missed grouping only duplicates a line |
 | r1 R4 / X6 | A tool-like line (`mcp …`, `tool …`) at a paragraph start inside command output is still flagged | `accepted_with_reason` | Plain mode has no output delimiters; flagging errs toward incomplete; prompt echo, mid-paragraph lines and stray `exec` lines (r2) are not |
 | r1 R5 / A30 | `ps -eo` path verified on macOS only | `filed_followup` | POSIX syntax; run the suite on Linux CI (procps / BusyBox) |
