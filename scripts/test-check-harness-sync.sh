@@ -497,6 +497,28 @@ for spelling in "target-link/" "target-link//" "target-link/." "target-link/./" 
   done
 done
 
+# 17c-2. X11: a target directory literally named "-" (spelled "-", "-/" or
+#        "-/.") is that directory, never $OLDPWD (cd's "-" operand). OLDPWD
+#        names another repository with drift that must stay untouched.
+mkdir -p "$TMP_DIR/dash"
+dash_repo="$(new_repo dash/-)"
+old_repo="$(new_repo dash-oldpwd)"
+printf '\nlocal edit\n' >> "$old_repo/CLAUDE.md"
+old_tree="$(tree_hash "$old_repo")"
+for spelling in "-" "-/" "-/."; do
+  for writer in update-harness bootstrap; do
+    printf '\nlocal edit\n' >> "$dash_repo/CLAUDE.md"
+    LABEL="$writer treats a target spelled $spelling as the directory named -"
+    CASES=$((CASES + 1))
+    capture bash -c 'cd "$1" && OLDPWD="$2" exec bash "$3" "$4" --force' _ \
+      "$TMP_DIR/dash" "$old_repo" "$ROOT/scripts/$writer.sh" "$spelling"
+    expect_rc 0
+    diff <(tail -n +2 "$dash_repo/CLAUDE.md") <(tail -n +2 "$ROOT/templates/CLAUDE.md") >/dev/null \
+      || fail "CLAUDE.md in the \"-\" repository not updated"
+    [ "$(tree_hash "$old_repo")" = "$old_tree" ] || fail "$writer wrote into \$OLDPWD"
+  done
+done
+
 # 17d. PR #25: a managed destination that exists but is not a regular file
 #      (a directory) is refused by both writers.
 repo="$(new_repo write-nonregular)"

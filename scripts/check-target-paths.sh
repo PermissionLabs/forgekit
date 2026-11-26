@@ -23,6 +23,9 @@ resolve_target_root() {
       *) break ;;
     esac
   done
+  # cd treats a bare "-" as $OLDPWD (even after --), so a directory named
+  # "-" (spelled "-", "-/" or "-/.") is passed as "./-".
+  [ "$arg" != "-" ] || arg="./-"
   logical="$(CDPATH='' cd -- "$arg" && pwd -L)" || return 1
   if [ -L "$arg" ] || [ -L "$logical" ]; then
     echo "error: target is a symlink" >&2
