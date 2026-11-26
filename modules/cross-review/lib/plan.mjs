@@ -120,6 +120,26 @@ export function hostPace(policy, host, usage, grade) {
 }
 const fmt = (n) => (Number.isFinite(n) ? n.toFixed(2) : String(n));
 
+// ---------------------------------------------------------------- antigravity budget
+/**
+ * Estimated Antigravity turns for a plan (dimension groups x file chunks by max_files_per_turn; bytes are not known
+ * at plan time, so this is a lower bound) and the resulting budget. warning is set when turns x per-turn > cap.
+ */
+export function antigravityBudget(hp, dimensions, nPaths) {
+  const groups = (hp.groups ?? []).map((g) => g.filter((d) => dimensions.includes(d))).filter((g) => g.length);
+  const rest = dimensions.filter((d) => !groups.flat().includes(d));
+  const nGroups = groups.length + (rest.length ? 1 : 0) || 1;
+  const chunks = hp.max_files_per_turn ? Math.max(1, Math.ceil(nPaths / hp.max_files_per_turn)) : 1;
+  const turns = nGroups * chunks;
+  const per = hp.per_turn_budget_sec;
+  if (!(per > 0)) return { estimatedTurns: turns, totalSec: hp.timeout_sec ?? null, note: "fixed timeout_sec (no per_turn_budget_sec)" };
+  const cap = hp.max_total_sec > 0 ? hp.max_total_sec : null;
+  const want = per * turns;
+  const b = { estimatedTurns: turns, perTurnSec: per, capSec: cap, totalSec: cap ? Math.min(want, cap) : want };
+  if (cap && want > cap) b.warning = `antigravity: about ${turns} turns x ${per} s = ${want} s exceeds max_total_sec ${cap} s; later turns may not run (split the review or raise the cap)`;
+  return b;
+}
+
 // ---------------------------------------------------------------- selection
 /**
  * plan({policy, author, dimensions, paths, usage, noUser}) ->
@@ -144,7 +164,12 @@ export function plan({ policy, author, dimensions, paths, usage, noUser = false 
     ...ask.map((h) => `${h}: ${hosts[h].reason}; run ${h} as a reviewer anyway?`),
     ...skip.map((h) => `${h}: skipped (${hosts[h].reason}); run ${h} as a reviewer anyway?`),
   ];
-  const base = { grade, gradeReasons: reasons, required, author, dimensions, hosts, selected };
+  const warnings = [];
+  if (hosts.antigravity && policy.hosts.antigravity) {
+    hosts.antigravity.budget = antigravityBudget(policy.hosts.antigravity, dimensions, paths.length);
+    if (hosts.antigravity.budget.warning) warnings.push(hosts.antigravity.budget.warning);
+  }
+  const base = { grade, gradeReasons: reasons, required, author, dimensions, hosts, selected, warnings };
   if (selected.length >= required) return { ...base, status: "ok", questions, reason: `${required} reviewer(s) selected` };
 
   const shortfall = required - selected.length;

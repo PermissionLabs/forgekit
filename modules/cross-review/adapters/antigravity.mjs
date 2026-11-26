@@ -125,6 +125,32 @@ export function planTurns(groups, scopeFiles, { maxFiles, maxBytes } = {}) {
 }
 
 /**
+ * Total time budget for a run of nTurns turns: per_turn_budget_sec x turns, capped by max_total_sec; without
+ * per_turn_budget_sec the fixed timeout_sec (fallbackMs) applies. -> { totalMs, perTurnSec, capSec, capped }.
+ */
+export function totalBudget(cfg, nTurns, fallbackMs) {
+  const per = cfg?.per_turn_budget_sec;
+  if (!(per > 0)) return { totalMs: fallbackMs, perTurnSec: null, capSec: null, capped: false };
+  const cap = cfg.max_total_sec > 0 ? cfg.max_total_sec : Infinity;
+  const want = per * Math.max(1, nTurns);
+  return { totalMs: Math.round(Math.min(want, cap) * 1000), perTurnSec: per, capSec: Number.isFinite(cap) ? cap : null, capped: want > cap };
+}
+
+/**
+ * How the server's exit is classified (X12). A signal counts as ours only when the server exited after cleanup
+ * started and that very signal was sent by us to its process group while it was alive; any other signal
+ * (a crash before cleanup, or a different signal during it) is agent_exit_signal. -> reason | null.
+ */
+export function exitReason({ exitInfo, cleanupStartedWall, signals, pid }) {
+  if (!exitInfo) return null;
+  if (exitInfo.code !== null && exitInfo.code !== undefined && exitInfo.code !== 0) return `agent_exit_nonzero:${exitInfo.code}`;
+  if (!exitInfo.signal) return null;
+  const afterCleanup = Number.isFinite(cleanupStartedWall) && exitInfo.wall >= cleanupStartedWall;
+  const sentByUs = (signals ?? []).some((x) => x.target === -pid && x.sig === exitInfo.signal && !x.error);
+  return afterCleanup && sentByUs ? null : `agent_exit_signal:${exitInfo.signal}${afterCleanup ? "" : " (before cleanup: crash)"}`;
+}
+
+/**
  * Stop the server's process group. While the child is not reaped it holds the pgid, so signalling the group is
  * safe. After it exited, a numeric pgid match is never enough: `ps` is re-read right before each signal and only
  * members started between spawn and exit (ownedMembers) are signalled, each by pid.
@@ -163,6 +189,11 @@ export async function run(ctx) {
   const scopeFiles = input.files.filter((f) => f.kind === "scope");
   const turns = planTurns(groups, scopeFiles, { maxFiles: cfg.max_files_per_turn, maxBytes: cfg.max_bytes_per_turn });
   out.turns = turns.map((t) => t.label);
+  // The total budget scales with the planned turns (per_turn_budget_sec x turns, capped by max_total_sec).
+  const budget = totalBudget(cfg, turns.length, pin.timeoutMs);
+  out.timeoutMs = budget.totalMs;
+  out.budget = { turns: turns.length, ...budget };
+  if (budget.capped) out.warnings.push(`time budget capped: ${turns.length} turns x ${budget.perTurnSec} s > max_total_sec ${budget.capSec} s`);
 
   // ---- runtime + profile (directory names only; files inside are never opened, except a session's .meta)
   const { root: runtimeRoot, version } = findRuntime(rt.runtime_root);
@@ -178,7 +209,7 @@ export async function run(ctx) {
 
   const cwd = input.snapshot;
   let home = null, tmpDir = null, child = null, exitInfo = null, spawnFailed = null, sessionId, spawnedWall = 0;
-  let authRequired = false, nextId = 1, collecting = null, upstreamFailures = 0, upstreamCounted = 0;
+  let authRequired = false, nextId = 1, collecting = null, upstreamFailures = 0, upstreamInTurns = 0, cleanupStartedWall = null;
   const msgLines = [];
   let errAll = "", errBuf = "";
   const pending = new Map();
@@ -269,7 +300,7 @@ export async function run(ctx) {
     try { resp = await request("session/prompt", { sessionId, prompt: blocks }, timeoutMs + 60_000); } catch (e) { err = e; }
     clearInterval(watchdog);
     if (!upstream && upstreamFailures > failBefore) upstream = true;
-    upstreamCounted = upstreamFailures;
+    upstreamInTurns += upstreamFailures - failBefore; // A55: failures outside any turn are caught at cleanup
     const text = collecting.join("");
     collecting = null;
     if (resp?.usage) promptUsage.push({ label, ...resp.usage });
@@ -298,7 +329,7 @@ export async function run(ctx) {
     const env = buildEnv(process.env, { geminiHome: home, tmpDir, harness: path.join(runtimeDir, "localharness_external") });
     spawnedWall = Date.now();
     child = spawn(serverBin, [], { cwd, env, stdio: ["pipe", "pipe", "pipe"], detached: true });
-    child.on("exit", (code, signal) => { exitInfo = { code, signal, atMs: ms(), wall: Date.now(), duringCleanup: cleaned }; failPending(`agent exited (${code ?? signal})`); resolveExited(); });
+    child.on("exit", (code, signal) => { exitInfo = { code, signal, atMs: ms(), wall: Date.now(), duringCleanup: cleanupStartedWall !== null }; failPending(`agent exited (${code ?? signal})`); resolveExited(); });
     child.on("error", (e) => { spawnFailed = e.message; reasons.push(`spawn_error:${e.message}`); failPending(`spawn failed: ${e.message}`); resolveExited(); resolveErrClosed(); });
     child.stdin.on("error", () => {});
     let buf = "";
@@ -336,7 +367,7 @@ export async function run(ctx) {
     out.reported.effort = opts.find((o) => o.id === thinkingOpt.id)?.currentValue ?? null;
     if (out.reported.model !== pin.model || out.reported.effort !== thinking) { reasons.push("model_pin_not_applied"); return; }
 
-    const deadline = t0 + pin.timeoutMs;
+    const deadline = t0 + budget.totalMs;
     const remaining = () => deadline - Date.now();
     const turnMs = (cfg.turn_timeout_sec ?? 600) * 1000;
     const retryMs = (cfg.retry_timeout_sec ?? 280) * 1000;
@@ -382,11 +413,16 @@ export async function run(ctx) {
       nextFinding += v.value.findings.length;
       parts.push({ dims, files, value: v.value });
     }
-    if (parts.length !== turns.length) return;
+    // An incomplete run keeps the merged accepted turns as its draft (reviewIfIncomplete), never as the review.
+    if (parts.length !== turns.length) {
+      if (!reasons.length) reasons.push(`turns_incomplete:${parts.length}/${turns.length}`);
+      if (!parts.length) return;
+    }
     // Merge: ids are already contiguous; coverage per dimension is "checked" if any chunk checked it.
     const findings = parts.flatMap((p) => p.value.findings).map((f, i) => ({ ...f, id: `${prefix}${idStart + i}` }));
     const coverage = {};
     for (const p of parts) for (const [k, x] of Object.entries(p.value.coverage)) if (coverage[k] === undefined || x === "checked") coverage[k] = x;
+    for (const d of dimensions) if (coverage[d] === undefined) coverage[d] = "n/a:not reviewed (run incomplete before this turn)";
     const merged = { verdict: "pass", coverage, findings, limits: [...new Set(parts.flatMap((p) => p.value.limits))] };
     if (priorIds.length) merged.prior_verification = priorIds.map((id) => {
       const es = parts.flatMap((p) => (p.value.prior_verification ?? []).filter((x) => x.id === id));
@@ -402,6 +438,7 @@ export async function run(ctx) {
   const finish = async () => {
     if (cleaned) return;
     cleaned = true;
+    cleanupStartedWall = Date.now();
     const pid = child?.pid;
     if (pid && !spawnFailed) {
       try { child.stdin.end(); } catch {}
@@ -415,11 +452,10 @@ export async function run(ctx) {
       // the review can be accepted: any fatal agent error or upstream failure seen anywhere invalidates the run.
       if (errBuf) { onStderrLine(errBuf); errBuf = ""; }
       if (agentErrors.some(isFatal) && !reasons.some((r) => r.startsWith("agent_error:"))) reasons.push(`agent_error:stderr (${agentErrors.filter(isFatal).at(-1).slice(0, 120)})`);
-      if (upstreamFailures > upstreamCounted && !reasons.some((r) => r.startsWith("upstream_502:"))) reasons.push("upstream_502:stderr after the last turn");
+      if (upstreamFailures > upstreamInTurns && !reasons.some((r) => r.startsWith("upstream_502:"))) reasons.push(`upstream_502:stderr outside a turn (${upstreamFailures - upstreamInTurns})`);
       // The server must exit cleanly after stdin closes; a non-zero code, or a signal we did not send, is a failure.
-      const ourSignal = signals.some((x) => x.sig && !x.error);
-      if (exitInfo && exitInfo.code !== null && exitInfo.code !== 0) reasons.push(`agent_exit_nonzero:${exitInfo.code}`);
-      else if (exitInfo && exitInfo.signal && !ourSignal) reasons.push(`agent_exit_signal:${exitInfo.signal}`);
+      const er = exitReason({ exitInfo, cleanupStartedWall, signals, pid });
+      if (er) reasons.push(er);
       // agy processes outside our group may belong to another session: reported, never signalled.
       const strays = psList().filter((p) => isAgy(p.cmd) && p.pgid !== pid && !psBefore.includes(p.pid)).map((p) => p.pid);
       if (strays.length) out.warnings.push(`agy processes outside this run's process group (not signalled): ${strays.join(",")}`);
@@ -487,7 +523,7 @@ export async function run(ctx) {
     log("stderr.log", redact(errAll));
   };
 
-  const hard = setTimeout(() => { reasons.push("hard_timeout"); failPending("hard_timeout"); }, pin.timeoutMs + 120_000);
+  const hard = setTimeout(() => { reasons.push("hard_timeout"); failPending("hard_timeout"); }, budget.totalMs + 120_000);
   try { await main(); } catch (e) { reasons.push(`fatal:${String(e?.message ?? e)}`); }
   finally {
     clearTimeout(hard);

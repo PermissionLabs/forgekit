@@ -8,7 +8,8 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadPolicy, defaultPolicyPath } from "../lib/policy.mjs";
 import { runReview } from "../lib/run.mjs";
-import { findRuntime, planTurns, stopGroup } from "../adapters/antigravity.mjs";
+import { exitReason, findRuntime, planTurns, stopGroup, totalBudget } from "../adapters/antigravity.mjs";
+import { antigravityBudget } from "../lib/plan.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const { policy: basePolicy } = loadPolicy(defaultPolicyPath());
@@ -147,7 +148,54 @@ test("stopGroup: after exit only members started between spawn and exit are sign
 
 test("an unterminated last stderr line is flushed and checked before the review is accepted (X1/A11)", async () => {
   withheld(await go({ trailingStderr: "E1126 agent.go:9] RESOURCE_EXHAUSTED: quota exceeded" }), /agent_error:stderr/);
-  withheld(await go({ trailingStderr: "Proxy failed to connect to CCPA API" }), /upstream_502:stderr after the last turn/);
+  withheld(await go({ trailingStderr: "Proxy failed to connect to CCPA API" }), /upstream_502:stderr outside a turn/);
+});
+
+test("an upstream 5xx before the first turn (during session setup) is never absorbed by a later turn (A55)", async () => {
+  withheld(await go({ splitStderr: ["System step error (HTTP 502)", "\n"] }), /upstream_502:stderr outside a turn \(1\)/);
+});
+
+test("server exit classification: only the signal we sent to the live group after cleanup started is ours (X12)", async () => {
+  const pid = 4242, sent = [{ sig: "SIGTERM", target: -pid, why: "child alive" }];
+  assert.equal(exitReason({ exitInfo: { code: null, signal: "SIGTERM", wall: 200 }, cleanupStartedWall: 100, signals: sent, pid }), null);
+  // Crash before cleanup, followed by our SIGTERM to a leftover descendant: still the agent's crash.
+  assert.match(exitReason({ exitInfo: { code: null, signal: "SIGSEGV", wall: 50 }, cleanupStartedWall: 100, signals: [{ sig: "SIGTERM", target: 999 }], pid }), /agent_exit_signal:SIGSEGV \(before cleanup: crash\)/);
+  assert.match(exitReason({ exitInfo: { code: null, signal: "SIGTERM", wall: 50 }, cleanupStartedWall: 100, signals: sent, pid }), /before cleanup/);
+  // A different signal during cleanup is not ours either.
+  assert.match(exitReason({ exitInfo: { code: null, signal: "SIGABRT", wall: 200 }, cleanupStartedWall: 100, signals: sent, pid }), /agent_exit_signal:SIGABRT$/);
+  assert.equal(exitReason({ exitInfo: { code: 3, signal: null, wall: 200 }, cleanupStartedWall: 100, signals: [], pid }), "agent_exit_nonzero:3");
+  // End to end: the server kills itself with SIGABRT when stdin closes (during cleanup, a signal we never sent).
+  withheld(await go({ signalOnStdinEnd: "SIGABRT" }), /agent_exit_signal:SIGABRT/);
+});
+
+test("an incomplete run keeps the accepted turns as reviewIfIncomplete, like the other adapters", async () => {
+  const ev = await go({ stopReason: { 1: "cancelled" } });
+  withheld(ev, /stop_reason:group:tests:cancelled/);
+  assert.deepEqual(ev.reviewIfIncomplete.findings.map((f) => f.id), ["A1"]);
+  assert.equal(ev.reviewIfIncomplete.coverage.correctness, "checked");
+  assert.match(ev.reviewIfIncomplete.coverage.tests, /^n\/a:not reviewed/);
+});
+
+test("~-prefixed tool paths are outside the snapshot (A47)", async () => {
+  const ev = await go({ readPath: { 0: "~/.codex/auth.json" } });
+  withheld(ev, /tool_read_outside_snapshot:1/);
+  assert.deepEqual(ev.toolAudit.outsideSnapshot, ["~/.codex/auth.json"]);
+});
+
+test("the total budget scales with the planned turns, capped; plan warns when the cap is exceeded", async () => {
+  assert.deepEqual(totalBudget({ per_turn_budget_sec: 180, max_total_sec: 3600 }, 16, 1_500_000), { totalMs: 2_880_000, perTurnSec: 180, capSec: 3600, capped: false });
+  assert.equal(totalBudget({ per_turn_budget_sec: 180, max_total_sec: 3600 }, 30, 1).totalMs, 3_600_000);
+  assert.equal(totalBudget({ per_turn_budget_sec: 180, max_total_sec: 3600 }, 30, 1).capped, true);
+  assert.equal(totalBudget({}, 16, 1_500_000).totalMs, 1_500_000);
+  const hp = basePolicy.hosts.antigravity;
+  // r3: 24 paths, 3 groups, 8 files per turn -> 9 turns at least; 16 actual turns (byte split) fit 2880 s < 3600 s.
+  const b = antigravityBudget(hp, ["security", "correctness", "tests", "contract_docs", "portability"], 24);
+  assert.equal(b.estimatedTurns, 12);
+  assert.equal(b.warning, undefined);
+  assert.match(antigravityBudget(hp, ["security", "correctness", "tests"], 200).warning, /exceeds max_total_sec 3600/);
+  const ev = await go({}, { per_turn_budget_sec: 100, max_total_sec: 1000 });
+  assert.equal(ev.status, "complete", ev.incompleteReasons.join());
+  assert.equal(ev.timeoutMs, 200_000); // 2 turns x 100 s
 });
 
 test("a non-zero server exit after the last prompt invalidates the review (X12)", async () => {

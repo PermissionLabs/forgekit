@@ -233,6 +233,8 @@ export function plainPath(p) {
 export function insideRoot(root, p) {
   const plain = plainPath(p);
   if (plain === null) return false;
+  // A47: a tool may expand "~" itself; a ~-prefixed path is never read as a relative name inside the root.
+  if (plain.startsWith("~")) return false;
   const r = realish(root);
   const real = realish(path.resolve(root, plain));
   if (!r || !real) return false;

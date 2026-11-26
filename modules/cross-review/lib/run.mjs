@@ -89,7 +89,8 @@ async function reviewWithInput({ opts, adapter, pin, prefix, policyPath, prior, 
   }
   const reasons = [...(res.reasons ?? [])];
   const warnings = [...(res.warnings ?? [])];
-  const argvBypass = res.argv ? bypassFlags(res.argv) : [];
+  // The argv the adapter reports is re-checked against the same exact allowlist it spawned with (A50).
+  const argvBypass = res.argv ? bypassFlags(res.argv, { allowedConfig: res.allowedConfig ?? [] }) : [];
   if (argvBypass.length) reasons.push(`bypass_flags_in_argv:${argvBypass.join(",")}`);
 
   // Post-checks that turn a schema-valid review into an incomplete one.
@@ -118,7 +119,7 @@ async function reviewWithInput({ opts, adapter, pin, prefix, policyPath, prior, 
     matchesPinned: checkReported(pin, res.reported, { effortReported }).length === 0,
     effortCheck: effortReported ? "verified against host report" : "unreported (host does not report effort; pinned value only)",
     prompt: { sha256: sha256(prompt), chars: prompt.length, file: "prompt.txt", jsonSchemaSha256: sha256(JSON.stringify(jsonSchema)) },
-    timeoutMs: pin.timeoutMs,
+    timeoutMs: res.timeoutMs ?? pin.timeoutMs,
     startedAt, finishedAt: new Date().toISOString(), durationMs: Date.now() - t0,
     usage: res.usage ?? null,
     inputs: {

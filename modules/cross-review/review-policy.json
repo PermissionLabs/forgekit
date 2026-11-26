@@ -47,9 +47,9 @@
       "expected_cost": { "weekly": 0.02 },
       "expected_cost_note": "Provisional. Measured: the 24-file runner review r1 (2026-11-26) used 0.01 of codex:primary (0.55 -> 0.54); the r2 re-review (43 prior ids) used 0.02 (0.47 -> 0.45).",
       "allow_code_execution": true,
-      "allow_code_execution_note": "Model-run commands may run interpreters/command substitution. They always run under the OS sandbox profile (reads: snapshot, platform set, codex/node install roots; no writes; no network), so a program cannot read outside those roots. Set false to make any such command incomplete.",
+      "allow_code_execution_note": "Model-run commands always run under the self-tested OS sandbox profile (reads: :minimal platform set, snapshot, codex package dir, node package dir; no writes; no network), so a program cannot read outside those roots. true also grants the node package dir; false omits it (unless codex itself is a node script). Code execution seen in the transcript is an evidence warning either way, never an incomplete reason.",
       "os_sandbox": "required",
-      "os_sandbox_note": "required: model-run commands run under the runner-generated Seatbelt permission profile, self-tested before each run; without macOS Seatbelt the run is incomplete (no_os_sandbox). audit_only: no OS sandbox, transcript audit only (explicit opt-in, not recommended).",
+      "os_sandbox_note": "The only mode: model-run commands run under the runner-generated Seatbelt permission profile, self-tested with the same config flags before each run; without macOS Seatbelt, or when the self-test fails, the run is incomplete (no_os_sandbox / os_sandbox_not_enforced) and codex exec never starts. There is no audit-only fallback.",
       "env_passthrough": []
     },
     "antigravity": {
@@ -57,6 +57,9 @@
       "model": "gemini-4-neon",
       "effort_map": { "high": "high" },
       "timeout_sec": 1500,
+      "per_turn_budget_sec": 180,
+      "max_total_sec": 3600,
+      "budget_note": "Total run budget = per_turn_budget_sec x planned turns, capped by max_total_sec (timeout_sec applies only when per_turn_budget_sec is absent). r3 measured about 136 s per turn (11 turns in 1500 s). plan warns when the estimated turns x per_turn_budget_sec exceed the cap.",
       "turn_timeout_sec": 600,
       "retry_timeout_sec": 280,
       "groups": [["security"], ["correctness"], ["tests", "contract_docs"]],

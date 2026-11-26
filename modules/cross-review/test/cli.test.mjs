@@ -57,7 +57,13 @@ test("readList: @file reads a list; a bare existing file name is a path, not a l
 
 test("checkOut: tracked or .git paths refused even under an allowlist .gitignore; ignored ok; outside ok (A10)", () => {
   assert.throws(() => checkOut(repo, path.join(repo, "src")), /not git-ignored/);
-  assert.throws(() => checkOut(repo, path.join(repo, ".git", "hooks")), /not git-ignored/);
+  assert.throws(() => checkOut(repo, path.join(repo, ".git", "hooks")), /inside a \.git directory/);
+  // A10: without --repo too (git rev-parse fails inside .git, so no work tree is found for it).
+  assert.throws(() => checkOut(null, path.join(repo, ".git", "cross-review-out")), /inside a \.git directory/);
+  assert.throws(() => checkOut(null, path.join(repo, ".git", "x.json"), { dir: false }), /inside a \.git directory/);
+  const r = cli(["plan", "--author", "claude", "--paths-from", path.join(tmp, "list.txt"), "--out", path.join(repo, ".git", "plan.json")], os.tmpdir());
+  assert.equal(r.status, 2);
+  assert.equal(fs.existsSync(path.join(repo, ".git", "plan.json")), false);
   assert.throws(() => checkOut(repo, path.join(repo, "README.md"), { dir: false }), /not git-ignored/);
   assert.throws(() => checkOut(repo, repo), /not git-ignored/);
   // Matched by `*` but tracked (force-added): the index decides, so it is refused.
@@ -127,7 +133,17 @@ test("merge: only complete runs with evidence are merged; bare or malformed revi
   fs.mkdirSync(path.join(d, "junk"));
   fs.writeFileSync(path.join(d, "junk", "review.json"), JSON.stringify({ version: 1, hosts: {} }));
   fs.writeFileSync(path.join(d, "junk", "evidence.json"), JSON.stringify({ schema: EV, reviewer: { host: "codex" }, status: "complete", incompleteReasons: [], review: { version: 1, hosts: {} } }));
-  assert.match(loadReviewEntry(path.join(d, "junk")).incompleteReasons.join(), /not a \{ verdict, findings\[\] \} object/);
+  assert.match(loadReviewEntry(path.join(d, "junk")).incompleteReasons.join(), /review invalid: verdict must be one of pass\|fix\|block/);
+  // X16: a complete evidence with a bad verdict or null/incomplete findings is never merged and never crashes merge.
+  const mkEv = (name, rv) => { fs.mkdirSync(path.join(d, name)); fs.writeFileSync(path.join(d, name, "evidence.json"), JSON.stringify({ schema: EV, reviewer: { host: "codex", idPrefix: "X" }, status: "complete", incompleteReasons: [], review: rv })); return loadReviewEntry(path.join(d, name)); };
+  const nonsense = mkEv("nonsense", { verdict: "nonsense", findings: [] });
+  assert.equal(nonsense.status, "incomplete");
+  const nul = mkEv("nullf", { verdict: "fix", findings: [null] });
+  assert.match(nul.incompleteReasons.join(), /findings\[0\] is not an object/);
+  const partial = mkEv("partialf", { verdict: "fix", findings: [{ id: "X1", sev: "urgent", loc: "nowhere", claim: "c" }] });
+  assert.match(partial.incompleteReasons.join(), /sev must be one of.*loc must be.*evidence empty/);
+  const merged = mergeReviews([nonsense, nul, partial, { host: "forged", status: "complete", review: { verdict: "fix", findings: [null] } }]);
+  assert.equal(merged.groups.length, 0);
   // evidence.json itself can be passed; its nested review is what is merged.
   fs.mkdirSync(path.join(d, "ev"));
   fs.writeFileSync(path.join(d, "ev", "evidence.json"), JSON.stringify({ schema: EV, reviewer: { host: "codex", idPrefix: "X" }, status: "complete", incompleteReasons: [], review }));
@@ -167,18 +183,18 @@ test("run exit codes through the CLI: complete 0, incomplete 1, usage error 2 (A
   const rev = git("rev-parse", "HEAD");
   const policyFile = path.join(tmp, "cli-policy.json");
   const p = JSON.parse(fs.readFileSync(path.join(HERE, "..", "review-policy.json"), "utf8"));
-  p.hosts.codex.bin = path.join(HERE, "fixtures", "fake-codex.mjs");
-  p.hosts.codex.env_passthrough = ["FAKE_REVIEW", "FAKE_COMMAND"];
-  if (process.platform !== "darwin") p.hosts.codex.os_sandbox = "audit_only";
+  // Claude stand-in: no OS sandbox is involved, so the exit codes are the same on every platform (X22).
+  p.hosts.claude.bin = path.join(HERE, "fixtures", "fake-claude.mjs");
+  p.hosts.claude.env_passthrough = ["FAKE_REVIEW", "FAKE_READ"];
   fs.writeFileSync(policyFile, JSON.stringify(p));
   fs.writeFileSync(path.join(tmp, "cli.patch"), "diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -0,0 +1 @@\n+x\n");
   fs.writeFileSync(path.join(tmp, "cli-brief.md"), "Review.\n");
   const good = JSON.stringify({ verdict: "pass", coverage: { correctness: "checked" }, findings: [], limits: [] });
-  const run = (out, env) => spawnSync(process.execPath, [CLI, "run", "--host", "codex", "--repo", repo, "--rev", rev, "--diff", path.join(tmp, "cli.patch"), "--scope", "src/a.ts", "--brief", path.join(tmp, "cli-brief.md"), "--dimensions", "correctness", "--policy", policyFile, "--out", path.join(tmp, out)], { cwd: tmp, encoding: "utf8", env: { ...process.env, ...env } });
+  const run = (out, env) => spawnSync(process.execPath, [CLI, "run", "--host", "claude", "--repo", repo, "--rev", rev, "--diff", path.join(tmp, "cli.patch"), "--scope", "src/a.ts", "--brief", path.join(tmp, "cli-brief.md"), "--dimensions", "correctness", "--policy", policyFile, "--out", path.join(tmp, out)], { cwd: tmp, encoding: "utf8", env: { ...process.env, ...env } });
   const ok = run("cli-run-ok", { FAKE_REVIEW: good });
   assert.equal(ok.status, 0, ok.stdout + ok.stderr);
   assert.match(ok.stdout, /status=complete/);
-  const bad = run("cli-run-bad", { FAKE_REVIEW: good, FAKE_COMMAND: "cat /etc/hosts" });
+  const bad = run("cli-run-bad", { FAKE_REVIEW: good, FAKE_READ: "/etc/hosts" });
   assert.equal(bad.status, 1, bad.stdout + bad.stderr);
   assert.match(bad.stdout, /status=incomplete/);
   const usage = spawnSync(process.execPath, [CLI, "run", "--host", "codex", "--out", path.join(tmp, "cli-run-usage")], { cwd: tmp, encoding: "utf8" });

@@ -34,12 +34,15 @@ export function groupMembers(pgid) {
 /**
  * Members of an exited child's group that are provably ours: a numeric pgid match alone is never enough (the
  * number may already belong to a replacement group). A member counts only when its start time is known and lies
- * in [child spawn, child exit] (one-second slack for ps resolution): a replacement group's processes all start
- * after our child was reaped. Bare numbers or unknown start times are skipped.
+ * in the spawn..exit window: ps reports start times floored to the second, so the window is
+ * [floor(spawn to s), exit] with no slack after exit. A process started after the child's exit is never
+ * accepted, except one started within the same wall-clock second as the exit (it cannot be told apart at ps's
+ * one-second resolution; accepted residual). Bare numbers or unknown start times are skipped.
  */
 export function ownedMembers(list, { spawnedAt, exitedAt }) {
+  const lo = Math.floor(spawnedAt / 1000) * 1000;
   return (list ?? []).filter((m) => m && typeof m === "object" && Number.isInteger(m.pid) && m.pid > 0 && Number.isFinite(m.startMs)
-    && m.startMs >= Math.floor(spawnedAt / 1000) * 1000 - 1000 && m.startMs <= exitedAt + 1000).map((m) => m.pid);
+    && m.startMs >= lo && m.startMs <= exitedAt).map((m) => m.pid);
 }
 
 /**
@@ -51,17 +54,19 @@ export function ownedMembers(list, { spawnedAt, exitedAt }) {
  * Signal rule: before the child is reaped ('exit' not yet emitted) the child itself holds the pgid, so the group
  * is signalled. After that, membership is re-read with `ps` right before each signal and only members started
  * between spawn and exit (ownedMembers) are signalled, each by pid; the pgid itself is never signalled again.
- * The remaining ps-to-kill window (pid reuse within it) is an accepted residual.
+ * Accepted residuals: a process started in the same wall-clock second as the exit (ps resolution), and pid reuse
+ * between the ps read and the kill.
+ * allowedConfig: the exact sensitive `-c` values the caller generated (see bypassFlags).
  * deps (tests): { spawn, kill, members, graceMs }.
  */
-export async function runProcess({ bin, args = [], cwd, env, input, timeoutMs }, deps = {}) {
+export async function runProcess({ bin, args = [], cwd, env, input, timeoutMs, allowedConfig = [] }, deps = {}) {
   const { spawn = nodeSpawn, kill = (pid, sig) => process.kill(pid, sig), members = groupMembers, graceMs = 2000 } = deps;
   const limit = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_TIMEOUT_MS;
   const t0 = Date.now();
   const signals = [];
   const result = (extra) => ({ code: null, signal: null, timedOut: false, stdout: "", stderr: "", durationMs: 0, spawnError: null, refusedFlags: [], leftoversKilled: 0, pipesAbandoned: false, signals, ...extra });
   // The full, untruncated argv is checked before anything is executed.
-  const refused = bypassFlags(args);
+  const refused = bypassFlags(args, { allowedConfig });
   if (refused.length) return result({ spawnError: `refused before spawn: bypass flags ${refused.join(" ")}`, refusedFlags: refused });
   let child;
   const spawnedAt = Date.now();
@@ -141,43 +146,40 @@ export async function runProcess({ bin, args = [], cwd, env, input, timeoutMs },
  * Flags that bypass permissions or sandboxing. Flag tokens (starting with "-") are matched as flags, including
  * `--flag=value`; the value after a mode-setting flag is matched as a value. Other tokens (paths, JSON) are not
  * scanned, so a random temp-dir name cannot cause a false positive.
+ *
+ * Config overrides (`-c`/`--config`, A50): a value that mentions any sensitive setting (permissions, sandbox,
+ * approval, default_permissions, network, features, web_search) in any TOML spelling (dotted, quoted or inline-
+ * table keys, single- or double-quoted values) is accepted only when it is byte-for-byte one of the values the
+ * runner generated for this run (allowedConfig) or a fixed safe value; anything else is refused before spawn.
  */
-const BAD_FLAGS = [/^--dangerously-/, /^--allow-dangerously-/, /^--yolo(=|$)/, /^--full-auto(=|$)/, /^--approve-for-me(=|$)/, /^--add-dir(=|$)/, /^-y$/];
+const BAD_FLAGS = [/^--dangerously-/, /^--allow-dangerously-/, /^--yolo(=|$)/, /^--full-auto(=|$)/, /^--approve-for-me(=|$)/, /^--add-dir(=|$)/, /^-y$/,
+  /^--enable(=|$)/, /^--sandbox-state/, /^--permission-profile(=|$)/, /^-P$/, /^--include-managed-config$/, /^--allow-unix-socket(=|$)/];
 const MODE_FLAGS = new Set(["-s", "--sandbox", "--permission-mode", "--approval-mode", "-a", "--ask-for-approval", "-c", "--config"]);
 const BAD_VALUES = [/danger-full-access/, /workspace-write/, /bypassPermissions/, /acceptEdits/, /\byolo\b/i, /\bauto\b/];
+const SENSITIVE_CONFIG = /permission|sandbox|approval|network|feature|web_search|writable|shell_environment|mcp/i;
+export const SAFE_CONFIG = ['approval_policy="never"', 'web_search="disabled"', 'sandbox_mode="read-only"'];
 const unquote = (s) => s.trim().replace(/^(["'])([\s\S]*)\1$/, "$2");
-function badModeValue(flag, value) {
+function badModeValue(flag, value, allowedConfig) {
   const v = String(value);
-  if (flag === "-c" || flag === "--config") {
-    const m = v.match(/^\s*([A-Za-z0-9_.-]+)\s*=\s*([\s\S]*)$/);
-    if (m) {
-      const key = m[1], val = unquote(m[2]);
-      if (key === "approval_policy") return val !== "never";
-      if (key === "sandbox_mode") return val !== "read-only";
-      // Permission profiles: only runner-generated read-only ones (read/none entries, no built-in write profile).
-      if (key === "default_permissions") return /^:/.test(val) && val !== ":read-only";
-      if (/^permissions\./.test(key)) return !/\.filesystem$/.test(key) || /=\s*"?(write|full|rw)\b/i.test(m[2]);
-      if (/^(permission_profile|allowed_permission_profiles|sandbox_state)/.test(key)) return true;
-      if (/^sandbox_workspace_write\b|^sandbox_permissions\b/.test(key)) return true;
-      return false;
-    }
-    return BAD_VALUES.some((re) => re.test(v));
-  }
+  if (flag === "-c" || flag === "--config") return SENSITIVE_CONFIG.test(v) && !SAFE_CONFIG.includes(v) && !allowedConfig.includes(v);
   if (flag === "-s" || flag === "--sandbox") return unquote(v) !== "read-only";
   if (flag === "-a" || flag === "--ask-for-approval") return unquote(v) !== "never";
   return BAD_VALUES.some((re) => re.test(v));
 }
-export function bypassFlags(argv) {
+export function bypassFlags(argv, { allowedConfig = [] } = {}) {
   const hits = [];
   (argv ?? []).forEach((raw, i) => {
     const a = String(raw);
     if (!a.startsWith("-")) {
-      if (i > 0 && MODE_FLAGS.has(String(argv[i - 1])) && badModeValue(String(argv[i - 1]), a)) hits.push(a);
+      if (i > 0 && MODE_FLAGS.has(String(argv[i - 1])) && badModeValue(String(argv[i - 1]), a, allowedConfig)) hits.push(a);
       return;
     }
+    // A value that itself starts with "-" after -c is still a config value.
+    if (i > 0 && (argv[i - 1] === "-c" || argv[i - 1] === "--config")) { if (badModeValue("-c", a, allowedConfig)) hits.push(a); return; }
     const [flag, value] = a.includes("=") ? [a.slice(0, a.indexOf("=")), a.slice(a.indexOf("=") + 1)] : [a, null];
     if (BAD_FLAGS.some((re) => re.test(a))) hits.push(a);
-    else if (value !== null && MODE_FLAGS.has(flag) && badModeValue(flag, value)) hits.push(a);
+    else if (value !== null && MODE_FLAGS.has(flag) && badModeValue(flag, value, allowedConfig)) hits.push(a);
+    else if (/^-c./.test(a) && !a.startsWith("--") && badModeValue("-c", a.slice(2), allowedConfig)) hits.push(a); // -ckey=value
   });
   return hits;
 }

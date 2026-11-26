@@ -5,7 +5,8 @@
 //   readPath: {turn: "/abs"}, longEscape: true, updateTitle: {turn: "run_command"}, invalid: [turn], restartIds: true,
 //   exitAfter: "initialize", splitStderr: ["first chunk", "second chunk"], exitCode: n (on stdin end),
 //   trailingStderr: "text without newline" (written at stdin end, right before exit), metaCwd: "/other",
-//   permission: [turn] (session/request_permission before the reply), clientRpc: {turn: "fs/read_text_file"}
+//   permission: [turn] (session/request_permission before the reply), clientRpc: {turn: "fs/read_text_file"},
+//   signalOnStdinEnd: "SIGABRT" (the server kills itself with that signal when stdin closes)
 // Per-turn stderr is written (and flushed) before any stdout for that turn, so the parent always sees it first.
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -78,6 +79,7 @@ function answer(t, text, id) {
   else reply({ stopReason: cfg.stopReason?.[t] ?? "end_turn", usage: { totalTokens: 10, inputTokens: 7, outputTokens: 3 } });
 }
 process.stdin.on("end", () => {
+  if (cfg.signalOnStdinEnd) process.kill(process.pid, cfg.signalOnStdinEnd);
   const code = cfg.exitCode ?? 0;
   if (cfg.trailingStderr) process.stderr.write(cfg.trailingStderr, () => process.exit(code));
   else process.exit(code);

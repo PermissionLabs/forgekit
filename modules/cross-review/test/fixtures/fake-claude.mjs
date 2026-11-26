@@ -20,5 +20,7 @@ let review;
 try { review = JSON.parse(text); } catch { review = text; }
 emit({ type: "result", subtype: "success", is_error: false, result: typeof review === "string" ? review : JSON.stringify(review), structured_output: typeof review === "string" ? undefined : review,
   usage: { input_tokens: 10, output_tokens: 20 }, modelUsage: { [process.env.FAKE_USAGE_MODEL ?? model]: { inputTokens: 10 } }, total_cost_usd: 0.01, permission_denials: [] });
+// Valid output already written, then the host hangs past the runner's timeout (timeout draft case, X23).
+if (process.env.FAKE_TIMEOUT_AFTER_OUTPUT) setTimeout(() => {}, 30_000);
 // A setsid'd descendant that keeps stdout/stderr open after this process exits (pipe-abandon case).
 if (process.env.FAKE_ESCAPE) spawn(process.execPath, ["-e", "setTimeout(()=>{},15000)"], { detached: true, stdio: "inherit" }).unref();

@@ -102,8 +102,10 @@ reviewer id, pinned model/effort, reported model and effort (`effortCheck`: veri
 tool/path audit, argv, attempts (each with its own reported model and signal log). Any failure, any audit violation, or a
 reported model that differs from (or cannot confirm) the pin makes the run `incomplete` and
 withholds the review: `review.json` is `null`, and `evidence.reviewIfIncomplete` keeps the
-schema-valid draft for diagnosis (Codex reads its `-o` reply after the audit whatever the outcome;
-an unparseable reply is kept as `reviewDraftRawIfIncomplete`). Incomplete reasons name the
+schema-valid draft for diagnosis (all three hosts: Codex reads its `-o` reply after the audit
+whatever the outcome; Claude keeps it on timeout and abandoned pipes too; Antigravity keeps the
+merged accepted turns, with unreviewed dimensions marked `n/a:not reviewed`; an unparseable reply is
+kept as `reviewDraftRawIfIncomplete`). Incomplete reasons name the
 offending command or path (truncated, first three plus a count). The runner never switches to
 another reviewer or model.
 
@@ -128,6 +130,9 @@ another reviewer or model.
   would show a pace of 60+): it only has to cover its expected cost. If it cannot, the plan asks
   (waiting for the reset is an option), unless another window fails its cost or pace: every window
   is evaluated and skip beats ask.
+- Antigravity budget: `plan` estimates its turns (dimension groups × ⌈paths / `max_files_per_turn`⌉,
+  a lower bound: bytes are not known yet) and reports `hosts.antigravity.budget`; when estimated turns
+  × `per_turn_budget_sec` exceed `max_total_sec`, `warnings[]` says so.
 - pace ≥ `use_at_or_above` (1.0): use. Between `high_only_at_or_above` (0.6) and 1.0: use only for
   high grade. Below 0.6: skip with a one-line question. Usage unavailable: `ask`. `--no-user` turns
   `ask` into `blocked`. Thresholds and cost estimates are provisional (`pace.provisional`).
@@ -139,18 +144,22 @@ another reviewer or model.
 | Model / effort | `--model`, `--effort` from policy | `-m`, `-c model_reasoning_effort=` | `session/set_config_option` model + thinking level |
 | Reported model | stream `init.model` + `modelUsage` keys | stderr header `model:` (client-resolved) | `set_config_option` currentValue + stderr proxy model per call |
 | No writes | `--tools Read,Grep,Glob`, `--restricted`, `--permission-mode dontAsk` | OS sandbox profile with no write entry (header must say `sandbox: read-only`), `approval_policy="never"` | `enabledTools:["view_file"]`, fs/terminal capabilities false, permissions `reject_once` |
-| Reads confined | `--restricted` confines file tools to cwd = snapshot; audit of every tool path, Glob patterns and Grep `path`/`glob` (Grep's regex `pattern` is not a path) | **OS-enforced** (macOS Seatbelt, see below); the transcript audit is a secondary signal | audit of every `view_file` path (full `rawInput`, `tool_call_update` titles) |
-| Code execution | none (no Bash) | `hosts.codex.allow_code_execution` (default `true`): interpreters / command substitution may run, under the same OS sandbox; `false` makes any such command `incomplete` | none (`view_file` only) |
+| Reads confined | `--restricted` confines file tools to cwd = snapshot; audit of every tool path, Glob patterns (each brace alternative) and Grep `path`/`glob` (Grep's regex `pattern` is not a path); `~` paths are outside | **OS-enforced** (macOS Seatbelt, see below); the shell-command audit is evidence only (warnings) | audit of every `view_file` path (full `rawInput`, `tool_call_update` titles); `~` paths are outside |
+| Code execution | none (no Bash) | interpreters / command substitution may run, always under the same OS sandbox; `hosts.codex.allow_code_execution` (default `true`) only decides whether node's package dir is granted; code execution is recorded as a warning | none (`view_file` only) |
 | No network beyond the model API | no WebFetch/WebSearch/Bash; `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` | the profile has no network entry (model commands have no network); `web_search="disabled"` | web tools not enabled |
 | No MCP | `--strict-mcp-config --mcp-config '{"mcpServers":{}}'`, `--safe-mode` | `--ignore-user-config` (MCP servers live there), `--disable plugins/apps` | `mcpServers: []`, isolated `GEMINI_HOME` without `config/` |
 | No delegation | Agent tool not in `--tools` | `--disable multi_agent[_v2]` | `invoke_subagent` not enabled |
 | Ignore user settings | `--setting-sources ""`, `--restricted`, `--safe-mode`, `--disable-slash-commands` | `--ignore-user-config`, `--ignore-rules` | isolated `GEMINI_HOME` (only `antigravity-acp/` linked) |
 | No session persistence | `--no-session-persistence` | `--ephemeral` | not possible: session files deleted afterwards when `.meta` cwd matches |
-| Never | `--dangerously-*`, `bypassPermissions`, `acceptEdits`, `--add-dir` | `--dangerously-*`, `--full-auto`, `workspace-write`, `danger-full-access`, `--add-dir`, built-in write profiles (`default_permissions=":workspace"` etc.), `write` filesystem entries, profile network settings | `allow_*`, `reject_always` |
+| Never | `--dangerously-*`, `bypassPermissions`, `acceptEdits`, `--add-dir` | `--dangerously-*`, `--full-auto`, `workspace-write`, `danger-full-access`, `--add-dir`, `--enable`, `-P/--permission-profile`, `--sandbox-state*`, any sensitive `-c` the runner did not generate | `allow_*`, `reject_always` |
 
 Every spawned host argv (full, untruncated) is checked against the bypass list before anything is
-executed (`refused before spawn`); any `approval_policy` other than `never` or `sandbox_mode` other
-than `read-only` counts, quoted either way. Antigravity has no argv beyond the server binary. The
+executed (`refused before spawn`). A `-c`/`--config` value that mentions a sensitive setting
+(permissions, `default_permissions`, sandbox, approval, network, features, `web_search`, ...) in any
+TOML spelling (dotted, quoted or inline-table keys, single- or double-quoted values) is accepted only
+when it is byte-for-byte one of the values the runner generated for this run (`allowedConfig`: the
+permission profile, `approval_policy="never"`, `web_search="disabled"`); the reported argv is
+re-checked against the same allowlist after the run. Antigravity has no argv beyond the server binary. The
 snapshot hash is compared before/after. Token files (`~/.codex/auth.json`, Claude credentials,
 `acp_token.json`) are never opened by the runner.
 
@@ -162,70 +171,88 @@ permission profile with full-disk read, verified). The profile is:
 
 | | |
 | --- | --- |
-| Read | `:minimal` (Codex's built-in platform set: system libraries/frameworks, `/bin`, `/usr/bin`, `/etc`, `/Library/Preferences`, `/System`, `/dev`), the snapshot, the codex install root (resolved real path), the node install root (when `allow_code_execution`, or when codex is a node script) |
-| Denied explicitly | `/private/tmp`, `/private/var/tmp` (in `:minimal` otherwise); everything else (home directories, the Codex home and its auth file, other temp dirs, `/Volumes`, `/opt`, `/Applications`) is denied by default |
+| Read | `:minimal` (Codex's built-in platform set: system libraries/frameworks, `/bin`, `/usr/bin`, `/etc`, `/Library/Preferences`, `/System`, `/dev`), the snapshot, the codex runtime grant, the node runtime grant (when `allow_code_execution`, or when codex is a node script) |
+| Runtime grant | the nearest versioned package directory of the resolved binary (basename starts with a version, at most 3 levels up: e.g. `~/.codex/packages/standalone/releases/0.172.0-aarch64-apple-darwin`, `~/.local/share/node/v22.23.5`, `Cellar/node/22.1.0`, `.nvm/versions/node/v22.0.0`), or the npm package dir (`node_modules/@openai/codex`), otherwise **the binary file itself**; never a shared prefix (`/usr/local`, `/opt/homebrew`, `~/.local`, `$HOME`, `/`) |
+| Refused grants | any grant that is or contains `/`, `$HOME`, the Codex home or a denied path, and any runtime grant inside a denied path (`os_sandbox_profile_refused`) |
+| Denied explicitly | `/private/tmp`, `/private/var/tmp` (in `:minimal` otherwise), written after every grant so nothing can overwrite them; everything else (home directories, the Codex home and its auth file, other temp dirs, `/Volumes`, `/opt`, `/Applications`) is denied by default |
 | Write | none |
 | Network | none (no network entry) |
 
 Before the review the runner self-tests the profile without a model call, through
-`codex sandbox <same -c args> -- <cmd>`: reading a harmless probe file the runner created outside
-the snapshot, listing the Codex home (names only, discarded) and writing inside the snapshot must
-fail with EPERM, and reading a snapshot file must succeed. Any failed probe makes the run
-`incomplete` (`os_sandbox_not_enforced:<probes>`) and codex exec is never started. The profile
-(TOML) and its sha256, the read/denied roots and the self-test result are in
-`evidence.isolation.osSandbox`; the profile is also `raw/codex-sandbox-profile.toml`. Sandbox
-denials seen in command output are counted there (`deniedOps`, `deniedSample`).
+`codex sandbox <exact codex exec config flags> -- <cmd>` (permission profile, `approval_policy`,
+`web_search`, every `--disable`; `codex sandbox` has no `--ignore-user-config`, so it runs with
+`CODEX_HOME` set to an empty private directory: no user `config.toml` can be merged). Reading
+harmless probe files the runner created in `os.tmpdir()`, `/private/tmp` and `$HOME`, listing the
+Codex home (names only, discarded) and writing inside the snapshot must fail with EPERM, and reading
+a snapshot file must succeed. Any failed probe makes the run `incomplete`
+(`os_sandbox_not_enforced:<probes>`) and codex exec is never started. The profile (TOML) and its
+sha256, the read/denied roots and the self-test result are in `evidence.isolation.osSandbox`; the
+profile is also `raw/codex-sandbox-profile.toml`. Sandbox denials are not counted (`deniedOps:
+"not counted ..."`): the plain codex transcript has no marker that separates a real denial from
+command output that merely contains "Operation not permitted" (r3 counted 8 such false positives).
 
 Why not an outer `sandbox-exec` around `codex exec`: macOS refuses a nested `sandbox_apply` inside
 any restrictive profile (an outer profile whose only rule is `(deny file-write*) (allow file-write*
 (subpath "/"))` already makes the inner `sandbox-exec` fail with EPERM / exit 71), and Codex starts
 every model command through `sandbox-exec`, so an outer profile breaks every command.
 
-No Seatbelt (not macOS, or no `/usr/bin/sandbox-exec`): the run is `incomplete` (`no_os_sandbox`)
-unless the policy sets `hosts.codex.os_sandbox: "audit_only"` (default `"required"`), which runs
-with plain `-s read-only` and the transcript audit only.
+No Seatbelt (not macOS, or no `/usr/bin/sandbox-exec`): the run is always `incomplete`
+(`no_os_sandbox`) and codex exec never starts. There is no audit-only mode (removed in r3; the
+policy loader rejects `os_sandbox: "audit_only"`).
 
 The codex process itself is not confined (it reads its own auth file and writes its state in the
 Codex home); the runner never opens token files.
 
-**Codex transcript audit (secondary signal).** Each `exec` block is parsed in full, including
-multi-line commands, up to its `in <cwd>` line followed by a status line or a marker; an `exec` line
-without such a block is command output and is only counted. Commands are shell-tokenized (wrapper
-`sh|bash|zsh -lc` unwrapped; `$'..'`/`$".."`, unassigned `$VAR`, assignments only in order and in
-command position, redirections and prefix options keep command position, glob and non-ASCII root
-paths are paths). Only clear violations the sandbox would have caught anyway make the run
-`incomplete`: a literal outside path given to a file-reading command (not an interpreter program,
-not a grep/rg/sed pattern), a redirection to an outside file, `cd`/`pushd`/`popd` leaving the
-snapshot, a cwd outside the snapshot; plus code execution when the policy forbids it, tool-like
-lines (`mcp`, `tool`, web search, `apply_patch`) at block starts, and a transcript whose header or
-prompt echo cannot be read. Everything else (computed paths, literals inside `node -e`/`python -c`
-programs, unusual quoting) is a warning in the evidence.
+**Codex transcript audit.** Incomplete reasons come only from what the OS sandbox does not govern:
+the header (model, effort, `sandbox: read-only`, `approval: never`, workdir = snapshot), a
+transcript whose header or prompt echo cannot be read, and tool-like lines (`mcp`, `tool`, web
+search, `apply_patch`) at block starts. The **shell-command audit is evidence only** (r3
+simplification): once the self-test has proven the sandbox, no command finding makes a run
+`incomplete`. Each `exec` block is parsed in full, including multi-line commands, up to its `in
+<cwd>` line followed by a status line or a marker, never past the next `exec` marker; an `exec`
+line without such a block is command output and is only counted. Commands are shell-tokenized
+(wrapper `sh|bash|zsh -lc` unwrapped; `$'..'`/`$".."`, unassigned `$VAR`, redirections and prefix
+options keep command position, glob and non-ASCII root paths are paths, `grep/rg/sed -f FILE` reads
+FILE, `echo`/`printf` operands are literals). Literal outside reads, cwd outside the snapshot,
+`cd` out of it, expansions and code execution are listed as `shell audit (evidence only)` warnings.
+This ends the false positives (r3: `ls -l` of the allowed node binary made the run incomplete) and
+the cat-and-mouse over audit bypasses (A36/X10/A49/A51/X21): what a command could read is what the
+profile allowed.
 
 **Process groups.** A host runs in its own process group. While the child is not reaped it holds
 the group id, so signalling the group is safe. After it exits, a numeric pgid match is never taken
 as membership: `ps -eo pid,pgid,lstart` is read right before each signal and only members whose
-start time lies between the child's spawn and exit (one-second slack) are signalled, each by pid
-(a replacement group started after the exit is never hit). A descendant that keeps the host's
+start time lies between the child's spawn and exit are signalled, each by pid. ps reports start
+times floored to the second, so the window is [spawn second, exit] with no slack after the exit: a
+process started after the exit is never signalled, except one started within the same wall-clock
+second as the exit, which ps cannot tell apart (accepted residual, as is pid reuse between the ps
+read and the kill). A descendant that keeps the host's
 pipes open after exit makes the run `incomplete` (`pipes_abandoned`).
 
 **Antigravity turns.** Every turn (first and corrective retry) is checked for timeout, upstream
 failure, RPC error, a stop reason other than `end_turn`, fatal agent errors and auth prompts before
 its text is used; after the last turn the unterminated last stderr line is flushed and checked
-again, and a server exit with a non-zero code (or a signal the runner did not send) makes the run
+again, and an upstream 5xx seen outside any turn (e.g. during session setup) is a reason too; a
+server exit with a non-zero code, or with a signal other than the one the runner sent to the live
+group after cleanup started (a crash before cleanup, or a different signal), makes the run
 `incomplete`; each turn must carry a matching `Proxy extracted model` line; finding ids continue
 across turns; a spawn failure or early server exit fails at once. `max_files_per_turn` (8) and
 `max_bytes_per_turn` (120000) split each dimension group into scope-file chunks so a turn stays well
 under the proxy's 300 s first-byte wall. `runtime_root` accepts `{platform}-{arch}`; the highest
 version present is used. Leftover agy processes outside the run's group are reported, never signalled.
+The total budget is `per_turn_budget_sec` (180) × planned turns, capped by `max_total_sec` (3600)
+(`timeout_sec` applies only without `per_turn_budget_sec`); r3's 16-turn plan died at the old fixed
+1500 s after 11 turns.
 
 Known gaps (also written into each run's `hostLimits`):
 
 - Codex model commands can read Codex's `:minimal` platform set (system files under `/etc`,
   `/Library/Preferences`, `/System`, `/usr`); `none` entries cannot narrow it and Codex aborts at
-  start without it. Literal reads of such paths by file-reading commands are still `incomplete`.
-  The codex process itself is unconfined. Commands Codex refuses before running them (e.g. `ls ~`)
-  may not appear in the transcript at all. On macOS only; elsewhere `no_os_sandbox` unless
-  `audit_only`. The model is the client-resolved header value, not echoed by the server.
+  start without it. The codex process itself is unconfined. Commands Codex refuses before running
+  them (e.g. `ls ~`) may not appear in the transcript at all. On macOS only; elsewhere always
+  `no_os_sandbox`. The model is the client-resolved header value, not echoed by the server.
+- A versioned runtime grant exposes that whole package directory (e.g. all of a codex release dir
+  or a node version dir, including its `lib/node_modules`); a bare binary is granted as one file.
 - Claude does not report the effort level it ran at; Claude Code may use a small model for internal
   steps (recorded as a warning; the pinned model must appear in `modelUsage`).
 - Antigravity cannot disable session persistence; the model per response is only visible in the
@@ -242,5 +269,6 @@ The tests use fake `claude`/`codex` binaries and an ACP stub for Antigravity (`t
 never call a model. On macOS the fake codex's `sandbox` subcommand enforces the generated profile
 with a real `sandbox-exec` SBPL profile, `test/sandbox.test.mjs` proves Seatbelt denies a harmless
 outside file and allows a snapshot file, and, when a native codex is installed, runs the real
-`codex sandbox` self-test (no model call). Fixture repositories commit with `-c commit.gpgsign=false` so a global signing
+`codex sandbox` self-test with the exact exec config flags (no model call). The generic codex run tests
+use an explicit self-test stand-in on every platform, so their results never depend on the platform. Fixture repositories commit with `-c commit.gpgsign=false` so a global signing
 setting cannot break them.

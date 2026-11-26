@@ -36,6 +36,36 @@ export function buildEnv(base = process.env, passthrough = []) {
   return env;
 }
 
+/**
+ * Brace alternatives of a glob ("{/etc/*,src/*}" -> ["/etc/*", "src/*"]), nested groups expanded, at most 64
+ * results (a pattern with more is returned as is, plus its comma-separated pieces, so nothing is hidden).
+ */
+export function braceAlternatives(p, limit = 64) {
+  const out = [];
+  const expand = (s) => {
+    if (out.length > limit) return;
+    let depth = 0, open = -1;
+    for (let i = 0; i < s.length; i++) {
+      if (s[i] === "{") { if (depth++ === 0) open = i; }
+      else if (s[i] === "}" && depth > 0 && --depth === 0) {
+        const body = s.slice(open + 1, i), alts = [];
+        let d = 0, start = 0;
+        for (let k = 0; k <= body.length; k++) {
+          if (k === body.length || (body[k] === "," && d === 0)) { alts.push(body.slice(start, k)); start = k + 1; }
+          else if (body[k] === "{") d++;
+          else if (body[k] === "}") d--;
+        }
+        for (const a of alts) expand(s.slice(0, open) + a + s.slice(i + 1));
+        return;
+      }
+    }
+    out.push(s);
+  };
+  expand(String(p));
+  return out.length > limit ? [String(p), ...String(p).split(/[{},]/)] : out;
+}
+const PATHISH = /^(\/|~)|(^|\/)\.\.(\/|$)/;
+
 /** Parse stream-json output into an audit record. Pure; used by tests with fixtures. */
 export function auditStream(stdout, snapshot, pin) {
   const a = { init: null, toolUses: [], denials: [], result: null, parseErrors: 0, reasons: [], warnings: [] };
@@ -67,13 +97,16 @@ export function auditStream(stdout, snapshot, pin) {
   const paths = [];
   for (const t of a.toolUses) {
     if (!ALLOWED_RUNTIME_TOOLS.includes(t.name)) { a.reasons.push(`non_read_tool_call:${t.name}`); continue; }
-    // A Glob pattern names files, so an absolute, ~ or .. pattern is audited like a path. Grep's pattern is a
-    // regular expression matched against file contents (its `path`/`glob` name the files), never a path.
-    const pat = t.name === "Glob" && typeof t.input?.pattern === "string" && /^(\/|~)|(^|\/)\.\.(\/|$)/.test(t.input.pattern) ? ["pattern"] : [];
-    const glob = t.name === "Grep" && typeof t.input?.glob === "string" && /^(\/|~)|(^|\/)\.\.(\/|$)/.test(t.input.glob) ? ["glob"] : [];
-    for (const k of ["file_path", "path", "notebook_path", ...pat, ...glob]) if (typeof t.input?.[k] === "string") {
+    // A Glob pattern names files, so an absolute, ~ or .. pattern is audited like a path; so is each brace
+    // alternative (A48: "{/etc/*,src/*}"). Grep's pattern is a regular expression matched against file contents
+    // (its `path`/`glob` name the files), never a path.
+    const globKey = t.name === "Glob" ? "pattern" : t.name === "Grep" ? "glob" : null;
+    const globAlts = globKey && typeof t.input?.[globKey] === "string" ? braceAlternatives(t.input[globKey]) : [];
+    const keys = ["file_path", "path", "notebook_path", ...(globAlts.some((x) => PATHISH.test(x)) ? [globKey] : [])];
+    for (const k of keys) if (typeof t.input?.[k] === "string") {
       const v = t.input[k];
-      const inside = !/(^|\/)\.\.(\/|$)/.test(v) && !v.startsWith("~") && insideRoot(snapshot, v);
+      const alts = k === globKey ? globAlts : [v];
+      const inside = alts.every((x) => !/(^|\/)\.\.(\/|$)/.test(x) && !x.startsWith("~") && insideRoot(snapshot, x));
       paths.push({ tool: t.name, path: t.input[k], inside, denied: denied.has(t.id) });
       if (!inside && !denied.has(t.id)) a.reasons.push(`tool_read_outside_snapshot:${t.input[k]}`);
       if (!inside && denied.has(t.id)) a.warnings.push(`outside-snapshot read attempt denied by the host: ${t.input[k]}`);
@@ -129,16 +162,21 @@ export async function run(ctx) {
     out.usage = sumUsage(out.attempts.map((x) => x.usage));
     out.warnings.push(...a.warnings);
     if (p.spawnError) { out.reasons.push(`spawn_error:${p.spawnError}`); break; }
-    if (p.timedOut) { out.reasons.push("timeout"); break; }
-    if (p.pipesAbandoned) { out.reasons.push("pipes_abandoned: a descendant kept the host's stdout/stderr open; the stream may be truncated"); break; }
-    const draft = () => { const v = a.output ? validate(a.output) : { errors: ["no output"] }; if (!v.errors.length) out.review = v.value; }; // withheld draft -> reviewIfIncomplete
+    // Withheld draft -> reviewIfIncomplete (schema-valid) or reviewDraftRawIfIncomplete (raw text), never merged.
+    const draft = () => {
+      const v = a.output ? validate(a.output) : { errors: ["no output"] };
+      if (!v.errors.length) out.review = v.value;
+      else if (a.output) out.draftRaw = redact(typeof a.output === "string" ? a.output : JSON.stringify(a.output)).slice(0, 200_000);
+    };
+    if (p.timedOut) { out.reasons.push("timeout"); draft(); break; }           // X23
+    if (p.pipesAbandoned) { out.reasons.push("pipes_abandoned: a descendant kept the host's stdout/stderr open; the stream may be truncated"); draft(); break; }
     if (a.reasons.length) { out.reasons.push(...a.reasons); draft(); break; }   // audit failures are never retried
     if (a.reported.model !== pin.model) { out.reasons.push(`reported_model_mismatch:${a.reported.model}`); draft(); break; } // never retried on another model
     if (p.code !== 0) { out.reasons.push(`exit_code:${p.code}`); draft(); break; }
     const v = validate(a.output);
     rec.validation = v.errors;
     if (!v.errors.length) { out.review = v.value; break; }
-    if (attempt === 1) { out.reasons.push("schema_invalid_after_retry"); break; }
+    if (attempt === 1) { out.reasons.push("schema_invalid_after_retry"); draft(); break; } // A54
     text = `${prompt}\n\n=== CORRECTION ===\nA previous attempt at this review returned output that failed validation:\n- ${v.errors.join("\n- ")}\nPrevious output:\n${typeof a.output === "string" ? a.output : JSON.stringify(a.output)}\nReturn the corrected review JSON only.`;
   }
   out.effortReported = false;

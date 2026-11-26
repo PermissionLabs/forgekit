@@ -55,7 +55,9 @@ test("after exit, a numeric pgid match is never membership: only members started
   // Mocked spawn: the child "exits" at once while its pipes stay open; members() is what ps would show.
   const { EventEmitter } = await import("node:events");
   const { PassThrough } = await import("node:stream");
+  let spawnT = 0;
   const fake = () => {
+    spawnT = Date.now();
     const c = new EventEmitter();
     c.pid = 424242;
     c.stdout = new PassThrough(); c.stderr = new PassThrough(); c.stdin = new PassThrough();
@@ -77,16 +79,21 @@ test("after exit, a numeric pgid match is never membership: only members started
     // A replacement group: its member started after our child exited -> never signalled.
     assert.deepEqual((await go(() => [{ pid: 7, startMs: Date.now() + 60_000 }])).kills, []);
     // Our own descendant (started before the exit) is signalled individually; the group id never is.
-    const mine = await go(() => [{ pid: 7, startMs: Date.now() - 500 }]);
+    // Started at spawn time (inside the spawn..exit window; ps would floor it to the spawn second).
+    const mine = await go(() => [{ pid: 7, startMs: spawnT }]);
     assert.deepEqual(mine.kills, [[7, "SIGTERM"], [7, "SIGKILL"], [7, "SIGKILL"]]);
     assert.ok(mine.kills.every(([p]) => p > 0));
   } finally { clearInterval(keep); }
 });
 
-test("ownedMembers: start time inside [spawn, exit] with one-second slack; anything else is not ours", () => {
-  const spawnedAt = Date.parse("2026-11-26T05:00:00.400Z"), exitedAt = Date.parse("2026-11-26T05:00:10Z");
+test("ownedMembers: start time inside the spawn..exit window only; nothing started after the exit second (X3/A6/A19)", () => {
+  const spawnedAt = Date.parse("2026-11-26T05:00:00.400Z"), exitedAt = Date.parse("2026-11-26T05:00:10.300Z");
   const at = (iso) => Date.parse(iso);
-  assert.deepEqual(ownedMembers([{ pid: 1, startMs: at("2026-11-26T05:00:00Z") }, { pid: 2, startMs: at("2026-11-26T05:00:11Z") }, { pid: 3, startMs: at("2026-11-26T05:00:12Z") }, { pid: 4, startMs: NaN }, 5], { spawnedAt, exitedAt }), [1, 2]);
+  // ps floors start times to the second: 05:00:00 is the spawn second (ours); 05:00:10 is the exit second (accepted
+  // residual: cannot be told apart); 05:00:11 started after the exit (a replacement) and is never ours (was accepted
+  // by the old +1000 ms slack); 04:59:59 predates the spawn.
+  const list = [{ pid: 1, startMs: at("2026-11-26T05:00:00Z") }, { pid: 2, startMs: at("2026-11-26T05:00:10Z") }, { pid: 3, startMs: at("2026-11-26T05:00:11Z") }, { pid: 6, startMs: at("2026-11-26T04:59:59Z") }, { pid: 4, startMs: NaN }, 5];
+  assert.deepEqual(ownedMembers(list, { spawnedAt, exitedAt }), [1, 2]);
 });
 
 test("bypass flags are refused before anything is spawned (A3)", async () => {

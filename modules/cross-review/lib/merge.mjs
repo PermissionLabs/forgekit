@@ -3,7 +3,7 @@
 // id is kept. Incomplete runs are listed but never merged (their review is withheld).
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { parseLoc, SEVS } from "./schema.mjs";
+import { parseLoc, SEVS, VERDICTS } from "./schema.mjs";
 
 const STOP = new Set(["the", "and", "for", "with", "that", "this", "are", "not", "can", "when", "from", "into", "its", "but", "only", "any", "all", "has", "have", "was", "were", "will", "does", "than", "then", "also", "even", "which", "while", "their", "there", "been", "being", "each", "other"]);
 const words = (s) => new Set(String(s).toLowerCase().match(/[a-z0-9_$.]{3,}/g)?.filter((w) => !STOP.has(w)) ?? []);
@@ -25,6 +25,25 @@ export function locDistance(la, lb) {
 }
 
 /**
+ * Shape problems of a review to be merged (X16): verdict in the enum, findings an array of objects each with a
+ * string id, a severity from the enum, a file:line loc and non-empty claim/evidence/check. [] when mergeable.
+ */
+export function reviewShapeProblems(review) {
+  if (!review || typeof review !== "object" || Array.isArray(review)) return ["review is not an object"];
+  const errs = [];
+  if (!VERDICTS.includes(review.verdict)) errs.push(`verdict must be one of ${VERDICTS.join("|")}`);
+  if (!Array.isArray(review.findings)) return [...errs, "findings is not an array"];
+  review.findings.forEach((f, i) => {
+    if (!f || typeof f !== "object" || Array.isArray(f)) { errs.push(`findings[${i}] is not an object`); return; }
+    if (typeof f.id !== "string" || !f.id) errs.push(`findings[${i}].id missing`);
+    if (!SEVS.includes(f.sev)) errs.push(`findings[${i}].sev must be one of ${SEVS.join("|")}`);
+    if (!parseLoc(f.loc)) errs.push(`findings[${i}].loc must be "file:line"`);
+    for (const k of ["claim", "evidence", "check"]) if (typeof f[k] !== "string" || !f[k].trim()) errs.push(`findings[${i}].${k} empty`);
+  });
+  return errs;
+}
+
+/**
  * Read one --review argument: a run directory (evidence.json + review.json), an evidence.json, or a review.json
  * next to its evidence.json. Only a run whose evidence says status=complete is merged: a review.json without
  * evidence (no status), an incomplete run, or a review that is not { verdict, findings[] } is listed as
@@ -43,10 +62,10 @@ export function loadReviewEntry(arg) {
   if (given === undefined && !ev) reasons.push(`cannot read ${file}`);
   if (!ev) reasons.push("no evidence.json: run status unknown (merge needs a complete run's evidence)");
   else if (ev.status !== "complete") reasons.push(...(ev.incompleteReasons?.length ? ev.incompleteReasons : [`status=${ev.status ?? "missing"}`]));
-  const shapeOk = review && typeof review === "object" && typeof review.verdict === "string" && Array.isArray(review.findings);
-  if (ev?.status === "complete" && !shapeOk) reasons.push("review is not a { verdict, findings[] } object");
+  if (ev?.status === "complete") reasons.push(...reviewShapeProblems(review).map((e) => `review invalid: ${e}`));
   if (ev?.status === "complete" && given && !given.schema && ev.review && JSON.stringify(given) !== JSON.stringify(ev.review)) reasons.push("review.json differs from evidence.json review");
-  const prefix = ev?.reviewer?.idPrefix ?? review?.findings?.[0]?.id?.[0] ?? null;
+  const first = Array.isArray(review?.findings) ? review.findings[0] : null;
+  const prefix = ev?.reviewer?.idPrefix ?? (typeof first?.id === "string" ? first.id[0] : null) ?? null;
   return {
     source: path.resolve(file), host: ev?.reviewer?.host ?? (prefix ? `prefix:${prefix}` : path.basename(dir)),
     status: reasons.length ? "incomplete" : "complete", incompleteReasons: reasons, review: reasons.length ? null : review,
@@ -62,7 +81,8 @@ export function mergeReviews(entries, { lineWindow = 3, minSimilarity = 0.2 } = 
   const groups = [];
   for (const e of entries) {
     if (e.status !== "complete" || !e.review) continue;
-    for (const f of e.review.findings ?? []) {
+    if (reviewShapeProblems(e.review).length) continue; // never merged, never a crash (X16)
+    for (const f of e.review.findings) {
       const m = { host: e.host, id: f.id, sev: f.sev, loc: f.loc, claim: f.claim, text: `${f.claim} ${f.evidence}` };
       // Same place (overlapping lines) needs weaker textual agreement than nearby lines.
       const text = `${f.claim} ${f.evidence}`;

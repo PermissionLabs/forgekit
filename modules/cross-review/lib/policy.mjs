@@ -45,10 +45,12 @@ export function policyProblems(policy) {
       if (typeof h.allow_code_execution !== "boolean") errs.push(`hosts.${name}.allow_code_execution must be boolean`);
       else if (h.allow_code_execution && name !== "codex") errs.push(`hosts.${name}.allow_code_execution: only codex runs commands (inside its read-only sandbox)`);
     }
+    // There is no audit-only mode (r3): codex runs only under the self-tested OS sandbox.
     if (h?.os_sandbox !== undefined) {
-      if (!["required", "audit_only"].includes(h.os_sandbox)) errs.push(`hosts.${name}.os_sandbox must be "required" or "audit_only"`);
+      if (h.os_sandbox !== "required") errs.push(`hosts.${name}.os_sandbox must be "required" (audit-only mode was removed: without an OS sandbox the run is incomplete)`);
       else if (name !== "codex") errs.push(`hosts.${name}.os_sandbox: only codex runs model commands under the OS sandbox`);
     }
+    for (const k of ["per_turn_budget_sec", "max_total_sec"]) if (h?.[k] !== undefined && !(typeof h[k] === "number" && h[k] > 0)) errs.push(`hosts.${name}.${k} must be a positive number`);
     if (h?.env_passthrough !== undefined && (!Array.isArray(h.env_passthrough) || !h.env_passthrough.every((k) => typeof k === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(k))))
       errs.push(`hosts.${name}.env_passthrough must be an array of variable names`);
     for (const [k, v] of Object.entries(h?.expected_cost ?? {})) if (typeof v !== "number" || !(v >= 0 && v <= 1)) errs.push(`hosts.${name}.expected_cost.${k} must be a fraction in [0, 1]`);

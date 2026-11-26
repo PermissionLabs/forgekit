@@ -65,6 +65,8 @@ export function checkOut(repo, out, { dir = true } = {}) {
   const abs = path.resolve(out);
   const realAbs = realish(abs);
   if (!realAbs) throw new Error(`--out ${out}: cannot resolve the path`);
+  // Never under a .git directory, whether or not a work tree can be found for it (A10: `git rev-parse` fails inside .git).
+  if (abs.split(path.sep).includes(".git") || realAbs.split(path.sep).includes(".git")) throw new Error(`--out ${out} is inside a .git directory; use an untracked location (e.g. .context/ or a temp dir)`);
   const git = (cwd, args) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
   const topOf = (d) => { try { return realish(git(d, ["rev-parse", "--show-toplevel"]).trim()); } catch { return null; } };
   let anc = realAbs;
