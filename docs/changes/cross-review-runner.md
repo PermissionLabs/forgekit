@@ -33,7 +33,7 @@ Its ten ACP rules (isolated `GEMINI_HOME`, `reject_once`, view_file only, `.meta
 
 - [x] Plan
 - [x] Implement
-- [ ] Review
+- [x] Review (r1–r4 cross-review cycles; r4 had no high/critical; r4 fixes below; ready for PR)
 - [ ] Human QA
 - [ ] Merge
 - [ ] Post-merge
@@ -138,6 +138,14 @@ flowchart TD
   dir (`codex sandbox` has no `--ignore-user-config`), and also probes harmless files in
   `/private/tmp` and `$HOME`. The bypass guard accepts a sensitive `-c` only when it is byte-for-byte a
   value the runner generated (`allowedConfig`).
+- r4: the Codex argv guard is an allowlist of the exact shape the runner builds (no `-s`, no profile,
+  every `-c` one of the generated values and all of them present); `-c` keys are TOML-decoded for the
+  generic guard. The self-test needs every probe file (os.tmpdir, `/private/tmp`, `/private/var/tmp`,
+  `$HOME`): a probe that cannot be created is `os_sandbox_selftest_unavailable`, never a pass. Grants
+  are compared and recorded canonicalized (symlinks, case on macOS). Claude brace globs over 64
+  alternatives are decided by an automaton (relative-only pass; escaping → `tool_glob_unauditable`).
+  Antigravity turns and budget come from one helper (`lib/turns.mjs`) for plan and run, with a floor
+  (`min_total_sec`) and the `rereview_single_group` speed knob.
 - Dispositions use the requested vocabulary `fixed|followup|accepted|blocked`; the README maps them to
   the change-record vocabulary.
 
@@ -162,6 +170,11 @@ flowchart TD
 
 ## Verification
 
+- After the r4 fixes (2026-11-26): `node --test modules/cross-review/test/*.test.mjs`: 132 tests pass
+  (8 files; the real-codex `codex sandbox` self-test ran, not skipped). Run against the 481a88c
+  sources (new tests, old code), 10 tests fail there (adapters.test.mjs fails at load: `tomlKey` does
+  not exist; A63/A65/A66/rereview, A64, both codex sandbox run tests, A53/A61, A60, A62).
+  `scripts/check-harness-sync.sh --forgekit` in sync; `scripts/test-check-harness-sync.sh` 70 cases pass.
 - After the r3 fixes (2026-11-26): `node --test modules/cross-review/test/*.test.mjs`: 126 tests pass
   (8 files; the real-codex `codex sandbox` self-test with the exact exec flags ran, not skipped). Run
   against the e64a80c sources (new tests, old code; Antigravity/plan helpers shimmed so the file
@@ -209,6 +222,14 @@ flowchart TD
 | Antigravity | 6ba9ad6 | complete | gemini-4-neon / high (config + proxy `gemini-4-neon-high` on both calls) | 235 s (one turn, 229 s) | 37,728 tokens (23,498 thought); quota delta not measurable, see note | 1 high, 2 med, 1 low (A1–A4) |
 | Codex under the OS sandbox (r2) | scratch repo, 1 file | incomplete by design | gpt-6.1-sol / high (header; codex-cli 0.172.0) | ~1 min | 24,481 tokens | draft: 1 med (X1, the planted `a - b` bug) kept as `reviewIfIncomplete` |
 | Codex, narrowed r3 profile | scratch repo, 1 file | complete | gpt-6.1-sol / high (header; codex-cli 0.172.0) | 11 s | 12,296 tokens | 1 med (X1, the planted `a + b` in `sub`) |
+| Codex, r4 fixes (exact argv shape, 4-probe self-test) | bf09019, `lib/turns.mjs`, correctness | complete | gpt-6.1-sol / high (header) | 42 s | 6,916 tokens | none (pass) |
+
+r4 smoke: the exact-shape guard accepted the real argv (`exec -m -c×5 --disable×11 --ephemeral
+--ignore-user-config --ignore-rules --skip-git-repo-check -C --color --output-schema -o -`, no `-s`);
+self-test ok with all four probe files created (os.tmpdir, `/private/tmp`, `/private/var/tmp`, `$HOME`)
+and denied, Codex-home listing and snapshot write denied, snapshot read ok, `unavailable: []`, no probe
+errors; read roots `:minimal`, the snapshot, the codex release dir, the node version dir (canonical
+paths); no warnings.
 
 r3 smoke: read roots `:minimal`, the snapshot, `~/.codex/packages/standalone/releases/0.172.0-aarch64-apple-darwin`,
 `~/.local/share/node/v22.23.5`; denied `/private/tmp`, `/private/var/tmp`. Self-test: outside,
@@ -284,6 +305,25 @@ it is well under the r5/r6 full reviews that measured ~0.01 weekly.
 | 5 (r2) | Re-review of f1780ef..c8a846c: Antigravity A35–A46 (complete, block); Codex incomplete (`tool_read_outside_snapshot:5`, all literal paths inside its own `node -e` repros = R2), draft X10–X17 read from the raw `-o` file for information only | High: the shell audit kept being bypassed (A35/X11 `$'..'`, A36/X10 assignment pre-pass, A37/X13 redirection/prefix options, A38/X14 `/?` and non-ASCII roots) and false-positived on harmless programs (R2); X12 non-zero Antigravity exit ignored. Med/low: A39, A41, A43/X17, X15, X16, A40, A42, A44–A46. Unverified priors: X1/A11, X3/A19/A6, X6, X8/A15, A10, A24. Operator: draft not saved when incomplete, reasons only counted, merge accepted status-less review.json, gradeReasons/unmatched, cost seeds. | User decision: OS-enforced confinement for Codex (Seatbelt permission profile + self-test; outer sandbox-exec proved impossible), shell audit demoted to warnings except clear violations; every finding fixed with tests (A46 partly followup); operator items implemented. |
 
 | 6 (r3) | Re-review of c8a846c..e64a80c: Codex ran to completion under the first production OS sandbox (922 s, 222,195 tokens) but was incomplete only by the secondary audit (`ls -l` of the allowed node binary, a false positive); its draft X18–X23 (block) was kept as `reviewIfIncomplete`. Antigravity incomplete `total_timeout_before:group:tests+contract_docs:files4/4` (fixed 1500 s budget; 11 of 16 turns); partial turns A47–A57 extracted for information. Merge: 0 groups (both incomplete); manual overlaps X18 = A52, X19 ≈ A49, X3/A6/A19 unverified. | Orchestrator decision: simplify so the loop converges — shell audit evidence-only, `audit_only` removed, denial counter dropped. Real fixes with regression tests for every r3 id and every unverified prior (dispositions below). |
+| 7 (r4) | Re-review of e64a80c..481a88c: Codex complete (336 s, 182,111 tokens; self-test ok, 6 probes), verdict fix, 1 med X24; 25/27 priors verified, A50 and A53 not verified. Antigravity complete (1552 s of a 2880 s budget, 16 turns: 4 groups × 4 chunks), verdict fix, 4 med + 5 low A58–A66; 27/27 priors verified. Merge: 10 groups, no cross-host grouping; manual overlaps X24 vs A58 (same loc, opposite directions), A59 ≈ A50-unverified, A61 ≈ A53-unverified. No high/critical. | Every r4 id fixed with a regression test (dispositions below); operator items: plan turn estimate, split-row dispositions; speed knob `rereview_single_group`. Ready for PR. |
+
+### r4 dispositions
+
+| Id | Disposition | Ref |
+| --- | --- | --- |
+| A50 (prior, unverified by Codex) / A59 (med) | fixed | `bypassFlags(argv, { allowedConfig, shape: "codex" })`: the codex argv must have exactly the shape `codex.buildArgv` builds (flag allowlist; every `-c` byte-identical to a runner-generated value and all of them present, so the permission profile cannot be dropped); for every host `-s`/`-sX`/`--sandbox[=]`, `sandbox_mode`, `--profile[=]`, `--include-managed-config*`, `-P…`, `-a…` are refused and `-c` keys are decoded as TOML (`tomlKey`: quoted keys, `\u`/`\U` escapes; undecodable → sensitive; `profile`, `managed`, ... added). `-p` is refused by the codex shape only (Claude uses `-p` = print). run.mjs re-checks the reported argv with the same shape. Test: 29 spellings incl. the reviewer's, missing profile value |
+| A53 (prior, unverified by Codex) / A61 (med) | fixed | a probe file the runner could not create (or a missing self-test result) is never a pass: `selfTest` keys are null → `ok: false`, `prepareSandbox` → `os_sandbox_selftest_unavailable:<keys>` and `osSandbox.probeErrors`; new `/private/var/tmp` probe (`privateVarTmpReadDenied`). Tests: each probe missing in turn; `makeProbe` with unwritable parents records 3 errors; real probe in `/private/var/tmp` |
+| A60 (med) | fixed | `canonicalPath` (realpath.native of the longest existing ancestor + rest; `..` removed); `grantProblem` compares the given and canonical forms of both sides, case-folded on macOS/Windows (`caseInsensitive` option); `permissionProfile` records canonical grant paths. Tests: `home` with different case, `CODEX_HOME` with different case and as a symlink, `/Private/tmp/nonexistent`, `/tmp/x/../y`, `bin/..` grant stored canonical |
+| X24 (med) / A58 (low) | fixed | opposite directions of one defect: `braceAlternatives` returns null over 64 alternatives and `braceMayEscape` (an automaton over the brace tree, any size) decides whether any alternative is absolute, `~` or has a `..` component. Relative-only → treated like any relative glob (no fabricated `/` pieces, X24); escaping → `tool_glob_unauditable:<pattern> (over 64 brace alternatives, ...)` or a warning when the host denied the call (A58). Cross-checked against enumeration on 500k random patterns: never under-reports; it over-reports only for malformed nested unclosed braces (fail-closed). Tests: both sides, Glob and Grep `glob` |
+| A62 (low) | fixed | fake codex follows codex semantics: `:minimal` grants the platform set incl. `/private/tmp` and `/private/var/tmp`, rules in profile order, last match wins. Test: the generated profile without its `none` entries → `privateTmpReadDenied`/`privateVarTmpReadDenied` false, `ok` false (real `sandbox-exec`) |
+| A63 (med) | fixed | `lib/turns.mjs` (shared by plan and the adapter): `totalBudget` floor `min_total_sec` (policy 600; default `turn_timeout_sec`, else 600) and cap; `plan` counts groups incl. the leftover group and file chunks with the adapter's own `runTurns`, by bytes when sizes are known (`plan` stats the scope paths in the working tree). Tests: 1-turn and 89 s/turn cases → 600 s; plan estimate = adapter turns for the r4 shape (16) |
+| A64 (low) | fixed | `mergeReviews` re-validates entries claiming complete; a malformed review is listed `status=incomplete findings=0 (not merged: review invalid: ...)`. Test: `findings: "bad"` and `[null]` |
+| A65 (low) | fixed | no Antigravity budget/warning when Antigravity is the author (`decision: excluded`). Test |
+| A66 (low) | fixed | the plan test calls `plan()` and checks `hosts.antigravity.budget` and `warnings` |
+| Operator: plan estimate 12 vs 16 turns | fixed | the leftover (portability) group was already counted; the gap was the byte split (4 chunks by `max_bytes_per_turn` vs 3 by `max_files_per_turn`). `plan` now uses file sizes and the adapter's helper (= A63) |
+| Operator: dispositions for split rows (A49 two rows folded into one `accepted` entry with both refs) | accepted_with_reason | The disposition schema allows one entry per id; folding the two r3 rows of A49 (fixed part / accepted part) into one entry whose ref names both is lossless for the reviewer, who verified it. Left as is |
+| Speed knob (operator request) | fixed | `rereview_single_group` (default true): a re-review whose diff is ≤ `rereview_single_group_max_diff_bytes` (120000) runs one group with every dimension per file chunk; `plan --prior` estimates the same way. Tests: small/large diff, knob off, plan estimate |
+| X3, X6, X10, X12, X16, X18–X23, A6, A10, A19, A36, A44, A47–A49, A51, A52, A54–A57 (priors) | fixed / accepted_with_reason (verified in r4 by both hosts) | — |
 
 ### r3 dispositions
 
@@ -349,7 +389,7 @@ it is well under the r5/r6 full reviews that measured ~0.01 weekly.
 
 - Working branch: `agent/cross-review-runner` (based on `agent/antigravity-support` @ f9aa6ff, not yet merged)
 - Target branch: `main` (after `agent/antigravity-support`)
-- PR URL: TBD (no PR in this step)
+- PR URL: TBD (no PR in this step). Status: ready for PR after the r4 fixes (no open high/critical; every r4 id fixed with a regression test)
 
 ## Residuals
 
@@ -367,6 +407,9 @@ it is well under the r5/r6 full reviews that measured ~0.01 weekly.
 | r3 | A versioned runtime grant exposes the whole package dir (e.g. a node version's `lib/node_modules`, a codex release dir) | `accepted_with_reason` | Package files only; a bare binary in a shared bin/ is granted as one file; `/`, `$HOME`, `CODEX_HOME` and denied paths are refused |
 | r3 A44 | Proxy-line attribution in the ACP stub relies on stderr-before-stdout ordering (write callback + 30 ms) | `accepted_with_reason` | Mis-attribution fails closed (`proxy_model_unconfirmed`) |
 | r3 X12 | The crash-before-cleanup case is covered by the pure `exitReason` tests; the stub only exercises a different signal during cleanup | `accepted_with_reason` | Deterministic timing of a spontaneous crash before cleanup is not reproducible in the stub |
+| r4 X24/A58 | `braceMayEscape` parses an unclosed outer `{` as a literal but still expands a closed inner group, so a few malformed patterns (e.g. `{{/}..`) are refused although plain enumeration finds no escaping alternative | `accepted_with_reason` | Errs toward incomplete (fail-closed) only for malformed globs over 64 alternatives; never under-reports (500k-pattern cross-check) |
+| r4 A60 | Case folding is applied on every macOS volume, also a case-sensitive one | `accepted_with_reason` | Folding can only add refusals (fail-closed); APFS default is case-insensitive |
+| r4 speed knob | A single-group re-review turn covers every dimension at once (less per-dimension focus than one turn per group) | `accepted_with_reason` | Only for re-reviews (prior findings given) with a diff ≤ 120 KB; `rereview_single_group: false` restores the groups |
 | r1 R3 | Merge grouping is a word-overlap heuristic (Jaccard 0.2, 0.1 on overlapping lines, ±3 lines) | `filed_followup` | Calibrate on more cycles; every host id stays visible, so a missed grouping only duplicates a line |
 | r1 R4 / X6 | A tool-like line (`mcp …`, `tool …`) at a paragraph start inside command output is still flagged | `accepted_with_reason` | Plain mode has no output delimiters; flagging errs toward incomplete; prompt echo, mid-paragraph lines and stray `exec` lines (r2) are not |
 | r1 R5 / A30 | `ps -eo` path verified on macOS only | `filed_followup` | POSIX syntax; run the suite on Linux CI (procps / BusyBox) |
