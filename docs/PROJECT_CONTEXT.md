@@ -41,7 +41,7 @@ CLI modules are available under `modules/` and are never installed implicitly.
 - `scripts/worktree-add.sh`: optional helper that creates a worktree and seeds worktree-local state
 - `scripts/update-harness.sh`: helper for updating existing downstream repos without re-bootstrap
 - `templates/`: files copied or synced into downstream product repositories
-- `modules/`: optional evidence-backed state, host-adapter, docs-index, and CI building blocks
+- `modules/`: optional evidence-backed state, host-adapter, docs-index, and CI building blocks, plus the `cross-review` runner (`modules/cross-review/README.md`)
 - `templates/.context/workflow-state.compact.example.json`: recommended live progress state shape
 - `templates/.context/workflow-state.example.json`: expanded reference schema
 

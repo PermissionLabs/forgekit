@@ -1,0 +1,35 @@
+#!/usr/bin/env node
+// Stand-in for `codex exec` (plain mode): stderr transcript header + -o last message. No model call.
+import * as fs from "node:fs";
+const args = process.argv.slice(2);
+fs.readFileSync(0, "utf8");
+if (process.env.FAKE_ARGV_OUT) fs.writeFileSync(process.env.FAKE_ARGV_OUT, JSON.stringify(args));
+const val = (f) => args[args.indexOf(f) + 1];
+const effort = (args.find((a) => a.startsWith("model_reasoning_effort=")) ?? "").replace(/^.*="?|"$/g, "");
+const cwd = val("-C");
+const e = (s) => process.stderr.write(s + "\n");
+e("OpenAI Codex v0.167.0");
+e("--------");
+e(`workdir: ${cwd}`);
+e(`model: ${process.env.FAKE_REPORTED_MODEL ?? val("-m")}`);
+e("provider: openai");
+e(`approval: ${process.env.FAKE_APPROVAL ?? "never"}`);
+e(`sandbox: ${process.env.FAKE_SANDBOX ?? "read-only"}`);
+e(`reasoning effort: ${effort}`);
+e("session id: 00000000-0000-0000-0000-000000000000");
+e("--------");
+e("user");
+e("(prompt)");
+e("");
+e("exec");
+e(`/bin/zsh -lc '${process.env.FAKE_COMMAND ?? "sed -n 1,40p src/a.ts"}' in ${cwd}`);
+e(" succeeded in 0ms:");
+e("");
+e("codex");
+e("done");
+e("tokens used");
+e("1,234");
+const outs = (process.env.FAKE_OUTPUTS ?? process.env.FAKE_REVIEW).split("\n---\n");
+const out = outs[Math.min(val("-o").includes("retry") ? 1 : 0, outs.length - 1)];
+fs.writeFileSync(val("-o"), out);
+process.stdout.write(out);

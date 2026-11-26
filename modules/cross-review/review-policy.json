@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "review_effort": "high",
+  "default_dimensions": ["correctness", "tests", "contract_docs"],
+  "host_order": ["codex", "antigravity", "claude"],
+  "grade": {
+    "high_dimensions": ["security", "migration", "deployment", "contract"],
+    "high_path_globs": [
+      "**/migrations/**",
+      "**/*migration*",
+      "**/auth/**",
+      "**/*auth*",
+      ".github/workflows/**",
+      "**/runner/**",
+      "modules/cross-review/**",
+      "**/review-policy.json"
+    ],
+    "reviewers": { "standard": 1, "high": 2 }
+  },
+  "pace": {
+    "provisional": true,
+    "note": "Thresholds are provisional until enough real runs are recorded. pace = remainingFraction / remainingTimeFraction, worst window per host.",
+    "use_at_or_above": 1.0,
+    "high_only_at_or_above": 0.6
+  },
+  "hosts": {
+    "claude": {
+      "id_prefix": "C",
+      "bin": "claude",
+      "model": "claude-opus-5-5",
+      "model_note": "Current Opus id (claude --help accepts full model names; init event reported claude-opus-5-5 on 2026-11-26). Change it here only.",
+      "effort_map": { "high": "high" },
+      "timeout_sec": 1800,
+      "usage": { "provider": "claudeAgent", "windows": ["claude:seven_day"] },
+      "expected_cost": {}
+    },
+    "codex": {
+      "id_prefix": "X",
+      "bin": "codex",
+      "model": "gpt-6.1-sol",
+      "effort_map": { "high": "high" },
+      "timeout_sec": 1800,
+      "usage": { "provider": "codex", "windows": ["codex:primary"] },
+      "expected_cost": {}
+    },
+    "antigravity": {
+      "id_prefix": "A",
+      "model": "gemini-4-neon",
+      "effort_map": { "high": "high" },
+      "timeout_sec": 1500,
+      "turn_timeout_sec": 600,
+      "retry_timeout_sec": 280,
+      "groups": [["security"], ["correctness"], ["tests", "contract_docs"]],
+      "usage": { "provider": "antigravity", "windows": ["antigravity:gemini_5h", "antigravity:gemini_weekly"] },
+      "expected_cost": { "weekly": 0.01 },
+      "expected_cost_note": "Measured: one full view_file review used about 0.01 of the Gemini weekly window (r5/r6, 2026-11-25).",
+      "runtime": {
+        "runtime_root": "~/.t3/tools/antigravity-acp/darwin-arm64/versions",
+        "profile_root": "~/.t3/userdata/providers/antigravity",
+        "expect_agent_version": null
+      }
+    }
+  }
+}

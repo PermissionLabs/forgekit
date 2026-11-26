@@ -137,6 +137,7 @@ modules/
   host-adapters/               # optional host output adapters + fixtures
   docs-index/                  # optional generated route index contract
   quality/                     # optional fast CI template
+  cross-review/                # optional host-neutral cross-review runner + per-host adapters
 docs/
   AGENT_GUIDE.md
   WORKFLOW.md

@@ -24,6 +24,12 @@ run "harness sync script contract" bash "$ROOT/scripts/test-check-harness-sync.s
 run "workflow-state tests" bun test "$ROOT/modules/workflow-state/state.test.ts"
 run "docs-index tests" bun test "$ROOT/modules/docs-index/docs-index.test.ts"
 run "Codex hook adapter contract" bash "$ROOT/modules/host-adapters/test-codex-hook-adapter.sh"
+run "cross-review runner tests" node --test \
+  "$ROOT/modules/cross-review/test/plan.test.mjs" \
+  "$ROOT/modules/cross-review/test/schema.test.mjs" \
+  "$ROOT/modules/cross-review/test/adapters.test.mjs" \
+  "$ROOT/modules/cross-review/test/run.test.mjs"
+run "cross-review policy JSON" jq -e . "$ROOT/modules/cross-review/review-policy.json" >/dev/null
 run "manifest JSON" jq -e . "$ROOT/modules/manifest.json" >/dev/null
 run "workflow-state schema JSON" jq -e . "$ROOT/modules/workflow-state/schema.json" >/dev/null
 run "docs registry schema JSON" jq -e . "$ROOT/modules/docs-index/registry.schema.json" >/dev/null
@@ -78,7 +84,8 @@ if grep -rE -n 'RevenueCat|Amplitude|mobile:ota' \
   "$ROOT/modules/workflow-state" \
   "$ROOT/modules/host-adapters" \
   "$ROOT/modules/docs-index" \
-  "$ROOT/modules/quality" >/dev/null; then
+  "$ROOT/modules/quality" \
+  "$ROOT/modules/cross-review" >/dev/null; then
   printf 'FAIL: project-specific policy leaked into promoted modules\n' >&2
   FAIL=$((FAIL + 1))
 else

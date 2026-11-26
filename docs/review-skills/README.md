@@ -56,8 +56,32 @@ Claude Code, Codex CLI, and Antigravity follow one shared review contract:
 the same input (the skill file plus the current diff), read-only execution,
 the same output schema, model and effort pinned by a policy file rather than
 chosen per run, and any failure to complete reported as `incomplete` instead
-of a clean result. The contract and the per-host adapters are added in a
-follow-up change; until then the hints below are the only binding.
+of a clean result.
+
+ForgeKit ships that contract as the optional `modules/cross-review/` runner
+(see its `README.md`). The author host is never the reviewer:
+
+```sh
+# choose reviewers (grade, pace from a saved provider_usage_limits file)
+node modules/cross-review/cross-review.mjs plan --author <host> \
+  --dimensions correctness,security --paths-from pr.patch --usage usage.json
+# run one read-only review per selected host
+node modules/cross-review/cross-review.mjs run --host <host> --rev <sha> \
+  --diff pr.patch --scope scope.txt --brief brief.md \
+  --checklist docs/review-skills/code-review.md --out .context/reviews/r1/<host>
+# re-review: add --prior <findings.json> --dispositions <file>, diff = new commits only
+```
+
+`plan` returns `ok`, `ask` (one-line questions for the human) or `blocked`
+(needs a human decision). `run` prints a short summary (verdict, counts by
+severity, full high/critical findings, reviewer/model/effort and reported
+model, evidence path) and writes the evidence under `--out`. Record each run
+as a review cycle; a run that ends `incomplete` is not a clean review. Map the
+runner's dispositions to the vocabulary above: `followup` → `filed_followup`,
+`accepted` → `accepted_with_reason`.
+
+Projects without the module, or hosts without an adapter, use the hints
+below.
 
 - **Claude Code:** load the skill file into a subagent and run the review
   against the current diff. A project-local slash command that opens the
