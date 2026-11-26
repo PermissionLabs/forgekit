@@ -72,9 +72,10 @@ flowchart TD
 - Policy (`review-policy.json`) is the only place for model ids: Claude `claude-opus-5-5` (the current
   Opus id; `claude --help` accepts full names and the live `init` event reported it), Codex
   `gpt-6.1-sol`, Antigravity `gemini-4-neon`, all at `review_effort: high`. It also holds id prefixes,
-  grade dimensions and path globs, pace thresholds (marked provisional), per-host usage windows,
-  expected cost (Antigravity 0.01 of the weekly window per full review, measured r5/r6), timeouts and
-  the Antigravity runtime paths.
+  grade dimensions and path globs, pace thresholds (marked provisional) and `reset_soon_minutes`,
+  per-host usage windows, expected cost per window kind (Antigravity weekly 0.01 measured r5/r6,
+  session/5 h 0.04 and Codex weekly 0.01 measured on the r1 runner review), timeouts, the Codex
+  code-execution flag, per-host `env_passthrough`, Antigravity turn-split limits and runtime paths.
 - Usage windows are listed per host because the Antigravity payload also carries `shared_3p_*` windows
   (Claude/GPT via Antigravity) that are `notStarted` and do not meter the Gemini reviewer; counting them
   would make Antigravity permanently `ask`.
@@ -89,7 +90,15 @@ flowchart TD
   `modelUsage`; that is a warning, but the pinned model must be present.
 - Antigravity is a port of the proven view_file runner with the same rules; dimension groups come from
   the policy (`groups`), restricted to the run's dimensions.
-- `run` refuses an `--out` that is inside the repository and not git-ignored.
+- `run`, `plan --out` and `merge --out` refuse an output inside the repository unless it is git-ignored
+  (checked against the index, so tracked files never pass) and never under `.git/`.
+- `--checklist` is repeatable (one path each) and read from the git object at `--rev`, or from an
+  explicit file outside the repository; source and sha256 are recorded.
+- `run` writes `summary.txt` next to the evidence; `merge` combines several hosts' `review.json` into
+  one deduplicated summary (same file within a few lines + similar claim/evidence → one group, every
+  host's id kept).
+- Codex `allow_code_execution` (policy, default `true`): model-run commands may run interpreters
+  inside the read-only sandbox; `false` makes any such command incomplete. Other hosts cannot enable it.
 - Dispositions use the requested vocabulary `fixed|followup|accepted|blocked`; the README maps them to
   the change-record vocabulary.
 
@@ -114,7 +123,14 @@ flowchart TD
 
 ## Verification
 
-- `node --test modules/cross-review/test/*.test.mjs`: 48 tests pass (plan/grade/pace/selection, schema
+- After the r1 fixes: `node --test modules/cross-review/test/*.test.mjs`: 91 tests pass (7 files, incl.
+  new `antigravity.test.mjs` with an ACP stub and `cli.test.mjs`); every new regression test was run
+  against the f1780ef sources and fails there. `scripts/test-modules.sh` now globs the test files.
+  The new Codex auditor replayed on the real r1 Codex transcript: 21 commands parsed (multi-line
+  included), prompt echo matched, 0 unauditable; 4 model-written `node -e` programs that contain
+  literal outside paths (`/etc/passwd`, `/tmp/snap-x`, `/snapshot` in its own repro strings) are now
+  flagged, so that run would be `incomplete` under the new rules (intended conservative outcome).
+- Before the r1 fixes: `node --test modules/cross-review/test/*.test.mjs`: 48 tests pass (plan/grade/pace/selection, schema
   and dispositions, pinned-vs-reported, adapter argv and session parameters, transcript/stream audits,
   process helper, fake-host end-to-end runs including retry, re-review, outside reads, snapshot writes,
   model mismatch, missing binary). No test calls a model.
@@ -153,6 +169,49 @@ it is well under the r5/r6 full reviews that measured ~0.01 weekly.
 | 2 | Real smoke cross-review of `lib/proc.mjs` at 484d0da (Codex X1–X3, Claude C1–C5) | X2/C1 resolved on `exit`, output could be truncated; X1/C2 delayed SIGKILL could hit a reaped group; X3/C4 bypass guard missed `--add-dir=`, `--yolo=`, `-y`, `--approval-mode`; C3 missing timeout killed at once; C5 duration included cleanup sleep. | Fixed in 6ba9ad6 with tests (`test/proc.test.mjs`, bypass guard test). |
 | 3 | Real smoke cross-review of `lib/proc.mjs` at 6ba9ad6 (Antigravity A1–A4) | A1 (high) a descendant that left the group (setsid) but kept stdout/stderr open blocked `close` forever; A2 the post-close leftover kill has a ps→kill window; A3 unanchored substring patterns scanned every argv token (a temp dir named like `…YoLo…` would be a false positive); A4 sync spawn failure result lacked `leftoversKilled`. | A1, A3, A4 fixed in the cycle-3 commit with tests (setsid descendant, value-position and path/JSON cases). A2 accepted (see Residuals). |
 
+| 4 (r1) | Cross-review of the whole branch at f1780ef: Codex X1–X9 (`gpt-6.1-sol`/high), Antigravity A1–A34 (`gemini-4-neon`/high); overlaps X1=A11, X2=A1, X3≈A19/A6, X7≈A20, X8≈A15, X9=A26 (reproduced by the new `merge`) | High: X1/A11 fatal turn conditions ignored when the text was schema-valid; X2/A1 Codex audit missed multi-line commands, bare `cd`, flag-attached paths, null cwd; X3/A19/A6 post-exit group signals without a membership check; X4 missing per-turn proxy model line only warned. Med/low: see the disposition table below. Operator: code-execution policy flag, checklist from the git object + repeatable flag, `summary.txt` + `merge`, cost vs the 5 h window and reset-soon handling, Antigravity file-chunk turns. | All 43 findings fixed with regression tests in the r1 fix commit, except the residuals listed below; operator items implemented. |
+
+### r1 dispositions
+
+| Id | Disposition | Ref |
+| --- | --- | --- |
+| X1 / A11 | fixed | `adapters/antigravity.mjs` fatalReasons on every turn incl. retry; `test/antigravity.test.mjs` fatal-turn tests |
+| X2 / A1 | fixed | `adapters/codex.mjs` full exec-block parse, shell tokenizer, cwd required inside snapshot; multi-line / cd / flag-path tests |
+| X3 / A19 | fixed | `lib/proc.mjs` killGroup: child-held or ps-confirmed members only, timers cleared on close; mocked + real tests in `test/proc.test.mjs` |
+| X4 | fixed | per-turn `proxy_model_unconfirmed:<turn>`; ACP stub tests (all turns / one later turn) |
+| X5 | fixed | `pipes_abandoned` reason in claude/codex adapters; fake-host escape test |
+| X6 | fixed | exact prompt-echo skip, tool-like lines only at block starts; prompt and command-output tests (residual R4) |
+| X7 / A20 | fixed | `host_order` validated, planner de-duplicates; NaN / out-of-range `remainingFraction` → ask |
+| X8 / A15 | fixed | `lib/diff.mjs` hunk-aware parser, git-quoted paths decoded; used by plan and inputs |
+| X9 / A26 | fixed | docs/review-skills README (both copies) pass `--dimensions` and both checklists |
+| A2 | fixed | minimal env allowlist (`scrubEnv`) + `env_passthrough`; run tests assert a token var is not inherited |
+| A3 | fixed | bypass guard inside `runProcess` before spawn on the full argv; any non-`never` approval / non-`read-only` sandbox value |
+| A4 | fixed | `plainPath` (file: URIs via `fileURLToPath`, other schemes rejected), `realish` null on dangling symlinks |
+| A5 | fixed | full `rawInput` audited; `tool_call_update` titles and ids included |
+| A6 | fixed | `stopGroup`: post-exit signals only with ps-confirmed members; strays outside the group reported, never signalled |
+| A7 | fixed | Claude stream: parse errors, missing `tools`/`mcp_servers`/`cwd` fail closed; Glob/Grep traversal patterns audited |
+| A8 | fixed | snapshot 0500/0400 inside the private mkdtemp |
+| A9 | fixed | stderr redacted as a whole; auth markers checked on the accumulated text; split-chunk test |
+| A10 | fixed | `checkOut` without `--no-index`, `--` pathspec, `.git` refused, applied to `plan --out` / `merge --out` |
+| A12 | fixed | `--scope/--context @file` for list files; a bare name is always a path |
+| A13 | fixed | per-turn id start in prompt and validation; restart-at-A1 test |
+| A14 | fixed | spawn error / early exit reject pending and new requests at once; setup inside try/finally |
+| A16 / A25 | fixed | `reported_effort_unavailable` when a reporting host omits effort; Claude `effortCheck: unreported` |
+| A17 | fixed | `-o` file removed before each attempt; empty `-o` falls back to stdout |
+| A18 | fixed | usage summed over attempts; per-attempt reported model; mismatch never retried; 30 s floor only for the retry |
+| A21 | fixed | unknown/duplicate CLI options are usage errors; dimensions validated before the snapshot; snapshot removed in `finally` |
+| A22 | fixed | pgid tests assert the descendant is dead and the pipes were not abandoned; timeout test has a grandchild |
+| A23 | fixed | `test/antigravity.test.mjs` with `fixtures/fake-agy.mjs` ACP stub (11 tests) |
+| A24 | fixed | `test/cli.test.mjs` (parseArgs, readList, checkOut, exit codes, merge); Claude retry test; withheld-review assertions |
+| A27 | fixed | CLI help and README list `[--dimensions]`, `[--out]`, `merge` |
+| A28 | fixed | README/record describe the pre-spawn argv guard and the Codex effort assertion as implemented |
+| A29 | fixed | `docs/PROJECT_CONTEXT.md` Stack mentions the Node 20+ module |
+| A30 | fixed | POSIX `ps -eo pid=,pgid=[,args=]`, failures yield [] (never signal); Linux not run locally (residual R5) |
+| A31 | fixed | `runtime_root` `{platform}-{arch}` placeholder; highest version chosen by numeric sort |
+| A32 | fixed | Codex paths/cwd compared with `insideRoot`/realpath; more shell wrappers and bin dirs recognised |
+| A33 | fixed | `hosts.codex.disabled_features` override; Codex CLI version recorded (`extra.hostVersion`) |
+| A34 | fixed | fixture repos commit with `-c commit.gpgsign=false -c core.hooksPath=/dev/null` |
+
 ## Branch & Merge Evidence
 
 - Working branch: `agent/cross-review-runner` (based on `agent/antigravity-support` @ f9aa6ff, not yet merged)
@@ -163,7 +222,13 @@ it is well under the r5/r6 full reviews that measured ~0.01 weekly.
 
 | Source | Finding | Disposition | Link/reason |
 | --- | --- | --- | --- |
-| Cycle 3 / A2 | Leftover-group SIGKILL after `close` has a window between the `ps` check and `kill` | `accepted_with_reason` | The kill is sent only when `ps` shows live members of the group, and a pgid is not reused while it has members; the remaining window needs the last member to exit and its id to be reused as a new group leader within microseconds |
+| Cycle 3 / A2, r1 X3/A19/A6 | Every post-exit group signal (proc.mjs and Antigravity `stopGroup`) has a window between the `ps` membership check and `kill` | `accepted_with_reason` | A signal is sent only when `ps` shows a live member right before it (or the unreaped child holds the group); the remaining window needs the last member to exit and its id to be reused as a new group leader within microseconds |
+| r1 R1 (operator 1) | With `allow_code_execution: true` (default) a Codex program can read a file without naming it literally | `accepted_with_reason` | Runs only inside the read-only sandbox; literal paths, cwd and expansions are audited; set the flag to `false` to forbid interpreters/command substitution |
+| r1 R2 | Literal outside paths inside model-written programs (e.g. a repro string `/etc/passwd`) make a Codex run incomplete even when nothing was read | `accepted_with_reason` | Conservative by request ("prefer rejection over clever parsing"); seen on the r1 transcript replay; the reason names the command |
+| r1 R3 | Merge grouping is a word-overlap heuristic (Jaccard 0.2, 0.1 on overlapping lines, ±3 lines) | `filed_followup` | Calibrate on more cycles; every host id stays visible, so a missed grouping only duplicates a line |
+| r1 R4 / X6 | A tool-like line (`mcp …`, `tool …`) at a paragraph start inside command output is still flagged | `accepted_with_reason` | Plain mode has no output delimiters; flagging errs toward incomplete; prompt echo and mid-paragraph lines are no longer flagged |
+| r1 R5 / A30 | `ps -eo` path verified on macOS only | `filed_followup` | POSIX syntax; run the suite on Linux CI (procps / BusyBox) |
+| r1 R6 | Expected cost per window and turn-split limits (8 files / 120 KB) are provisional | `filed_followup` | Calibrate from recorded runs (Follow-ups) |
 | Design | Codex read-only sandbox does not confine reads to the snapshot | `accepted_with_reason` | No codex-cli 0.167.0 flag restricts read roots; detected from the transcript and the run is marked incomplete |
 | Design | Claude effort level is not reported by the host | `accepted_with_reason` | Recorded as pinned only; listed in `hostLimits` |
 | Design | Antigravity session persistence cannot be disabled | `accepted_with_reason` | Files deleted after the run when `.meta` cwd matches (same as T3) |
@@ -178,5 +243,8 @@ it is well under the r5/r6 full reviews that measured ~0.01 weekly.
 
 - Downstream binding (project review skill / quality doc calling `plan` then `run`).
 - Decide whether `security` should be a default dimension given that it forces high grade.
-- Calibrate pace thresholds (provisional) and expected cost per host from recorded runs.
+- Calibrate pace thresholds (provisional), expected cost per window kind, `reset_soon_minutes` and the
+  Antigravity turn-split limits from recorded runs.
+- Run the module tests on Linux (POSIX `ps -eo` path) in CI.
+- Calibrate `merge` grouping thresholds on more review cycles.
 - Promote via `modules/manifest.json` after a downstream evaluation.

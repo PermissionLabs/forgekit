@@ -65,10 +65,16 @@ ForgeKit ships that contract as the optional `modules/cross-review/` runner
 # choose reviewers (grade, pace from a saved provider_usage_limits file)
 node modules/cross-review/cross-review.mjs plan --author <host> \
   --dimensions correctness,security --paths-from pr.patch --usage usage.json
-# run one read-only review per selected host
+# run one read-only review per selected host, with the SAME dimensions
 node modules/cross-review/cross-review.mjs run --host <host> --rev <sha> \
-  --diff pr.patch --scope scope.txt --brief brief.md \
-  --checklist docs/review-skills/code-review.md --out .context/reviews/r1/<host>
+  --dimensions correctness,security \
+  --diff pr.patch --scope @scope.txt --brief brief.md \
+  --checklist docs/review-skills/code-review.md \
+  --checklist docs/review-skills/security-review.md \
+  --out .context/reviews/r1/<host>
+# combine the hosts' reviews into one deduplicated summary
+node modules/cross-review/cross-review.mjs merge \
+  --review .context/reviews/r1/<host-a> --review .context/reviews/r1/<host-b>
 # re-review: add --prior <findings.json> --dispositions <file>, diff = new commits only
 ```
 

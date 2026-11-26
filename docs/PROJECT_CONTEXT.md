@@ -16,7 +16,7 @@ CLI modules are available under `modules/` and are never installed implicitly.
 
 ## Stack
 
-- Runtime: optional Bun modules; the base document harness remains runtime-free
+- Runtime: optional Bun modules and the Node 20+ `cross-review` module; the base document harness remains runtime-free
 - Package manager: none
 - Primary artifacts: Markdown templates and JSON examples
 
