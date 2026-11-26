@@ -1,13 +1,16 @@
 // Child process helper: own process group, stdin prompt, hard timeout, SIGTERM -> SIGKILL group cleanup.
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 
 const sleep = (n) => new Promise((r) => setTimeout(r, n));
+export const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 
 /**
  * runProcess({ bin, args, cwd, env, input, timeoutMs }) ->
  *   { code, signal, timedOut, stdout, stderr, durationMs, spawnError }
+ * Resolves on 'close' (process exited and its stdio drained), so output is complete.
  */
 export async function runProcess({ bin, args, cwd, env, input, timeoutMs }) {
+  const limit = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_TIMEOUT_MS;
   const t0 = Date.now();
   let child;
   try {
@@ -15,34 +18,48 @@ export async function runProcess({ bin, args, cwd, env, input, timeoutMs }) {
   } catch (e) {
     return { code: null, signal: null, timedOut: false, stdout: "", stderr: "", durationMs: 0, spawnError: e.message };
   }
-  let stdout = "", stderr = "", spawnError = null, timedOut = false;
+  let stdout = "", stderr = "", spawnError = null, timedOut = false, done = false;
   child.stdout.setEncoding("utf8").on("data", (s) => { stdout += s; });
   child.stderr.setEncoding("utf8").on("data", (s) => { stderr += s; });
-  const exited = new Promise((res) => {
-    child.on("error", (e) => { spawnError = e.message; res({ code: null, signal: null }); });
-    child.on("exit", (code, signal) => res({ code, signal }));
+  const closed = new Promise((res) => {
+    child.on("error", (e) => { spawnError = e.message; done = true; res({ code: null, signal: null }); });
+    child.on("close", (code, signal) => { done = true; res({ code, signal }); });
   });
   child.stdin.on("error", () => {});
   child.stdin.end(input ?? "");
-  const killGroup = (sig) => { try { process.kill(-child.pid, sig); } catch {} };
-  const timer = setTimeout(async () => {
+  // Until 'close', the group still has a member (the child, or a descendant holding its pipes), so the pgid
+  // cannot have been reused. After 'close' no signal is sent.
+  const killGroup = (sig) => { if (!done && child.pid) { try { process.kill(-child.pid, sig); } catch {} } };
+  // A descendant that keeps stdout/stderr open after the child exits is killed after a short grace period.
+  child.on("exit", () => { setTimeout(() => { killGroup("SIGTERM"); setTimeout(() => killGroup("SIGKILL"), 2000).unref(); }, 2000).unref(); });
+  let killTimer = null;
+  const timer = setTimeout(() => {
     timedOut = true;
     killGroup("SIGTERM");
-    await sleep(5000);
-    killGroup("SIGKILL");
-  }, timeoutMs);
-  const { code, signal } = await exited;
+    killTimer = setTimeout(() => killGroup("SIGKILL"), 5000);
+  }, limit);
+  const { code, signal } = await closed;
+  const durationMs = Date.now() - t0;
   clearTimeout(timer);
-  killGroup("SIGTERM"); // grandchildren left in the group
-  await sleep(200);
-  killGroup("SIGKILL");
-  return { code, signal, timedOut, stdout, stderr, durationMs: Date.now() - t0, spawnError };
+  if (killTimer) clearTimeout(killTimer);
+  // Descendants that closed their stdio but stayed in the group: the group is non-empty, so its id is still ours.
+  const leftovers = groupMembers(child.pid);
+  if (leftovers.length) { try { process.kill(-child.pid, "SIGKILL"); } catch {} }
+  return { code, signal, timedOut, stdout, stderr, durationMs, spawnError, leftoversKilled: leftovers.length };
 }
 
-/** Flags that bypass permissions or sandboxing. No adapter may ever emit one. */
+function groupMembers(pgid) {
+  if (!pgid) return [];
+  try {
+    return execFileSync("ps", ["-axo", "pid=,pgid="], { encoding: "utf8" }).split("\n")
+      .map((l) => l.trim().split(/\s+/).map(Number)).filter(([, g]) => g === pgid).map(([p]) => p);
+  } catch { return []; }
+}
+
+/** Flags that bypass permissions or sandboxing, in `--flag`, `--flag=value` and value positions. */
 export const BYPASS_PATTERNS = [
-  /dangerously/i, /^--yolo$/, /full-auto/, /danger-full-access/, /bypassPermissions/, /acceptEdits/,
-  /^--approve-for-me$/, /^--allow-dangerously-skip-permissions$/, /workspace-write/, /^--add-dir$/,
+  /dangerously/i, /yolo/i, /full-auto/i, /danger-full-access/i, /bypassPermissions/i, /acceptEdits/i,
+  /^--approve-for-me(=|$)/, /workspace-write/i, /^--add-dir(=|$)/, /^-y$/, /^--approval-mode(=|$)/,
 ];
 export function bypassFlags(argv) {
   return argv.filter((a) => BYPASS_PATTERNS.some((re) => re.test(String(a))));

@@ -148,3 +148,9 @@ test("antigravity model and thinking level come from the policy", () => {
   assert.equal(pin.effort, "high");
   assert.equal(pin.idPrefix, "A");
 });
+
+test("bypass guard catches =-joined and value forms", () => {
+  const bad = ["--add-dir=/x", "--yolo", "--yolo=true", "-y", "--approval-mode=yolo", "--approval-mode", "--sandbox=danger-full-access", "--dangerously-skip-permissions", "--permission-mode=bypassPermissions", "--full-auto"];
+  assert.deepEqual(bypassFlags(bad), bad);
+  assert.deepEqual(bypassFlags(["--model", "x", "-s", "read-only", "--ephemeral"]), []);
+});

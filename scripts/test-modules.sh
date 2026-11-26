@@ -28,7 +28,8 @@ run "cross-review runner tests" node --test \
   "$ROOT/modules/cross-review/test/plan.test.mjs" \
   "$ROOT/modules/cross-review/test/schema.test.mjs" \
   "$ROOT/modules/cross-review/test/adapters.test.mjs" \
-  "$ROOT/modules/cross-review/test/run.test.mjs"
+  "$ROOT/modules/cross-review/test/run.test.mjs" \
+  "$ROOT/modules/cross-review/test/proc.test.mjs"
 run "cross-review policy JSON" jq -e . "$ROOT/modules/cross-review/review-policy.json" >/dev/null
 run "manifest JSON" jq -e . "$ROOT/modules/manifest.json" >/dev/null
 run "workflow-state schema JSON" jq -e . "$ROOT/modules/workflow-state/schema.json" >/dev/null
