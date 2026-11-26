@@ -9,7 +9,8 @@ modules/cross-review/
   cross-review.mjs        CLI: plan | run | merge
   review-policy.json      pinned models, effort map, grade rules, pace thresholds, per-host usage windows
   lib/policy.mjs          policy loading/validation (model ids live only in the policy)
-  lib/plan.mjs            grade, reviewer selection, pace
+  lib/plan.mjs            grade, reviewer selection, pace, Antigravity budget estimate
+  lib/turns.mjs           Antigravity turn groups / file chunks / total budget (shared by plan and the adapter)
   lib/diff.mjs            diff path extraction (hunk-aware, git-quoted paths decoded)
   lib/merge.mjs           multi-host review merge (grouping by place + claim similarity)
   lib/inputs.mjs          read-only snapshot at --rev (git objects), common prompt, path checks
@@ -27,7 +28,7 @@ modules/cross-review/
 # 1. Choose reviewers. usage.json is the saved output of the T3 MCP tool `provider_usage_limits`;
 #    the runner never reads tokens or calls provider APIs itself.
 node modules/cross-review/cross-review.mjs plan --author claude \
-  --dimensions correctness,security --paths-from pr.patch --usage usage.json [--no-user] [--out plan.json]
+  --dimensions correctness,security --paths-from pr.patch --usage usage.json [--prior findings.json] [--no-user] [--out plan.json]
 
 # 2. Run one review per selected host, with the same --dimensions as the plan.
 node modules/cross-review/cross-review.mjs run --host codex --rev <sha> --diff pr.patch \
@@ -59,7 +60,8 @@ complete, 1 otherwise. 2 is a usage error (including unknown or repeated options
   lines and have similar claim+evidence wording (word Jaccard ≥ 0.2, ≥ 0.1 when the line ranges
   overlap); each group keeps every host's own id (e.g. `X1=A11`). Only runs whose `evidence.json`
   says `status: complete` and whose review is a `{ verdict, findings[] }` object are merged; a bare
-  `review.json` without evidence, an incomplete run, or any other JSON is listed as incomplete.
+  `review.json` without evidence, an incomplete run, or any other JSON is listed as incomplete
+  (also when an entry claims complete but its review is malformed: never shown as complete).
 
 ## Contract
 
@@ -144,22 +146,27 @@ another reviewer or model.
 | Model / effort | `--model`, `--effort` from policy | `-m`, `-c model_reasoning_effort=` | `session/set_config_option` model + thinking level |
 | Reported model | stream `init.model` + `modelUsage` keys | stderr header `model:` (client-resolved) | `set_config_option` currentValue + stderr proxy model per call |
 | No writes | `--tools Read,Grep,Glob`, `--restricted`, `--permission-mode dontAsk` | OS sandbox profile with no write entry (header must say `sandbox: read-only`), `approval_policy="never"` | `enabledTools:["view_file"]`, fs/terminal capabilities false, permissions `reject_once` |
-| Reads confined | `--restricted` confines file tools to cwd = snapshot; audit of every tool path, Glob patterns (each brace alternative) and Grep `path`/`glob` (Grep's regex `pattern` is not a path); `~` paths are outside | **OS-enforced** (macOS Seatbelt, see below); the shell-command audit is evidence only (warnings) | audit of every `view_file` path (full `rawInput`, `tool_call_update` titles); `~` paths are outside |
+| Reads confined | `--restricted` confines file tools to cwd = snapshot; audit of every tool path, Glob patterns (each brace alternative; over 64 alternatives an automaton decides whether any alternative is absolute, `~` or has `..`: if so the run is `incomplete` with `tool_glob_unauditable`, otherwise it is a relative glob) and Grep `path`/`glob` (Grep's regex `pattern` is not a path); `~` paths are outside | **OS-enforced** (macOS Seatbelt, see below); the shell-command audit is evidence only (warnings) | audit of every `view_file` path (full `rawInput`, `tool_call_update` titles); `~` paths are outside |
 | Code execution | none (no Bash) | interpreters / command substitution may run, always under the same OS sandbox; `hosts.codex.allow_code_execution` (default `true`) only decides whether node's package dir is granted; code execution is recorded as a warning | none (`view_file` only) |
 | No network beyond the model API | no WebFetch/WebSearch/Bash; `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` | the profile has no network entry (model commands have no network); `web_search="disabled"` | web tools not enabled |
 | No MCP | `--strict-mcp-config --mcp-config '{"mcpServers":{}}'`, `--safe-mode` | `--ignore-user-config` (MCP servers live there), `--disable plugins/apps` | `mcpServers: []`, isolated `GEMINI_HOME` without `config/` |
 | No delegation | Agent tool not in `--tools` | `--disable multi_agent[_v2]` | `invoke_subagent` not enabled |
 | Ignore user settings | `--setting-sources ""`, `--restricted`, `--safe-mode`, `--disable-slash-commands` | `--ignore-user-config`, `--ignore-rules` | isolated `GEMINI_HOME` (only `antigravity-acp/` linked) |
 | No session persistence | `--no-session-persistence` | `--ephemeral` | not possible: session files deleted afterwards when `.meta` cwd matches |
-| Never | `--dangerously-*`, `bypassPermissions`, `acceptEdits`, `--add-dir` | `--dangerously-*`, `--full-auto`, `workspace-write`, `danger-full-access`, `--add-dir`, `--enable`, `-P/--permission-profile`, `--sandbox-state*`, any sensitive `-c` the runner did not generate | `allow_*`, `reject_always` |
+| Never | `--dangerously-*`, `bypassPermissions`, `acceptEdits`, `--add-dir` | anything outside the exact argv shape the runner builds (flag allowlist; every `-c` byte-identical to a runner-generated value); in particular `-s`/`--sandbox`/`sandbox_mode` in any form, `-p`/`--profile`/`-c profile=`, `--include-managed-config*`, `-P…`, `-a…`, `--enable`, `--sandbox-state*`, `--full-auto`, `--add-dir`, `--dangerously-*` | `allow_*`, `reject_always` |
 
 Every spawned host argv (full, untruncated) is checked against the bypass list before anything is
-executed (`refused before spawn`). A `-c`/`--config` value that mentions a sensitive setting
-(permissions, `default_permissions`, sandbox, approval, network, features, `web_search`, ...) in any
-TOML spelling (dotted, quoted or inline-table keys, single- or double-quoted values) is accepted only
-when it is byte-for-byte one of the values the runner generated for this run (`allowedConfig`: the
-permission profile, `approval_policy="never"`, `web_search="disabled"`); the reported argv is
-re-checked against the same allowlist after the run. Antigravity has no argv beyond the server binary. The
+executed (`refused before spawn`). For every host: `-s`/`--sandbox` (any form, including `-sX` and
+`--sandbox=`), `sandbox_mode`, `--profile`, `--include-managed-config*`, attached `-P…`/`-a…` are
+refused (no host needs them), and a `-c`/`--config` key is decoded as TOML (bare, dotted, quoted keys,
+`\u`/`\U` escapes; an undecodable key counts as sensitive): a key touching permissions,
+`default_permissions`, sandbox, approval, profile, managed config, network, features, `web_search`, ...
+is accepted only when the value is byte-for-byte one the runner generated for this run
+(`allowedConfig`). For Codex the guard is an allowlist of the whole argv shape `codex.buildArgv`
+produces (`exec`, `-m`, `-c` = exactly the `allowedConfig` values and all of them, `--disable <name>`,
+`--ephemeral`, `--ignore-user-config`, `--ignore-rules`, `--skip-git-repo-check`, `-C <abs>`,
+`--color never`, `--output-schema`, `-o`, trailing `-`); any other token, or a missing generated value
+(e.g. the permission profile), is refused. The reported argv is re-checked the same way after the run. Antigravity has no argv beyond the server binary. The
 snapshot hash is compared before/after. Token files (`~/.codex/auth.json`, Claude credentials,
 `acp_token.json`) are never opened by the runner.
 
@@ -173,7 +180,7 @@ permission profile with full-disk read, verified). The profile is:
 | --- | --- |
 | Read | `:minimal` (Codex's built-in platform set: system libraries/frameworks, `/bin`, `/usr/bin`, `/etc`, `/Library/Preferences`, `/System`, `/dev`), the snapshot, the codex runtime grant, the node runtime grant (when `allow_code_execution`, or when codex is a node script) |
 | Runtime grant | the nearest versioned package directory of the resolved binary (basename starts with a version, at most 3 levels up: e.g. `~/.codex/packages/standalone/releases/0.172.0-aarch64-apple-darwin`, `~/.local/share/node/v22.23.5`, `Cellar/node/22.1.0`, `.nvm/versions/node/v22.0.0`), or the npm package dir (`node_modules/@openai/codex`), otherwise **the binary file itself**; never a shared prefix (`/usr/local`, `/opt/homebrew`, `~/.local`, `$HOME`, `/`) |
-| Refused grants | any grant that is or contains `/`, `$HOME`, the Codex home or a denied path, and any runtime grant inside a denied path (`os_sandbox_profile_refused`) |
+| Refused grants | any grant that is or contains `/`, `$HOME`, the Codex home or a denied path, and any runtime grant inside a denied path (`os_sandbox_profile_refused`); both sides are compared canonicalized (symlinks resolved, also for a nonexistent tail; `..` removed) and case-folded on macOS (case-insensitive APFS), and the profile records the canonical grant paths |
 | Denied explicitly | `/private/tmp`, `/private/var/tmp` (in `:minimal` otherwise), written after every grant so nothing can overwrite them; everything else (home directories, the Codex home and its auth file, other temp dirs, `/Volumes`, `/opt`, `/Applications`) is denied by default |
 | Write | none |
 | Network | none (no network entry) |
@@ -182,10 +189,12 @@ Before the review the runner self-tests the profile without a model call, throug
 `codex sandbox <exact codex exec config flags> -- <cmd>` (permission profile, `approval_policy`,
 `web_search`, every `--disable`; `codex sandbox` has no `--ignore-user-config`, so it runs with
 `CODEX_HOME` set to an empty private directory: no user `config.toml` can be merged). Reading
-harmless probe files the runner created in `os.tmpdir()`, `/private/tmp` and `$HOME`, listing the
-Codex home (names only, discarded) and writing inside the snapshot must fail with EPERM, and reading
-a snapshot file must succeed. Any failed probe makes the run `incomplete`
-(`os_sandbox_not_enforced:<probes>`) and codex exec is never started. The profile (TOML) and its
+harmless probe files the runner created in `os.tmpdir()`, `/private/tmp`, `/private/var/tmp` and
+`$HOME`, listing the Codex home (names only, discarded) and writing inside the snapshot must fail with
+EPERM, and reading a snapshot file must succeed. Any failed probe makes the run `incomplete`
+(`os_sandbox_not_enforced:<probes>`); a probe file the runner could not create is never a pass
+(`os_sandbox_selftest_unavailable:<probes>`, creation errors in `osSandbox.probeErrors`). Either way
+codex exec is never started. The profile (TOML) and its
 sha256, the read/denied roots and the self-test result are in `evidence.isolation.osSandbox`; the
 profile is also `raw/codex-sandbox-profile.toml`. Sandbox denials are not counted (`deniedOps:
 "not counted ..."`): the plain codex transcript has no marker that separates a real denial from
@@ -240,9 +249,15 @@ across turns; a spawn failure or early server exit fails at once. `max_files_per
 `max_bytes_per_turn` (120000) split each dimension group into scope-file chunks so a turn stays well
 under the proxy's 300 s first-byte wall. `runtime_root` accepts `{platform}-{arch}`; the highest
 version present is used. Leftover agy processes outside the run's group are reported, never signalled.
-The total budget is `per_turn_budget_sec` (180) × planned turns, capped by `max_total_sec` (3600)
-(`timeout_sec` applies only without `per_turn_budget_sec`); r3's 16-turn plan died at the old fixed
-1500 s after 11 turns.
+The total budget is `per_turn_budget_sec` (180) × planned turns, at least `min_total_sec` (600;
+default `turn_timeout_sec`) so a 1–3 turn run is never squeezed below one turn's timeout, capped by
+`max_total_sec` (3600) (`timeout_sec` applies only without `per_turn_budget_sec`); r3's 16-turn plan
+died at the old fixed 1500 s after 11 turns. `plan` estimates the turns with the adapter's own helper
+(`lib/turns.mjs`: policy groups + the leftover group, file chunks by count and, with sizes from the
+working tree, by bytes) and reports no Antigravity budget when Antigravity is the author.
+Speed knob: a re-review (`--prior`) whose diff is at most `rereview_single_group_max_diff_bytes`
+(120000) runs one group with every dimension per file chunk (`rereview_single_group`, default `true`),
+cutting the turns by the number of groups; `plan --prior` estimates the same way.
 
 Known gaps (also written into each run's `hostLimits`):
 
@@ -267,7 +282,8 @@ node --test modules/cross-review/test/*.test.mjs
 
 The tests use fake `claude`/`codex` binaries and an ACP stub for Antigravity (`test/fixtures/`) and
 never call a model. On macOS the fake codex's `sandbox` subcommand enforces the generated profile
-with a real `sandbox-exec` SBPL profile, `test/sandbox.test.mjs` proves Seatbelt denies a harmless
+with a real `sandbox-exec` SBPL profile that follows codex's semantics (`:minimal` includes the
+shared temp areas, entries in profile order, last match wins, so only the `none` entries deny them), `test/sandbox.test.mjs` proves Seatbelt denies a harmless
 outside file and allows a snapshot file, and, when a native codex is installed, runs the real
 `codex sandbox` self-test with the exact exec config flags (no model call). The generic codex run tests
 use an explicit self-test stand-in on every platform, so their results never depend on the platform. Fixture repositories commit with `-c commit.gpgsign=false` so a global signing

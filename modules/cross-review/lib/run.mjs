@@ -90,7 +90,7 @@ async function reviewWithInput({ opts, adapter, pin, prefix, policyPath, prior, 
   const reasons = [...(res.reasons ?? [])];
   const warnings = [...(res.warnings ?? [])];
   // The argv the adapter reports is re-checked against the same exact allowlist it spawned with (A50).
-  const argvBypass = res.argv ? bypassFlags(res.argv, { allowedConfig: res.allowedConfig ?? [] }) : [];
+  const argvBypass = res.argv ? bypassFlags(res.argv, { allowedConfig: res.allowedConfig ?? [], shape: res.argvShape ?? null }) : [];
   if (argvBypass.length) reasons.push(`bypass_flags_in_argv:${argvBypass.join(",")}`);
 
   // Post-checks that turn a schema-valid review into an incomplete one.

@@ -9,7 +9,8 @@ import { fileURLToPath } from "node:url";
 import { loadPolicy, defaultPolicyPath } from "../lib/policy.mjs";
 import { runReview } from "../lib/run.mjs";
 import { exitReason, findRuntime, planTurns, stopGroup, totalBudget } from "../adapters/antigravity.mjs";
-import { antigravityBudget } from "../lib/plan.mjs";
+import { plan } from "../lib/plan.mjs";
+import { runTurns } from "../lib/turns.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const { policy: basePolicy } = loadPolicy(defaultPolicyPath());
@@ -182,20 +183,63 @@ test("~-prefixed tool paths are outside the snapshot (A47)", async () => {
   assert.deepEqual(ev.toolAudit.outsideSnapshot, ["~/.codex/auth.json"]);
 });
 
-test("the total budget scales with the planned turns, capped; plan warns when the cap is exceeded", async () => {
-  assert.deepEqual(totalBudget({ per_turn_budget_sec: 180, max_total_sec: 3600 }, 16, 1_500_000), { totalMs: 2_880_000, perTurnSec: 180, capSec: 3600, capped: false });
+test("the total budget scales with the planned turns, with a floor and a cap (A63)", async () => {
+  assert.deepEqual(totalBudget({ per_turn_budget_sec: 180, max_total_sec: 3600 }, 16, 1_500_000), { totalMs: 2_880_000, perTurnSec: 180, floorSec: 600, capSec: 3600, capped: false });
   assert.equal(totalBudget({ per_turn_budget_sec: 180, max_total_sec: 3600 }, 30, 1).totalMs, 3_600_000);
   assert.equal(totalBudget({ per_turn_budget_sec: 180, max_total_sec: 3600 }, 30, 1).capped, true);
   assert.equal(totalBudget({}, 16, 1_500_000).totalMs, 1_500_000);
-  const hp = basePolicy.hosts.antigravity;
-  // r3: 24 paths, 3 groups, 8 files per turn -> 9 turns at least; 16 actual turns (byte split) fit 2880 s < 3600 s.
-  const b = antigravityBudget(hp, ["security", "correctness", "tests", "contract_docs", "portability"], 24);
-  assert.equal(b.estimatedTurns, 12);
-  assert.equal(b.warning, undefined);
-  assert.match(antigravityBudget(hp, ["security", "correctness", "tests"], 200).warning, /exceeds max_total_sec 3600/);
-  const ev = await go({}, { per_turn_budget_sec: 100, max_total_sec: 1000 });
+  // A63: a 1-turn run is never squeezed below one turn's timeout (was 180 s; 89 s made turn 0 time out before it ran).
+  assert.equal(totalBudget({ per_turn_budget_sec: 180, max_total_sec: 3600, turn_timeout_sec: 600 }, 1, 1).totalMs, 600_000);
+  assert.equal(totalBudget({ per_turn_budget_sec: 89, max_total_sec: 3600 }, 1, 1).totalMs, 600_000);
+  assert.equal(totalBudget({ per_turn_budget_sec: 180, min_total_sec: 900, max_total_sec: 3600 }, 2, 1).totalMs, 900_000);
+  assert.equal(totalBudget({ per_turn_budget_sec: 180, min_total_sec: 900, max_total_sec: 700 }, 2, 1).totalMs, 700_000);
+  const ev = await go({}, { per_turn_budget_sec: 100, max_total_sec: 1000, min_total_sec: 150 });
   assert.equal(ev.status, "complete", ev.incompleteReasons.join());
   assert.equal(ev.timeoutMs, 200_000); // 2 turns x 100 s
+  const ev2 = await go({}, { per_turn_budget_sec: 30, max_total_sec: 1000 });
+  assert.equal(ev2.status, "complete", ev2.incompleteReasons.join());
+  assert.equal(ev2.timeoutMs, 600_000); // floor: turn_timeout_sec
+});
+
+test("plan() estimates Antigravity turns like the adapter (leftover group, byte chunks) and warns only when antigravity reviews (A63/A65/A66)", () => {
+  const dims = ["security", "correctness", "tests", "contract_docs", "portability"];
+  const hp = basePolicy.hosts.antigravity;
+  // r4: 23 scope files; 4 groups (portability is the leftover group); bytes split them into 4 chunks -> 16 turns.
+  const files = Array.from({ length: 23 }, (_, i) => ({ path: `f${i}.mjs`, bytes: 20_000 }));
+  const scopeFiles = files.map((f) => ({ ...f, kind: "scope" }));
+  const actual = runTurns(hp, dims, scopeFiles).turns.length;
+  const p = plan({ policy: basePolicy, author: "claude", dimensions: dims, paths: files.map((f) => f.path), usage: null, files });
+  assert.equal(p.hosts.antigravity.budget.estimatedTurns, actual);
+  assert.equal(actual, 4 * Math.ceil(23 / Math.floor(hp.max_bytes_per_turn / 20_000)));
+  // Without sizes the estimate is the lower bound by file count (still including the leftover group).
+  const lb = plan({ policy: basePolicy, author: "claude", dimensions: dims, paths: files.map((f) => f.path), usage: null });
+  assert.equal(lb.hosts.antigravity.budget.estimatedTurns, 4 * Math.ceil(23 / hp.max_files_per_turn));
+  // A66: plan() itself carries the cap warning ...
+  const many = Array.from({ length: 200 }, (_, i) => `f${i}.js`);
+  const big = plan({ policy: basePolicy, author: "claude", dimensions: ["security", "correctness", "tests"], paths: many, usage: null });
+  assert.match(big.warnings.join(), /antigravity: about \d+ turns .* exceeds max_total_sec 3600/);
+  assert.match(big.hosts.antigravity.budget.warning, /exceeds max_total_sec/);
+  // ... A65: but not when antigravity is the author.
+  const own = plan({ policy: basePolicy, author: "antigravity", dimensions: ["security", "correctness", "tests"], paths: many, usage: null });
+  assert.equal(own.hosts.antigravity.decision, "excluded");
+  assert.equal(own.hosts.antigravity.budget, undefined);
+  assert.ok(!own.warnings.some((w) => /^antigravity:/.test(w)), own.warnings.join());
+});
+
+test("re-review speed knob: a small re-review runs one group per file chunk; large diffs and the knob off keep the groups", () => {
+  const dims = ["security", "correctness", "tests", "contract_docs", "portability"];
+  const hp = basePolicy.hosts.antigravity;
+  const files = Array.from({ length: 10 }, (_, i) => ({ path: `f${i}`, bytes: 1000, kind: "scope" }));
+  assert.equal(hp.rereview_single_group, true);
+  const small = runTurns(hp, dims, files, { rereview: true, diffBytes: 50_000 });
+  assert.deepEqual(small.groups, [dims]);
+  assert.equal(small.turns.length, 2); // 10 files / 8 per turn
+  assert.equal(runTurns(hp, dims, files, { rereview: false, diffBytes: 50_000 }).turns.length, 8);
+  assert.equal(runTurns(hp, dims, files, { rereview: true, diffBytes: 500_000 }).turns.length, 8);
+  assert.equal(runTurns({ ...hp, rereview_single_group: false }, dims, files, { rereview: true, diffBytes: 1 }).turns.length, 8);
+  const p = plan({ policy: basePolicy, author: "claude", dimensions: dims, paths: files.map((f) => f.path), usage: null, files, rereview: true, diffBytes: 50_000 });
+  assert.equal(p.hosts.antigravity.budget.estimatedTurns, 2);
+  assert.match(p.hosts.antigravity.budget.singleGroup, /re-review/);
 });
 
 test("a non-zero server exit after the last prompt invalidates the review (X12)", async () => {

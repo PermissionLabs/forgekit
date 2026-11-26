@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { loadPolicy, defaultPolicyPath, policyProblems } from "../lib/policy.mjs";
 import { buildInput, readChecklist, removeSnapshot } from "../lib/inputs.mjs";
 import { runReview, summarize } from "../lib/run.mjs";
+import { SELF_TEST_KEYS } from "../lib/sandbox.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const { policy: basePolicy } = loadPolicy(defaultPolicyPath());
@@ -61,7 +62,7 @@ after(() => { setFake({}); fs.rmSync(tmp, { recursive: true, force: true }); });
 
 // Generic codex tests run the same on every platform (X22): an explicit stand-in for the OS sandbox self-test.
 // The real Seatbelt path is exercised by the macOS-only tests below, which pass deps: {} (real self-test).
-const STUB_SBX = { sandboxAvailable: () => true, selfTest: () => ({ ok: true, stub: "test stand-in for the OS sandbox self-test" }) };
+const STUB_SBX = { sandboxAvailable: () => true, selfTest: () => ({ ...Object.fromEntries(SELF_TEST_KEYS.map((k) => [k, true])), unavailable: [], ok: true, stub: "test stand-in for the OS sandbox self-test" }) };
 const opts = (host, out, extra = {}) => ({ host, repo, rev, diff: diffPath, scope: ["src/a.ts"], context: [], checklist: [], brief: briefPath, out: path.join(tmp, out), dimensions: DIMS, ...(host === "codex" ? { deps: STUB_SBX } : {}), ...extra });
 const policy = () => JSON.parse(fs.readFileSync(policyPath, "utf8"));
 
@@ -339,6 +340,7 @@ test("codex: model commands run under the generated OS sandbox profile, self-tes
   assert.equal(sb.selfTest.snapshotReadable, true);
   // A53: /private/tmp and $HOME probe files are proven unreadable too; user config is not loaded in the self-test.
   assert.equal(sb.selfTest.privateTmpReadDenied, true);
+  assert.equal(sb.selfTest.privateVarTmpReadDenied, true);
   assert.equal(sb.selfTest.homeReadDenied, true);
   assert.match(sb.selfTest.userConfig, /not loaded/);
   // X18/A52: runtime grants are exact package dirs or binary files, never a shared prefix or $HOME.
@@ -361,7 +363,7 @@ test("codex: a sandbox that does not enforce the profile makes the run incomplet
   setFake({ FAKE_REVIEW: review(), FAKE_SANDBOX_NOOP: "1", FAKE_ARGV_OUT: argvOut });
   const ev = await runReview(opts("codex", "out-codex-noop", { deps: {} }), policy(), policyPath);
   assert.equal(ev.status, "incomplete");
-  assert.match(ev.incompleteReasons.join(), /os_sandbox_not_enforced:outsideReadDenied,privateTmpReadDenied,homeReadDenied,codexHomeListDenied,snapshotWriteDenied/);
+  assert.match(ev.incompleteReasons.join(), /os_sandbox_not_enforced:outsideReadDenied,privateTmpReadDenied,privateVarTmpReadDenied,homeReadDenied,codexHomeListDenied,snapshotWriteDenied/);
   assert.equal(fs.existsSync(argvOut), false, "codex exec ran although the sandbox self-test failed");
 });
 

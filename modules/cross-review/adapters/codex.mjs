@@ -415,8 +415,12 @@ export function prepareSandbox({ pin, input, env, log, deps = {} }) {
     deniedOps: "not counted: the plain codex transcript has no marker that separates a sandbox denial from command output text",
     selfTest: st,
   };
-  if (!st?.ok) {
-    const failed = sandbox.SELF_TEST_KEYS.filter((k) => st?.[k] === false || st?.[k] === undefined);
+  if (probe.errors?.length) record.probeErrors = probe.errors;
+  // A53/A61: a probe that could not be created (or a missing self-test result) is never counted as a pass.
+  const unavailable = st ? (st.unavailable ?? sandbox.SELF_TEST_KEYS.filter((k) => st[k] === null || st[k] === undefined)) : ["self-test result missing"];
+  if (unavailable.length) return { reasons: [`os_sandbox_selftest_unavailable:${unavailable.join(",")}`], record };
+  if (!st.ok) {
+    const failed = sandbox.SELF_TEST_KEYS.filter((k) => st[k] !== true);
     return { reasons: [`os_sandbox_not_enforced:${failed.join(",") || "self-test failed"}`], record };
   }
   return { permissionArgs, exe: rt.exe, record };
@@ -441,6 +445,7 @@ export async function run(ctx) {
   const deadline = Date.now() + pin.timeoutMs;
   let text = prompt;
   out.allowedConfig = allowedConfig(pin, sbx.permissionArgs);
+  out.argvShape = "codex"; // A50/A59: run.mjs re-checks the reported argv against the exact codex shape
   for (let attempt = 0; attempt < 2; attempt++) {
     const label = attempt ? "retry" : "first";
     const lastMessagePath = path.join(workDir, `codex-${label}-last.txt`);
@@ -449,7 +454,7 @@ export async function run(ctx) {
     out.argv = [bin, ...argv];
     const remaining = deadline - Date.now();
     if (attempt > 0 && remaining < 30_000) { out.reasons.push("timeout_before_retry"); break; }
-    const p = await runProcess({ bin, args: argv, cwd: input.snapshot, env, input: text, timeoutMs: remaining, allowedConfig: out.allowedConfig });
+    const p = await runProcess({ bin, args: argv, cwd: input.snapshot, env, input: text, timeoutMs: remaining, allowedConfig: out.allowedConfig, shape: "codex" });
     log(`${label}.stdout.txt`, redact(p.stdout));
     log(`${label}.stderr.log`, redact(p.stderr));
     const tr = parseTranscript(p.stderr, { prompt: text });

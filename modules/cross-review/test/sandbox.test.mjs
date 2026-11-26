@@ -93,3 +93,72 @@ test("real codex: the generated profile with the exact exec config flags is enfo
     assert.equal(st.ok, true, JSON.stringify(st.raw));
   } finally { probe.cleanup(); }
 });
+
+test("selfTest fails closed when a probe is missing; makeProbe records creation failures and probes /private/var/tmp (A53/A61)", () => {
+  // A stand-in runner that denies every probe read: only the missing probes can make the result fail.
+  const run = (b, a) => {
+    const cmd = a.slice(a.indexOf("--") + 1);
+    const inside = cmd[0] === "/bin/cat" && cmd[1] === path.join(snap, "src", "a.ts");
+    return inside ? { status: 0, stdout: "x", stderr: "" } : { status: 1, stdout: "", stderr: "Operation not permitted" };
+  };
+  const common = { exe: "/x/codex", args: [], cwd: snap, codexHome: path.join(tmp, "outside"), insideFile: path.join(snap, "src", "a.ts"), env: {}, run };
+  const all = { outside: outsideFile, privateTmp: outsideFile, privateVarTmp: outsideFile, home: outsideFile };
+  const full = sandbox.selfTest({ ...common, probes: all });
+  assert.equal(full.ok, true);
+  assert.deepEqual(full.unavailable, []);
+  for (const k of Object.keys(all)) {
+    const st = sandbox.selfTest({ ...common, probes: { ...all, [k]: null } });
+    assert.equal(st.ok, false, `missing ${k} probe must not pass`);
+    assert.equal(st.unavailable.length, 1, k);
+  }
+  const unwritable = path.join(tmp, "no-such-parent", "deeper");
+  const probe = sandbox.makeProbe({ home: unwritable, privateTmp: unwritable, privateVarTmp: unwritable, tmp });
+  try {
+    assert.equal(probe.probes.home, null);
+    assert.equal(probe.probes.privateVarTmp, null);
+    assert.ok(probe.probes.outside);
+    assert.equal(probe.errors.length, 3, probe.errors.join("\n"));
+  } finally { probe.cleanup(); }
+  const real = sandbox.makeProbe();
+  try { assert.ok(real.probes.privateVarTmp?.startsWith("/private/var/tmp/"), "a /private/var/tmp probe file is created"); } finally { real.cleanup(); }
+});
+
+test("grantProblem compares canonical, case-folded paths; the profile records canonical paths (A60)", () => {
+  const H = path.join(tmp, "Home");
+  fs.mkdirSync(path.join(H, ".codex"), { recursive: true });
+  const link = path.join(tmp, "codex-link");
+  fs.symlinkSync(path.join(H, ".codex"), link);
+  const ci = { caseInsensitive: true };
+  // Non-canonical case of $HOME / CODEX_HOME.
+  assert.match(sandbox.grantProblem(H, { home: H.replace("/Home", "/home"), ...ci }) ?? "", /\$HOME/);
+  assert.match(sandbox.grantProblem(path.join(H, ".codex"), { home: "/nowhere", codexHome: path.join(H.replace("/Home", "/HOME"), ".codex"), ...ci }) ?? "", /CODEX_HOME/);
+  // Symlinked CODEX_HOME: granting its target is refused.
+  assert.match(sandbox.grantProblem(path.join(H, ".codex"), { home: "/nowhere", codexHome: link }) ?? "", /CODEX_HOME/);
+  // Mixed-case and non-normalized denied paths.
+  assert.match(sandbox.grantProblem("/Private/tmp/nonexistent", { home: "/nowhere", ...ci }) ?? "", /denied|\/private\/tmp/i);
+  assert.match(sandbox.grantProblem("/tmp/x/../y", { home: "/nowhere" }) ?? "", /private\/tmp/);
+  // The profile stores the canonical path, never the spelling it was given.
+  const ver = path.join(tmp, "opt", "codex", "1.0");
+  fs.mkdirSync(path.join(ver, "bin"), { recursive: true });
+  const p = sandbox.permissionProfile({ snapshot: snap, codexRoot: path.join(ver, "bin", ".."), home: "/nowhere", name: "cross_review_t" });
+  assert.ok(Object.hasOwn(p.filesystem, ver), Object.keys(p.filesystem).join());
+  assert.ok(!Object.keys(p.filesystem).some((k) => k.includes("..")));
+});
+
+test("codex stand-in follows :minimal and last-match-wins: without the DENY_READ entries the shared temp areas are readable (A62)", { skip: !DARWIN && "macOS Seatbelt only" }, () => {
+  const exe = path.join(tmp, "bin2", "fake-codex.mjs");
+  fs.mkdirSync(path.dirname(exe));
+  fs.copyFileSync(path.join(HERE, "fixtures", "fake-codex.mjs"), exe);
+  const p = sandbox.permissionProfile({ snapshot: snap, codexRoot: exe, name: "cross_review_t" });
+  const probe = sandbox.makeProbe();
+  try {
+    const common = { exe, cwd: snap, probes: probe.probes, codexHome: path.join(tmp, "outside"), insideFile: path.join(snap, "src", "a.ts"), env: process.env };
+    const ok = sandbox.selfTest({ ...common, args: sandbox.profileArgs(p) });
+    assert.equal(ok.ok, true, JSON.stringify(ok.raw));
+    const weak = { ...p, filesystem: Object.fromEntries(Object.entries(p.filesystem).filter(([, v]) => v !== "none")) };
+    const st = sandbox.selfTest({ ...common, args: sandbox.profileArgs(weak) });
+    assert.equal(st.privateTmpReadDenied, false);
+    assert.equal(st.privateVarTmpReadDenied, false);
+    assert.equal(st.ok, false);
+  } finally { probe.cleanup(); }
+});

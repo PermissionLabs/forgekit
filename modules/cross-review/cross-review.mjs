@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // cross-review: host-neutral cross-review runner (zero dependencies, Node >= 20).
 //
-//   cross-review.mjs plan  --author <host> --paths-from <diff|list> [--dimensions a,b] [--usage <usage.json>] [--no-user] [--out <file>] [--repo <dir>] [--policy <file>]
+//   cross-review.mjs plan  --author <host> --paths-from <diff|list> [--dimensions a,b] [--usage <usage.json>] [--prior <findings.json>] [--no-user] [--out <file>] [--repo <dir>] [--policy <file>]
 //   cross-review.mjs run   --host <host> --rev <sha> --diff <patch> --scope <a,b|@list> --brief <md> --out <dir>
 //                          [--repo <dir>] [--dimensions a,b] [--context <a,b|@list>] [--checklist <path>]... [--prior <findings.json> --dispositions <file>] [--id-start <n>] [--policy <file>]
 //   cross-review.mjs merge --review <run dir|evidence.json> --review <...> [--out <file>] [--repo <dir>] [--line-window <n>]
@@ -21,7 +21,7 @@ import { loadReviewEntry, mergeReviews } from "./lib/merge.mjs";
 
 // Flags per command: value flags, repeatable value flags, boolean flags. Anything else is a usage error.
 export const SPEC = {
-  plan: { values: ["author", "dimensions", "paths-from", "usage", "out", "policy", "repo"], multi: [], bool: ["no-user"] },
+  plan: { values: ["author", "dimensions", "paths-from", "usage", "out", "policy", "repo", "prior"], multi: [], bool: ["no-user"] },
   run: { values: ["host", "rev", "diff", "scope", "brief", "out", "repo", "dimensions", "context", "prior", "dispositions", "id-start", "policy"], multi: ["checklist"], bool: [] },
   merge: { values: ["out", "line-window", "repo"], multi: ["review"], bool: [] },
 };
@@ -110,10 +110,15 @@ export async function main(argv = process.argv.slice(2)) {
     const dims = csv(o.dimensions);
     if (o._cmd === "plan") {
       const author = need(o, "author");
-      const paths = pathsFromDiffText(fs.readFileSync(need(o, "paths-from"), "utf8"));
+      const diffText = fs.readFileSync(need(o, "paths-from"), "utf8");
+      const paths = pathsFromDiffText(diffText);
       const usage = o.usage ? JSON.parse(fs.readFileSync(o.usage, "utf8")) : null;
       if (o.out) checkOut(o.repo ?? null, o.out, { dir: false });
-      const p = plan({ policy, author, dimensions: dims.length ? dims : policy.default_dimensions ?? [], paths, usage, noUser: !!o["no-user"] });
+      // File sizes from the working tree (when present) so the Antigravity estimate splits by bytes like the run (A63).
+      const repoDir = path.resolve(o.repo ?? ".");
+      const files = paths.map((p) => { let bytes = 0; try { bytes = fs.statSync(path.join(repoDir, p)).size; } catch {} return { path: p, bytes }; });
+      if (o.prior) fs.accessSync(o.prior, fs.constants.R_OK);
+      const p = plan({ policy, author, dimensions: dims.length ? dims : policy.default_dimensions ?? [], paths, usage, noUser: !!o["no-user"], files, rereview: !!o.prior, diffBytes: /^diff --git /m.test(diffText) ? Buffer.byteLength(diffText) : Infinity });
       if (o.out) fs.writeFileSync(o.out, JSON.stringify(p, null, 2));
       console.log(JSON.stringify(p, null, 2));
       return p.status === "ok" ? 0 : p.status === "ask" ? 3 : 4;

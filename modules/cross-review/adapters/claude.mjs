@@ -38,7 +38,7 @@ export function buildEnv(base = process.env, passthrough = []) {
 
 /**
  * Brace alternatives of a glob ("{/etc/*,src/*}" -> ["/etc/*", "src/*"]), nested groups expanded, at most 64
- * results (a pattern with more is returned as is, plus its comma-separated pieces, so nothing is hidden).
+ * results; null when there are more (the caller then decides with braceMayEscape, X24/A58).
  */
 export function braceAlternatives(p, limit = 64) {
   const out = [];
@@ -62,7 +62,57 @@ export function braceAlternatives(p, limit = 64) {
     out.push(s);
   };
   expand(String(p));
-  return out.length > limit ? [String(p), ...String(p).split(/[{},]/)] : out;
+  return out.length > limit ? null : out;
+}
+
+// Parse a glob into literal chars and brace groups, with the same matching rules as braceAlternatives
+// (an unclosed "{" and a stray "}" are literal characters).
+function braceTree(s) {
+  const seq = [];
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] !== "{") { seq.push(s[i]); continue; }
+    let depth = 0, close = -1;
+    for (let j = i; j < s.length; j++) {
+      if (s[j] === "{") depth++;
+      else if (s[j] === "}" && depth > 0 && --depth === 0) { close = j; break; }
+    }
+    if (close === -1) { seq.push("{"); continue; }
+    const body = s.slice(i + 1, close), alts = [];
+    let d = 0, start = 0;
+    for (let k = 0; k <= body.length; k++) {
+      if (k === body.length || (body[k] === "," && d === 0)) { alts.push(body.slice(start, k)); start = k + 1; }
+      else if (body[k] === "{") d++;
+      else if (body[k] === "}") d--;
+    }
+    seq.push({ alts: alts.map(braceTree) });
+    i = close;
+  }
+  return seq;
+}
+
+/**
+ * Whether any brace alternative of a glob is absolute, starts with ~ or has a ".." component, decided without
+ * enumerating the alternatives (any size; X24/A58): a small automaton run over every alternative at once.
+ * States: S start, A after "/", D1 component ".", D2 component "..", O other; X = an escaping alternative.
+ */
+export function braceMayEscape(p) {
+  const step = (st, c) => {
+    if (st === "X") return "X";
+    if (st === "S" && (c === "/" || c === "~")) return "X";
+    if (c === "/") return st === "D2" ? "X" : "A";
+    if (c === ".") return st === "S" || st === "A" ? "D1" : st === "D1" ? "D2" : "O";
+    return "O";
+  };
+  const run = (states, seq) => {
+    let cur = states;
+    for (const n of seq) {
+      if (typeof n === "string") cur = new Set([...cur].map((s) => step(s, n)));
+      else { const next = new Set(); for (const alt of n.alts) for (const s of run(cur, alt)) next.add(s); cur = next; }
+    }
+    return cur;
+  };
+  const end = run(new Set(["S"]), braceTree(String(p)));
+  return end.has("X") || end.has("D2");
 }
 const PATHISH = /^(\/|~)|(^|\/)\.\.(\/|$)/;
 
@@ -101,7 +151,17 @@ export function auditStream(stdout, snapshot, pin) {
     // alternative (A48: "{/etc/*,src/*}"). Grep's pattern is a regular expression matched against file contents
     // (its `path`/`glob` name the files), never a path.
     const globKey = t.name === "Glob" ? "pattern" : t.name === "Grep" ? "glob" : null;
-    const globAlts = globKey && typeof t.input?.[globKey] === "string" ? braceAlternatives(t.input[globKey]) : [];
+    let globAlts = globKey && typeof t.input?.[globKey] === "string" ? braceAlternatives(t.input[globKey]) : [];
+    if (globAlts === null) {
+      // X24/A58: over 64 alternatives. A pattern whose alternatives are all relative without ".." is treated like
+      // any relative glob; otherwise it is refused as a whole (no fabricated per-piece paths).
+      globAlts = [];
+      if (braceMayEscape(t.input[globKey])) {
+        const why = `${t.input[globKey]} (over 64 brace alternatives, at least one absolute, ~ or ..)`;
+        if (denied.has(t.id)) a.warnings.push(`unauditable glob denied by the host: ${why}`);
+        else a.reasons.push(`tool_glob_unauditable:${why}`);
+      }
+    }
     const keys = ["file_path", "path", "notebook_path", ...(globAlts.some((x) => PATHISH.test(x)) ? [globKey] : [])];
     for (const k of keys) if (typeof t.input?.[k] === "string") {
       const v = t.input[k];

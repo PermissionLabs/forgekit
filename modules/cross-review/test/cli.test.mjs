@@ -76,6 +76,7 @@ test("exit codes: usage 2, plan ok 0 / ask 3 / blocked 4, plan --out protected (
   assert.equal(cli([]).status, 2);
   assert.equal(cli(["help"]).status, 0);
   assert.equal(cli(["plan", "--author", "claude", "--paths-from", "list.txt", "--bogus", "x"]).status, 2);
+  assert.equal(cli(["plan", "--author", "claude", "--paths-from", "list.txt", "--prior", "no-such-prior.json"]).status, 2);
   fs.writeFileSync(path.join(tmp, "paths.txt"), "src/a.ts\n");
   const OBS = new Date().toISOString();
   const later = new Date(Date.now() + 84 * 3600_000).toISOString();
@@ -144,6 +145,14 @@ test("merge: only complete runs with evidence are merged; bare or malformed revi
   assert.match(partial.incompleteReasons.join(), /sev must be one of.*loc must be.*evidence empty/);
   const merged = mergeReviews([nonsense, nul, partial, { host: "forged", status: "complete", review: { verdict: "fix", findings: [null] } }]);
   assert.equal(merged.groups.length, 0);
+  // A64: an entry claiming complete with a malformed review is listed as not merged, never as complete.
+  for (const findings of ["bad", [null]]) {
+    const mm = mergeReviews([{ host: "codex", status: "complete", source: "s", review: { verdict: "pass", findings } }]);
+    assert.equal(mm.groups.length, 0);
+    assert.equal(mm.hosts[0].status, "incomplete");
+    assert.equal(mm.hosts[0].findings, 0);
+    assert.match(mm.text, /codex: status=incomplete findings=0 \(not merged: review invalid: /);
+  }
   // evidence.json itself can be passed; its nested review is what is merged.
   fs.mkdirSync(path.join(d, "ev"));
   fs.writeFileSync(path.join(d, "ev", "evidence.json"), JSON.stringify({ schema: EV, reviewer: { host: "codex", idPrefix: "X" }, status: "complete", incompleteReasons: [], review }));

@@ -13,12 +13,17 @@ if (args[0] === "sandbox") {
   const entries = [...fsArg.matchAll(/"([^"]+)"="(read|none|write)"/g)].map((m) => [m[1], m[2]]);
   if (process.env.FAKE_SANDBOX_NOOP) { const r = spawnSync(cmd[0], cmd.slice(1), { stdio: "inherit" }); process.exit(r.status ?? 1); }
   if (process.platform !== "darwin") { process.stderr.write("sandbox-exec: Operation not permitted\n"); process.exit(71); }
+  // Like codex's Seatbelt profile (A62): ":minimal" grants the platform set, which includes the shared temp areas
+  // /private/tmp and /private/var/tmp; entries are emitted in profile order and the last matching rule wins, so a
+  // later "none" entry is what denies those areas (drop it and they become readable, as with real codex).
   const q = (p) => `"${p}"`;
-  const none = entries.filter(([p, v]) => v === "none" && p.startsWith("/")).map(([p]) => `(subpath ${q(p)})`);
-  const read = entries.filter(([p, v]) => v === "read" && p.startsWith("/")).map(([p]) => `(subpath ${q(p)})`);
-  const sys = ["/usr/lib", "/usr/share", "/System", "/bin", "/usr/bin", "/private/var/db/dyld", "/dev"].map((p) => `(subpath ${q(p)})`);
-  const sbpl = ["(version 1)", "(allow default)", "(deny file-read*)", "(allow file-read-metadata)", `(allow file-read* (literal "/") ${sys.join(" ")})`,
-    none.length ? `(deny file-read* ${none.join(" ")})` : "", read.length ? `(allow file-read* ${read.join(" ")})` : "",
+  const MINIMAL = ["/usr/lib", "/usr/share", "/System", "/bin", "/usr/bin", "/private/var/db/dyld", "/dev", "/private/tmp", "/private/var/tmp"];
+  const rules = entries.flatMap(([p, v]) => {
+    if (p === ":minimal") return v === "read" ? [`(allow file-read* (literal "/") ${MINIMAL.map((m) => `(subpath ${q(m)})`).join(" ")})`] : [];
+    if (!p.startsWith("/")) return [];
+    return [v === "none" ? `(deny file-read* (subpath ${q(p)}))` : `(allow file-read* (subpath ${q(p)}))`];
+  });
+  const sbpl = ["(version 1)", "(allow default)", "(deny file-read*)", "(allow file-read-metadata)", ...rules,
     "(deny file-write*)", '(allow file-write* (literal "/dev/null"))', "(deny network*)"].join("\n");
   const r = spawnSync("/usr/bin/sandbox-exec", ["-p", sbpl, ...cmd], { stdio: "inherit" });
   process.exit(r.status ?? 1);

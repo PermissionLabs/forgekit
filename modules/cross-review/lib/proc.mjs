@@ -56,17 +56,17 @@ export function ownedMembers(list, { spawnedAt, exitedAt }) {
  * between spawn and exit (ownedMembers) are signalled, each by pid; the pgid itself is never signalled again.
  * Accepted residuals: a process started in the same wall-clock second as the exit (ps resolution), and pid reuse
  * between the ps read and the kill.
- * allowedConfig: the exact sensitive `-c` values the caller generated (see bypassFlags).
+ * allowedConfig: the exact sensitive `-c` values the caller generated; shape: "codex" for the exact codex argv shape (see bypassFlags).
  * deps (tests): { spawn, kill, members, graceMs }.
  */
-export async function runProcess({ bin, args = [], cwd, env, input, timeoutMs, allowedConfig = [] }, deps = {}) {
+export async function runProcess({ bin, args = [], cwd, env, input, timeoutMs, allowedConfig = [], shape = null }, deps = {}) {
   const { spawn = nodeSpawn, kill = (pid, sig) => process.kill(pid, sig), members = groupMembers, graceMs = 2000 } = deps;
   const limit = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_TIMEOUT_MS;
   const t0 = Date.now();
   const signals = [];
   const result = (extra) => ({ code: null, signal: null, timedOut: false, stdout: "", stderr: "", durationMs: 0, spawnError: null, refusedFlags: [], leftoversKilled: 0, pipesAbandoned: false, signals, ...extra });
   // The full, untruncated argv is checked before anything is executed.
-  const refused = bypassFlags(args, { allowedConfig });
+  const refused = bypassFlags(args, { allowedConfig, shape });
   if (refused.length) return result({ spawnError: `refused before spawn: bypass flags ${refused.join(" ")}`, refusedFlags: refused });
   let child;
   const spawnedAt = Date.now();
@@ -144,29 +144,130 @@ export async function runProcess({ bin, args = [], cwd, env, input, timeoutMs, a
 // ---------------------------------------------------------------- bypass guard
 /**
  * Flags that bypass permissions or sandboxing. Flag tokens (starting with "-") are matched as flags, including
- * `--flag=value`; the value after a mode-setting flag is matched as a value. Other tokens (paths, JSON) are not
- * scanned, so a random temp-dir name cannot cause a false positive.
+ * `--flag=value` and attached short values (`-sX`, `-P:x`, `-aX`); the value after a mode-setting flag is matched
+ * as a value. Other tokens (paths, JSON) are not scanned, so a random temp-dir name cannot cause a false positive.
  *
- * Config overrides (`-c`/`--config`, A50): a value that mentions any sensitive setting (permissions, sandbox,
- * approval, default_permissions, network, features, web_search) in any TOML spelling (dotted, quoted or inline-
- * table keys, single- or double-quoted values) is accepted only when it is byte-for-byte one of the values the
- * runner generated for this run (allowedConfig) or a fixed safe value; anything else is refused before spawn.
+ * No host needs `-s`/`--sandbox`, `sandbox_mode`, a Codex profile (`--profile`, `-c profile=`) or managed config,
+ * so those are refused in every form (A59). Config overrides (`-c`/`--config`): the key is decoded as TOML (bare,
+ * dotted, quoted keys, \u/\U escapes); a key touching permissions, sandbox, approval, profile, network, features,
+ * web search, ... is accepted only when the whole value is byte-for-byte one the runner generated for this run
+ * (allowedConfig) or a fixed safe value; an undecodable key counts as sensitive.
+ *
+ * shape "codex" (A50/A59): additionally the argv must have exactly the shape codex.buildArgv produces (an
+ * allowlist of flags, every `-c` one of allowedConfig and every allowedConfig value present); anything else is
+ * refused.
  */
 const BAD_FLAGS = [/^--dangerously-/, /^--allow-dangerously-/, /^--yolo(=|$)/, /^--full-auto(=|$)/, /^--approve-for-me(=|$)/, /^--add-dir(=|$)/, /^-y$/,
-  /^--enable(=|$)/, /^--sandbox-state/, /^--permission-profile(=|$)/, /^-P$/, /^--include-managed-config$/, /^--allow-unix-socket(=|$)/];
-const MODE_FLAGS = new Set(["-s", "--sandbox", "--permission-mode", "--approval-mode", "-a", "--ask-for-approval", "-c", "--config"]);
+  /^--enable(=|$)/, /^--sandbox-state/, /^--permission-profile(=|$)/, /^-P/, /^--include-managed-config/, /^--allow-unix-socket(=|$)/,
+  /^-s/, /^--sandbox(=|$)/, /^--profile(=|$)/, /^-a./];
+const MODE_FLAGS = new Set(["--permission-mode", "--approval-mode", "-a", "--ask-for-approval", "-c", "--config"]);
 const BAD_VALUES = [/danger-full-access/, /workspace-write/, /bypassPermissions/, /acceptEdits/, /\byolo\b/i, /\bauto\b/];
-const SENSITIVE_CONFIG = /permission|sandbox|approval|network|feature|web_search|writable|shell_environment|mcp/i;
-export const SAFE_CONFIG = ['approval_policy="never"', 'web_search="disabled"', 'sandbox_mode="read-only"'];
+const SENSITIVE_CONFIG = /permission|sandbox|approval|network|feature|web_search|writable|shell_environment|mcp|profile|managed|trust|notify|exec|model_provider|experimental/i;
+export const SAFE_CONFIG = ['approval_policy="never"', 'web_search="disabled"'];
 const unquote = (s) => s.trim().replace(/^(["'])([\s\S]*)\1$/, "$2");
+
+/**
+ * The dotted key of a `-c key=value` override, decoded as TOML (bare keys, "basic" keys with escapes, 'literal'
+ * keys, dots and whitespace), or null when it cannot be decoded (callers treat null as sensitive).
+ */
+export function tomlKey(v) {
+  const s = String(v);
+  const parts = [];
+  let i = 0, cur = null;
+  const ws = () => { while (s[i] === " " || s[i] === "\t") i++; };
+  ws();
+  for (;;) {
+    if (s[i] === '"') {
+      let out = ""; i++;
+      for (;;) {
+        if (i >= s.length) return null;
+        const c = s[i];
+        if (c === '"') { i++; break; }
+        if (c === "\\") {
+          const e = s[i + 1];
+          const simple = { b: "\b", t: "\t", n: "\n", f: "\f", r: "\r", '"': '"', "\\": "\\", e: "\u001b" };
+          if (e in simple) { out += simple[e]; i += 2; continue; }
+          const n = e === "u" ? 4 : e === "U" ? 8 : e === "x" ? 2 : 0;
+          const hex = s.slice(i + 2, i + 2 + n);
+          if (!n || !new RegExp(`^[0-9A-Fa-f]{${n}}$`).test(hex)) return null;
+          const cp = parseInt(hex, 16);
+          if (cp > 0x10ffff) return null;
+          out += String.fromCodePoint(cp); i += 2 + n; continue;
+        }
+        out += c; i++;
+      }
+      cur = out;
+    } else if (s[i] === "'") {
+      const j = s.indexOf("'", i + 1);
+      if (j === -1) return null;
+      cur = s.slice(i + 1, j); i = j + 1;
+    } else {
+      const m = /^[A-Za-z0-9_-]+/.exec(s.slice(i));
+      if (!m) return null;
+      cur = m[0]; i += m[0].length;
+    }
+    parts.push(cur);
+    ws();
+    if (s[i] === ".") { i++; ws(); continue; }
+    if (s[i] === "=") return parts.join(".");
+    return null;
+  }
+}
+
+function badConfig(v, allowedConfig) {
+  if (SAFE_CONFIG.includes(v) || allowedConfig.includes(v)) return false;
+  const key = tomlKey(v);
+  return key === null || SENSITIVE_CONFIG.test(key) || SENSITIVE_CONFIG.test(v);
+}
 function badModeValue(flag, value, allowedConfig) {
   const v = String(value);
-  if (flag === "-c" || flag === "--config") return SENSITIVE_CONFIG.test(v) && !SAFE_CONFIG.includes(v) && !allowedConfig.includes(v);
-  if (flag === "-s" || flag === "--sandbox") return unquote(v) !== "read-only";
+  if (flag === "-c" || flag === "--config") return badConfig(v, allowedConfig);
   if (flag === "-a" || flag === "--ask-for-approval") return unquote(v) !== "never";
   return BAD_VALUES.some((re) => re.test(v));
 }
-export function bypassFlags(argv, { allowedConfig = [] } = {}) {
+
+// codex.buildArgv's exact flag set: valued flags with their value check, and boolean flags.
+const CODEX_VALUED = {
+  "-m": (v) => /^[A-Za-z0-9][A-Za-z0-9._:\/-]*$/.test(v),
+  "-c": null, // checked against allowedConfig
+  "--disable": (v) => /^[a-z][a-z0-9_]*$/.test(v),
+  "-C": (v) => v.startsWith("/"),
+  "--color": (v) => v === "never",
+  "--output-schema": (v) => v.startsWith("/") || !v.startsWith("-"),
+  "-o": (v) => v.startsWith("/") || !v.startsWith("-"),
+};
+const CODEX_BOOL = new Set(["--ephemeral", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check"]);
+const CODEX_REQUIRED = ["--ephemeral", "--ignore-user-config", "--ignore-rules", "-C", "-m"];
+
+/** Tokens of a codex argv that are not part of the runner-built shape (empty = exact shape). A leading binary path is skipped. */
+export function codexShapeProblems(argv, allowedConfig = []) {
+  const a = (argv ?? []).map(String);
+  const hits = [];
+  let i = a[0] === "exec" ? 0 : a[1] === "exec" && !a[0].startsWith("-") ? 1 : -1;
+  if (i === -1) return ["<codex argv does not start with exec>"];
+  i++;
+  const seen = new Set();
+  const configs = [];
+  for (; i < a.length; i++) {
+    const t = a[i];
+    if (t === "-" && i === a.length - 1) { seen.add("-"); continue; }
+    if (CODEX_BOOL.has(t)) { seen.add(t); continue; }
+    if (Object.hasOwn(CODEX_VALUED, t) && i + 1 < a.length) {
+      const v = a[++i];
+      if (t === "-c") { if (allowedConfig.includes(v)) configs.push(v); else hits.push(v); }
+      else if (CODEX_VALUED[t](v)) seen.add(t);
+      else hits.push(`${t} ${v}`);
+      continue;
+    }
+    hits.push(t);
+  }
+  for (const r of [...CODEX_REQUIRED, "-"]) if (!seen.has(r)) hits.push(`<missing ${r}>`);
+  for (const c of allowedConfig) if (!configs.includes(c)) hits.push(`<missing -c ${c}>`);
+  if (!allowedConfig.length) hits.push("<no runner-generated -c allowlist>");
+  return hits;
+}
+
+export function bypassFlags(argv, { allowedConfig = [], shape = null } = {}) {
   const hits = [];
   (argv ?? []).forEach((raw, i) => {
     const a = String(raw);
@@ -181,5 +282,7 @@ export function bypassFlags(argv, { allowedConfig = [] } = {}) {
     else if (value !== null && MODE_FLAGS.has(flag) && badModeValue(flag, value, allowedConfig)) hits.push(a);
     else if (/^-c./.test(a) && !a.startsWith("--") && badModeValue("-c", a.slice(2), allowedConfig)) hits.push(a); // -ckey=value
   });
+  if (shape === "codex") { for (const h of codexShapeProblems(argv, allowedConfig)) if (!hits.includes(h)) hits.push(h); }
+  else if (shape) hits.push(`<unknown argv shape ${shape}>`);
   return hits;
 }

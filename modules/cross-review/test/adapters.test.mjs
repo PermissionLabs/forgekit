@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadPolicy, defaultPolicyPath, hostPin } from "../lib/policy.mjs";
-import { bypassFlags } from "../lib/proc.mjs";
+import { bypassFlags, tomlKey } from "../lib/proc.mjs";
 import * as claude from "../adapters/claude.mjs";
 import * as codex from "../adapters/codex.mjs";
 import * as ag from "../adapters/antigravity.mjs";
@@ -100,6 +100,22 @@ test("claude stream audit: extra tools, MCP, outside reads and wrong model make 
   const br = claude.auditStream(lines(brace), SNAP, pin).reasons;
   assert.equal(br.length, 3, br.join());
   assert.ok(br.every((r) => /^tool_read_outside_snapshot:\{/.test(r)));
+  // X24/A58: over 64 alternatives. Relative-only globs pass with no fabricated path; an escaping one is refused as a whole.
+  const many = clone(ok);
+  const rel = "modules/{a,b}/{c,d}/{e,f}/{g,h}/{i,j}/{k,l}/{m,n}/*.mjs";
+  const esc = "{.,a}{./,x}{,a}{,a}{,a}{,a}{,a}etc/passwd";
+  many[1].message.content.push({ type: "tool_use", id: "m1", name: "Glob", input: { pattern: rel } });
+  assert.deepEqual(claude.auditStream(lines(many), SNAP, pin).reasons, []);
+  for (const [id, name, input] of [["m2", "Glob", { pattern: esc }], ["m3", "Grep", { pattern: "x", glob: "{,a}{,b}{,c}{,d}{,e}{,f}{g,/etc}" }]]) {
+    const one = clone(ok);
+    one[1].message.content.push({ type: "tool_use", id, name, input });
+    const rs = claude.auditStream(lines(one), SNAP, pin).reasons;
+    assert.equal(rs.length, 1, rs.join());
+    assert.match(rs[0], /^tool_glob_unauditable:.*over 64 brace alternatives/);
+  }
+  assert.equal(claude.braceAlternatives(esc), null);
+  assert.equal(claude.braceMayEscape(esc), true);
+  assert.equal(claude.braceMayEscape(rel), false);
 });
 
 test("codex argv: read-only sandbox, approval never, ephemeral, user config/rules ignored, pinned model/effort, no bypass", () => {
@@ -304,8 +320,40 @@ test("codex argv: the generated permission profile replaces -s read-only; the gu
   assert.deepEqual(bypassFlags([`--config=${evil[0]}`], { allowedConfig }), [`--config=${evil[0]}`]);
   assert.deepEqual(bypassFlags([`-c${evil[1]}`], { allowedConfig }), [`-c${evil[1]}`]);
   for (const f of ["--enable", "-P", "--permission-profile", "--sandbox-state-readable-root", "--sandbox-state-json"]) assert.deepEqual(bypassFlags([f, "x"], { allowedConfig }), [f], f);
+  // The runner-built argv has exactly the codex shape (A50/A59).
+  assert.deepEqual(bypassFlags(argv, { allowedConfig, shape: "codex" }), []);
+  assert.deepEqual(bypassFlags(["/opt/codex/bin/codex", ...argv], { allowedConfig, shape: "codex" }), []);
   // Non-sensitive overrides stay allowed.
   assert.deepEqual(bypassFlags(["-c", 'model_reasoning_effort="high"', "-c", 'model="gpt"'], { allowedConfig }), []);
+});
+
+test("codex bypass guard: -s/sandbox_mode in any form, profiles, managed config, attached short flags, TOML-escaped keys (A50/A59)", () => {
+  const pin = hostPin(policy, "codex");
+  const prof = sandbox.permissionProfile({ snapshot: SNAP, codexRoot: "/opt/codex/1.0.0", name: "cross_review_test" });
+  const perm = sandbox.profileArgs(prof);
+  const argv = codex.buildArgv(pin, { snapshot: SNAP, schemaPath: "/w/s.json", lastMessagePath: "/w/l.txt", permissionArgs: perm });
+  const allowedConfig = codex.allowedConfig(pin, perm);
+  const evil = [
+    ["-s", "read-only"], ["-sread-only"], ["-sdanger-full-access"], ["--sandbox=read-only"], ["--sandbox", "read-only"],
+    ["-c", 'sandbox_mode="read-only"'], ["-c", String.raw`"\u0070ermissions".x.filesystem={"/"="write"}`], ["-c", String.raw`"\u0073andbox_mode"="danger-full-access"`],
+    ["-c", String.raw`"\u0061pproval_policy"="on-request"`], ["-c", String.raw`"\U00000070rofile"="danger"`], ["-c", "'permissions'.x.network.enabled=true"],
+    ["-c", 'profile="danger"'], ["-c", "features . shell_tool = true"], ["-c", 'default_permissions = ":workspace"'], ["-c", '"unterminated=1'],
+    ["-p", "danger"], ["--profile", "danger"], ["--profile=danger"], ["-P:workspace"], ["-P=:workspace"], ["-aon-request"], ["-anever"],
+    ["--include-managed-config"], ["--include-managed-config=true"], ["--json"], ["--full-auto"], ["--add-dir", "/"], ["--color", "always"], ["-C", "relative"],
+  ];
+  for (const extra of evil) {
+    // Inserted before the trailing "-" or appended: never accepted, before the fix several returned [].
+    const bad = [...argv.slice(0, -1), ...extra, "-"];
+    assert.ok(bypassFlags(bad, { allowedConfig, shape: "codex" }).length > 0, extra.join(" "));
+  }
+  // Generic guard (every host): the new spellings are refused even without the codex shape.
+  for (const extra of evil.slice(0, 24).filter((e) => e[0] !== "-p")) assert.ok(bypassFlags(extra).length > 0, `generic ${extra.join(" ")}`);
+  // Dropping a runner-generated value (the permission profile, approval never) is refused too.
+  const noProfile = argv.filter((x, i) => !(x.startsWith("default_permissions=") || (argv[i + 1] ?? "").startsWith("default_permissions=")));
+  assert.ok(bypassFlags(noProfile, { allowedConfig, shape: "codex" }).some((h) => /missing -c default_permissions/.test(h)));
+  assert.equal(tomlKey(String.raw`"\u0070ermissions".x={}`), "permissions.x");
+  assert.equal(tomlKey("a . 'b.c' . \"d\" = 1"), "a.b.c.d");
+  assert.equal(tomlKey('"x'), null);
 });
 
 test("sandbox runtime grants: exact package dir or the binary file, never a shared prefix; DENY entries win (X18/A52)", () => {
@@ -482,9 +530,9 @@ test("antigravity model and thinking level come from the policy", () => {
 test("bypass guard catches =-joined and value forms", () => {
   const bad = ["--add-dir=/x", "--yolo", "--yolo=true", "-y", "--approval-mode=yolo", "--sandbox=danger-full-access", "--dangerously-skip-permissions", "--dangerously-bypass-approvals-and-sandbox", "--allow-dangerously-skip-permissions", "--permission-mode=bypassPermissions", "--full-auto", "--add-dir"];
   assert.deepEqual(bypassFlags(bad), bad);
-  assert.deepEqual(bypassFlags(["-s", "workspace-write", "--permission-mode", "acceptEdits", "-c", 'approval_policy="on-failure"', "--approval-mode", "yolo"]), ["workspace-write", "acceptEdits", 'approval_policy="on-failure"', "yolo"]);
-  assert.deepEqual(bypassFlags(["--model", "x", "-s", "read-only", "--ephemeral", "-c", 'approval_policy="never"', "--permission-mode", "dontAsk"]), []);
-  // Any approval/sandbox value other than the safe one is a bypass, quoted either way (A3).
+  assert.deepEqual(bypassFlags(["-s", "workspace-write", "--permission-mode", "acceptEdits", "-c", 'approval_policy="on-failure"', "--approval-mode", "yolo"]), ["-s", "acceptEdits", 'approval_policy="on-failure"', "yolo"]);
+  assert.deepEqual(bypassFlags(["--model", "x", "--ephemeral", "-c", 'approval_policy="never"', "--permission-mode", "dontAsk"]), []);
+  // Any approval value other than the safe one is a bypass, quoted either way (A3); -s/--sandbox and sandbox_mode in any form (A59).
   assert.deepEqual(bypassFlags(["-c", 'approval_policy="on-request"', "-c", "approval_policy='on-failure'", "-c", "approval_policy=untrusted", "-c", 'sandbox_mode="workspace-write"', "-a", "on-request", "--sandbox", "danger-full-access"]).length, 6);
   // Paths and JSON values are not scanned: a temp dir named like a bypass word is not a false positive.
   assert.deepEqual(bypassFlags(["-C", "/tmp/cross-review-snap-YoLo12", "--json-schema", '{"description":"yolo full-auto"}', "-"]), []);

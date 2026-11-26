@@ -24,6 +24,9 @@ import * as path from "node:path";
 import { expandHome } from "../lib/policy.mjs";
 import { insideRoot, redact, sha256 } from "../lib/inputs.mjs";
 import { groupMembers, ownedMembers } from "../lib/proc.mjs";
+import { groupsFor, planTurns, runTurns, totalBudget } from "../lib/turns.mjs";
+
+export { groupsFor, planTurns, totalBudget }; // re-exported for callers/tests of the adapter
 
 export const ENABLED_TOOLS = ["view_file"];
 export const CLIENT_CAPABILITIES = { fs: { readTextFile: false, writeTextFile: false }, terminal: false, session: { notices: {} } };
@@ -66,15 +69,6 @@ export function buildEnv(base, { geminiHome, tmpDir, harness }) {
   });
 }
 
-/** Turn groups for this run: the policy groups restricted to the run's dimensions, leftovers as one more group. */
-export function groupsFor(dimensions, policyGroups) {
-  const groups = (policyGroups ?? []).map((g) => g.filter((d) => dimensions.includes(d))).filter((g) => g.length);
-  const seen = new Set(groups.flat());
-  const rest = dimensions.filter((d) => !seen.has(d));
-  if (rest.length) groups.push(rest);
-  return groups.length ? groups : [dimensions];
-}
-
 function findProfile(profileRoot) {
   const cands = fs.readdirSync(profileRoot).filter((d) => fs.existsSync(path.join(profileRoot, d, "antigravity-acp")));
   if (cands.length !== 1) throw new Error(`expected exactly one Antigravity profile under ${profileRoot}, found ${cands.length}; set hosts.antigravity.runtime.profile`);
@@ -105,35 +99,6 @@ export function findRuntime(runtimeRootSetting) {
   };
   const versions = fs.readdirSync(root).filter((d) => fs.existsSync(path.join(root, d, "agy_acp_server.par"))).sort(cmp);
   return { root, version: versions.at(-1) ?? null, candidates: versions };
-}
-
-/**
- * Turns: each dimension group, split into chunks of scope files so no turn exceeds maxFiles / maxBytes
- * (a single file larger than maxBytes gets its own chunk). One chunk -> the turn lists no file restriction.
- */
-export function planTurns(groups, scopeFiles, { maxFiles, maxBytes } = {}) {
-  const chunks = [];
-  let cur = [], bytes = 0;
-  for (const f of scopeFiles) {
-    if (cur.length && ((maxFiles && cur.length >= maxFiles) || (maxBytes && bytes + f.bytes > maxBytes))) { chunks.push(cur); cur = []; bytes = 0; }
-    cur.push(f);
-    bytes += f.bytes;
-  }
-  if (cur.length) chunks.push(cur);
-  const split = chunks.length > 1;
-  return groups.flatMap((dims) => (split ? chunks : [null]).map((files, ci) => ({ dims, files: files?.map((f) => f.path) ?? null, label: `group:${dims.join("+")}${split ? `:files${ci + 1}/${chunks.length}` : ""}` })));
-}
-
-/**
- * Total time budget for a run of nTurns turns: per_turn_budget_sec x turns, capped by max_total_sec; without
- * per_turn_budget_sec the fixed timeout_sec (fallbackMs) applies. -> { totalMs, perTurnSec, capSec, capped }.
- */
-export function totalBudget(cfg, nTurns, fallbackMs) {
-  const per = cfg?.per_turn_budget_sec;
-  if (!(per > 0)) return { totalMs: fallbackMs, perTurnSec: null, capSec: null, capped: false };
-  const cap = cfg.max_total_sec > 0 ? cfg.max_total_sec : Infinity;
-  const want = per * Math.max(1, nTurns);
-  return { totalMs: Math.round(Math.min(want, cap) * 1000), perTurnSec: per, capSec: Number.isFinite(cap) ? cap : null, capped: want > cap };
 }
 
 /**
@@ -184,10 +149,10 @@ export async function run(ctx) {
   const ms = () => Date.now() - t0;
   const thinking = pin.effort;
   const expectedProxyModel = `${pin.model}-${thinking}`;
-  const groups = groupsFor(dimensions, cfg.groups);
-  out.groups = groups;
   const scopeFiles = input.files.filter((f) => f.kind === "scope");
-  const turns = planTurns(groups, scopeFiles, { maxFiles: cfg.max_files_per_turn, maxBytes: cfg.max_bytes_per_turn });
+  // The same helper plan() uses for its estimate (A63); a small re-review may use one group (rereview_single_group).
+  const { groups, turns } = runTurns(cfg, dimensions, scopeFiles, { rereview: priorIds.length > 0, diffBytes: Buffer.byteLength(input.diffText ?? "") });
+  out.groups = groups;
   out.turns = turns.map((t) => t.label);
   // The total budget scales with the planned turns (per_turn_budget_sec x turns, capped by max_total_sec).
   const budget = totalBudget(cfg, turns.length, pin.timeoutMs);

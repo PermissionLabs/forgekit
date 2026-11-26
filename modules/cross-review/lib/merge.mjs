@@ -77,11 +77,16 @@ export function loadReviewEntry(arg) {
  * entries: [{ host, status, review, source }]
  */
 export function mergeReviews(entries, { lineWindow = 3, minSimilarity = 0.2 } = {}) {
-  const hosts = entries.map((e) => ({ host: e.host, status: e.status, source: e.source, verdict: e.status === "complete" ? e.review?.verdict ?? null : null, findings: e.status === "complete" ? e.review?.findings?.length ?? 0 : 0, incompleteReasons: e.incompleteReasons ?? [] }));
+  // A64: a "complete" entry whose review is malformed is shown as not merged, never as complete (X16: never a crash).
+  const checked = entries.map((e) => {
+    if (e.status !== "complete") return e;
+    const probs = e.review ? reviewShapeProblems(e.review) : ["no review"];
+    return probs.length ? { ...e, status: "incomplete", incompleteReasons: [...(e.incompleteReasons ?? []), ...probs.map((x) => `review invalid: ${x}`)] } : e;
+  });
+  const hosts = checked.map((e) => ({ host: e.host, status: e.status, source: e.source, verdict: e.status === "complete" ? e.review.verdict : null, findings: e.status === "complete" ? e.review.findings.length : 0, incompleteReasons: e.incompleteReasons ?? [] }));
   const groups = [];
-  for (const e of entries) {
-    if (e.status !== "complete" || !e.review) continue;
-    if (reviewShapeProblems(e.review).length) continue; // never merged, never a crash (X16)
+  for (const e of checked) {
+    if (e.status !== "complete") continue;
     for (const f of e.review.findings) {
       const m = { host: e.host, id: f.id, sev: f.sev, loc: f.loc, claim: f.claim, text: `${f.claim} ${f.evidence}` };
       // Same place (overlapping lines) needs weaker textual agreement than nearby lines.
