@@ -44,7 +44,12 @@ if [ ! -d "$templates" ]; then
   exit 1
 fi
 
-target="$(cd "$target" && pwd)"
+if [ -L "$target" ]; then
+  echo "error: target is a symlink" >&2
+  exit 1
+fi
+target="$(cd "$target" && pwd -P)"
+source "$forgekit_root/scripts/check-target-paths.sh"
 
 # Conflict check.
 conflicts=()

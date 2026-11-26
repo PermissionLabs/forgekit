@@ -48,7 +48,12 @@ if [ ! -d "$templates" ]; then
   exit 1
 fi
 
-target="$(cd "$target" && pwd)"
+if [ -L "$target" ]; then
+  echo "error: target is a symlink" >&2
+  exit 1
+fi
+target="$(cd "$target" && pwd -P)"
+source "$forgekit_root/scripts/check-target-paths.sh"
 
 if ! git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "error: target is not a git repository: $target" >&2
@@ -78,7 +83,7 @@ copy_entrypoint_preserving_title() {
     cp "$src" "$dst"
     return
   fi
-  tmp="$dst.tmp.$$"
+  tmp="$(mktemp "$dst.tmp.XXXXXXXX")"
   {
     head -n 1 "$dst"
     tail -n +2 "$src"
@@ -196,7 +201,7 @@ if [ ! -f "$state_file" ]; then
   copy_file "$templates/.context/workflow-state.compact.example.json" "$state_file"
   echo "copy: .context/workflow-state.json"
 elif command -v jq >/dev/null 2>&1; then
-  tmp="$state_file.tmp.$$"
+  tmp="$(mktemp "$state_file.tmp.XXXXXXXX")"
   if jq '
     def append_missing($v): if index($v) then . else . + [$v] end;
     .resume_protocol.read_this_file_on = (
