@@ -43,3 +43,12 @@ test("a detached-stdio descendant left in the group is killed after close", asyn
   await new Promise((res) => setTimeout(res, 300));
   assert.throws(() => process.kill(pid, 0));
 });
+
+test("a setsid'd descendant holding the pipes cannot hang the runner", async () => {
+  const script = `const c=require("child_process").spawn(process.execPath,["-e","setTimeout(()=>{},30000)"],{detached:true,stdio:"inherit"}); console.log(c.pid); c.unref(); process.exit(0)`;
+  const r = await runProcess({ bin: node, args: ["-e", script], env: process.env, input: "", timeoutMs: 200 });
+  assert.equal(r.pipesAbandoned, true);
+  assert.ok(r.durationMs < 15_000, `took ${r.durationMs}`);
+  const pid = Number(r.stdout.trim());
+  if (pid) try { process.kill(pid, "SIGKILL"); } catch {}
+});

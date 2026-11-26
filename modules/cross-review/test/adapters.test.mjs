@@ -150,7 +150,10 @@ test("antigravity model and thinking level come from the policy", () => {
 });
 
 test("bypass guard catches =-joined and value forms", () => {
-  const bad = ["--add-dir=/x", "--yolo", "--yolo=true", "-y", "--approval-mode=yolo", "--approval-mode", "--sandbox=danger-full-access", "--dangerously-skip-permissions", "--permission-mode=bypassPermissions", "--full-auto"];
+  const bad = ["--add-dir=/x", "--yolo", "--yolo=true", "-y", "--approval-mode=yolo", "--sandbox=danger-full-access", "--dangerously-skip-permissions", "--dangerously-bypass-approvals-and-sandbox", "--allow-dangerously-skip-permissions", "--permission-mode=bypassPermissions", "--full-auto", "--add-dir"];
   assert.deepEqual(bypassFlags(bad), bad);
-  assert.deepEqual(bypassFlags(["--model", "x", "-s", "read-only", "--ephemeral"]), []);
+  assert.deepEqual(bypassFlags(["-s", "workspace-write", "--permission-mode", "acceptEdits", "-c", 'approval_policy="on-failure"', "--approval-mode", "yolo"]), ["workspace-write", "acceptEdits", 'approval_policy="on-failure"', "yolo"]);
+  assert.deepEqual(bypassFlags(["--model", "x", "-s", "read-only", "--ephemeral", "-c", 'approval_policy="never"', "--permission-mode", "dontAsk"]), []);
+  // Paths and JSON values are not scanned: a temp dir named like a bypass word is not a false positive.
+  assert.deepEqual(bypassFlags(["-C", "/tmp/cross-review-snap-YoLo12", "--json-schema", '{"description":"yolo full-auto"}', "-"]), []);
 });
