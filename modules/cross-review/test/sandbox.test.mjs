@@ -119,8 +119,11 @@ test("selfTest fails closed when a probe is missing; makeProbe records creation 
     assert.ok(probe.probes.outside);
     assert.equal(probe.errors.length, 3, probe.errors.join("\n"));
   } finally { probe.cleanup(); }
-  const real = sandbox.makeProbe();
-  try { assert.ok(real.probes.privateVarTmp?.startsWith("/private/var/tmp/"), "a /private/var/tmp probe file is created"); } finally { real.cleanup(); }
+  // The default /private/var/tmp probe exists only on macOS (A70): elsewhere the path is absent.
+  if (DARWIN) {
+    const real = sandbox.makeProbe();
+    try { assert.ok(real.probes.privateVarTmp?.startsWith("/private/var/tmp/"), "a /private/var/tmp probe file is created"); } finally { real.cleanup(); }
+  }
 });
 
 test("grantProblem compares canonical, case-folded paths; the profile records canonical paths (A60)", () => {
@@ -136,11 +139,14 @@ test("grantProblem compares canonical, case-folded paths; the profile records ca
   assert.match(sandbox.grantProblem(path.join(H, ".codex"), { home: "/nowhere", codexHome: link }) ?? "", /CODEX_HOME/);
   // Mixed-case and non-normalized denied paths.
   assert.match(sandbox.grantProblem("/Private/tmp/nonexistent", { home: "/nowhere", ...ci }) ?? "", /denied|\/private\/tmp/i);
-  assert.match(sandbox.grantProblem("/tmp/x/../y", { home: "/nowhere" }) ?? "", /private\/tmp/);
+  assert.match(sandbox.grantProblem("/private/tmp/x/../y", { home: "/nowhere" }) ?? "", /private\/tmp/);
+  // /tmp is denied through its realpath only where it is a symlink to /private/tmp (macOS; A70).
+  if (fs.realpathSync("/tmp") === "/private/tmp") assert.match(sandbox.grantProblem("/tmp/x/../y", { home: "/nowhere" }) ?? "", /private\/tmp/);
   // The profile stores the canonical path, never the spelling it was given.
   const ver = path.join(tmp, "opt", "codex", "1.0");
+  // Built by hand: path.join would already normalise "bin/.." away before permissionProfile sees it (A71).
   fs.mkdirSync(path.join(ver, "bin"), { recursive: true });
-  const p = sandbox.permissionProfile({ snapshot: snap, codexRoot: path.join(ver, "bin", ".."), home: "/nowhere", name: "cross_review_t" });
+  const p = sandbox.permissionProfile({ snapshot: snap, codexRoot: `${ver}${path.sep}bin${path.sep}..`, home: "/nowhere", name: "cross_review_t" });
   assert.ok(Object.hasOwn(p.filesystem, ver), Object.keys(p.filesystem).join());
   assert.ok(!Object.keys(p.filesystem).some((k) => k.includes("..")));
 });

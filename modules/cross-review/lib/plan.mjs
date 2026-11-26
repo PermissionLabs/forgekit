@@ -2,7 +2,7 @@
 // Usage data is whatever the caller saved from the T3 MCP tool `provider_usage_limits`.
 import { HOSTS } from "./policy.mjs";
 import { parseDiffPaths } from "./diff.mjs";
-import { runTurns, totalBudget } from "./turns.mjs";
+import { groupsFor, runTurns, totalBudget } from "./turns.mjs";
 
 // ---------------------------------------------------------------- globs
 /** Glob -> RegExp over a repo-relative POSIX path. `**` spans directories, `*` and `?` do not. */
@@ -133,7 +133,7 @@ export function antigravityBudget(hp, dimensions, files, { rereview = false, dif
   const sizesKnown = typeof files !== "number" && list.some((f) => f.bytes > 0);
   const { groups, turns: t } = runTurns(hp, dimensions, list, { rereview, diffBytes });
   const turns = t.length;
-  const base = { estimatedTurns: turns, groups: groups.length, sizesKnown, ...(groups.length === 1 && rereview && dimensions.length > 1 ? { singleGroup: "re-review with a small diff (rereview_single_group)" } : {}) };
+  const base = { estimatedTurns: turns, groups: groups.length, sizesKnown, ...(groups.length === 1 && groupsFor(dimensions, hp?.groups).length > 1 ? { singleGroup: "re-review with a small diff (rereview_single_group)" } : {}) };
   const per = hp.per_turn_budget_sec;
   if (!(per > 0)) return { ...base, totalSec: hp.timeout_sec ?? null, note: "fixed timeout_sec (no per_turn_budget_sec)" };
   const tb = totalBudget(hp, turns, null);

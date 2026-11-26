@@ -189,7 +189,9 @@ test("the total budget scales with the planned turns, with a floor and a cap (A6
   assert.equal(totalBudget({ per_turn_budget_sec: 180, max_total_sec: 3600 }, 30, 1).capped, true);
   assert.equal(totalBudget({}, 16, 1_500_000).totalMs, 1_500_000);
   // A63: a 1-turn run is never squeezed below one turn's timeout (was 180 s; 89 s made turn 0 time out before it ran).
-  assert.equal(totalBudget({ per_turn_budget_sec: 180, max_total_sec: 3600, turn_timeout_sec: 600 }, 1, 1).totalMs, 600_000);
+  // Floor precedence (A69): min_total_sec, else turn_timeout_sec, else 600.
+  assert.equal(totalBudget({ per_turn_budget_sec: 180, max_total_sec: 3600, turn_timeout_sec: 700 }, 1, 1).totalMs, 700_000);
+  assert.equal(totalBudget({ per_turn_budget_sec: 180, max_total_sec: 3600, turn_timeout_sec: 700, min_total_sec: 900 }, 1, 1).totalMs, 900_000);
   assert.equal(totalBudget({ per_turn_budget_sec: 89, max_total_sec: 3600 }, 1, 1).totalMs, 600_000);
   assert.equal(totalBudget({ per_turn_budget_sec: 180, min_total_sec: 900, max_total_sec: 3600 }, 2, 1).totalMs, 900_000);
   assert.equal(totalBudget({ per_turn_budget_sec: 180, min_total_sec: 900, max_total_sec: 700 }, 2, 1).totalMs, 700_000);
@@ -198,7 +200,7 @@ test("the total budget scales with the planned turns, with a floor and a cap (A6
   assert.equal(ev.timeoutMs, 200_000); // 2 turns x 100 s
   const ev2 = await go({}, { per_turn_budget_sec: 30, max_total_sec: 1000 });
   assert.equal(ev2.status, "complete", ev2.incompleteReasons.join());
-  assert.equal(ev2.timeoutMs, 600_000); // floor: turn_timeout_sec
+  assert.equal(ev2.timeoutMs, 600_000); // floor: min_total_sec (600, from the shipped policy), not turn_timeout_sec
 });
 
 test("plan() estimates Antigravity turns like the adapter (leftover group, byte chunks) and warns only when antigravity reviews (A63/A65/A66)", () => {
@@ -240,6 +242,13 @@ test("re-review speed knob: a small re-review runs one group per file chunk; lar
   const p = plan({ policy: basePolicy, author: "claude", dimensions: dims, paths: files.map((f) => f.path), usage: null, files, rereview: true, diffBytes: 50_000 });
   assert.equal(p.hosts.antigravity.budget.estimatedTurns, 2);
   assert.match(p.hosts.antigravity.budget.singleGroup, /re-review/);
+  // singleGroup is shown only when the collapse applied (A68): not for a large diff, the knob off, or one natural group.
+  const big = plan({ policy: basePolicy, author: "claude", dimensions: dims, paths: files.map((f) => f.path), usage: null, files, rereview: true, diffBytes: 500_000 });
+  assert.equal(big.hosts.antigravity.budget.singleGroup, undefined);
+  const off = { ...basePolicy, hosts: { ...basePolicy.hosts, antigravity: { ...hp, rereview_single_group: false } } };
+  assert.equal(plan({ policy: off, author: "claude", dimensions: dims, paths: files.map((f) => f.path), usage: null, files, rereview: true, diffBytes: 1 }).hosts.antigravity.budget.singleGroup, undefined);
+  const oneGroup = hp.groups.find((g) => g.length > 1);
+  assert.equal(plan({ policy: basePolicy, author: "claude", dimensions: oneGroup, paths: files.map((f) => f.path), usage: null, files, rereview: true, diffBytes: 1 }).hosts.antigravity.budget.singleGroup, undefined);
 });
 
 test("a non-zero server exit after the last prompt invalidates the review (X12)", async () => {

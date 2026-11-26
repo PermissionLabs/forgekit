@@ -132,9 +132,13 @@ another reviewer or model.
   would show a pace of 60+): it only has to cover its expected cost. If it cannot, the plan asks
   (waiting for the reset is an option), unless another window fails its cost or pace: every window
   is evaluated and skip beats ask.
-- Antigravity budget: `plan` estimates its turns (dimension groups × ⌈paths / `max_files_per_turn`⌉,
-  a lower bound: bytes are not known yet) and reports `hosts.antigravity.budget`; when estimated turns
-  × `per_turn_budget_sec` exceed `max_total_sec`, `warnings[]` says so.
+- Antigravity budget (not reported when Antigravity is the author): `plan` estimates its turns with
+  the adapter's own helper (`lib/turns.mjs`): dimension groups (policy groups + the leftover group, or
+  one group for a small `--prior` re-review, then `budget.singleGroup` says so) × scope-file chunks by
+  `max_files_per_turn` and, with sizes read from the working tree, `max_bytes_per_turn` (without sizes
+  it is a lower bound). `hosts.antigravity.budget.totalSec` = `per_turn_budget_sec` × turns, at least
+  `min_total_sec` (else `turn_timeout_sec`, else 600), capped by `max_total_sec`; when the cap cuts it,
+  `warnings[]` says so (see Antigravity turns below).
 - pace ≥ `use_at_or_above` (1.0): use. Between `high_only_at_or_above` (0.6) and 1.0: use only for
   high grade. Below 0.6: skip with a one-line question. Usage unavailable: `ask`. `--no-user` turns
   `ask` into `blocked`. Thresholds and cost estimates are provisional (`pace.provisional`).

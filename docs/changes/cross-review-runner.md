@@ -33,7 +33,7 @@ Its ten ACP rules (isolated `GEMINI_HOME`, `reject_once`, view_file only, `.meta
 
 - [x] Plan
 - [x] Implement
-- [x] Review (r1–r4 cross-review cycles; r4 had no high/critical; r4 fixes below; ready for PR)
+- [x] Review (r1–r5 cross-review cycles; r4 and r5 had no high/critical; r5 test/doc fixes below; ready for PR)
 - [ ] Human QA
 - [ ] Merge
 - [ ] Post-merge
@@ -306,6 +306,18 @@ it is well under the r5/r6 full reviews that measured ~0.01 weekly.
 
 | 6 (r3) | Re-review of c8a846c..e64a80c: Codex ran to completion under the first production OS sandbox (922 s, 222,195 tokens) but was incomplete only by the secondary audit (`ls -l` of the allowed node binary, a false positive); its draft X18–X23 (block) was kept as `reviewIfIncomplete`. Antigravity incomplete `total_timeout_before:group:tests+contract_docs:files4/4` (fixed 1500 s budget; 11 of 16 turns); partial turns A47–A57 extracted for information. Merge: 0 groups (both incomplete); manual overlaps X18 = A52, X19 ≈ A49, X3/A6/A19 unverified. | Orchestrator decision: simplify so the loop converges — shell audit evidence-only, `audit_only` removed, denial counter dropped. Real fixes with regression tests for every r3 id and every unverified prior (dispositions below). |
 | 7 (r4) | Re-review of e64a80c..481a88c: Codex complete (336 s, 182,111 tokens; self-test ok, 6 probes), verdict fix, 1 med X24; 25/27 priors verified, A50 and A53 not verified. Antigravity complete (1552 s of a 2880 s budget, 16 turns: 4 groups × 4 chunks), verdict fix, 4 med + 5 low A58–A66; 27/27 priors verified. Merge: 10 groups, no cross-host grouping; manual overlaps X24 vs A58 (same loc, opposite directions), A59 ≈ A50-unverified, A61 ≈ A53-unverified. No high/critical. | Every r4 id fixed with a regression test (dispositions below); operator items: plan turn estimate, split-row dispositions; speed knob `rereview_single_group`. Ready for PR. |
+| 8 (r5) | Confirmation re-review of 481a88c..aa873f3: Codex complete (198 s, 128,037 tokens; self-test ok, 7 probes incl. `/private/var/tmp`), verdict fix, 1 med X25; Antigravity complete (4 turns = plan estimate, one re-review group, 582 s of a 720 s budget), verdict fix, 1 med + 4 low A67–A71; both hosts verified 12/12 priors (A50 and A53 now verified by Codex); merge grouped X25=A70 | No high/critical. X25/A70 (med) new sandbox tests assumed macOS paths (`/private/var/tmp`, `/tmp`→`/private/tmp`) and failed on Linux; A71 the A60 regression test let `path.join` normalise `bin/..` away; A69 the `turn_timeout_sec` floor branch was not exercised and a comment misnamed the floor; A68 `budget.singleGroup` shown whenever one group resulted; A67 README `plan` budget text was the r3 formula | All five fixed test/doc/display-only (no sandbox/argv/status logic change); suite also run on Linux (node:22 container: 126 pass, 6 macOS-only skipped, 0 fail) |
+
+### r5 dispositions
+
+| Id | Disposition | Ref |
+| --- | --- | --- |
+| X25 (med) / A70 (med) | fixed | `test/sandbox.test.mjs`: the default `/private/var/tmp` probe assertion runs only when `DARWIN`; the `..`-normalisation denial is asserted on `/private/tmp/x/../y` everywhere and on `/tmp/x/../y` only where `realpath(/tmp)` is `/private/tmp`. Linux run (node:22 container): 0 fail |
+| A71 (low) | fixed | the A60 test builds `` `${ver}/bin/..` `` by hand (no `path.join`); verified it fails when `permissionProfile` stores the uncanonicalised path |
+| A69 (low) | fixed | `totalBudget` floor precedence asserted: `turn_timeout_sec` 700 → 700 s without `min_total_sec`, `min_total_sec` 900 wins over it; the `ev2` comment names `min_total_sec` (600 from the shipped policy) |
+| A68 (low) | fixed | `lib/plan.mjs`: `budget.singleGroup` only when the collapse applied (one run group while `groupsFor` gives more than one); test: large diff, knob off and a naturally single group show none; verified the test fails with the old condition |
+| A67 (low) | fixed | README `plan` section: turns via `lib/turns.mjs` (leftover group, single-group re-review, file and byte chunks; lower bound without sizes), floor `min_total_sec` → `turn_timeout_sec` → 600, cap, no budget when Antigravity is the author |
+| X24, A50, A53, A58–A66 (priors) | fixed (verified in r5 by both hosts) | — |
 
 ### r4 dispositions
 
@@ -389,7 +401,7 @@ it is well under the r5/r6 full reviews that measured ~0.01 weekly.
 
 - Working branch: `agent/cross-review-runner` (based on `agent/antigravity-support` @ f9aa6ff, not yet merged)
 - Target branch: `main` (after `agent/antigravity-support`)
-- PR URL: TBD (no PR in this step). Status: ready for PR after the r4 fixes (no open high/critical; every r4 id fixed with a regression test)
+- PR URL: TBD (no PR in this step). Status: ready for PR after the r5 fixes (no open high/critical; r5 confirmation review verified every r4 fix on both hosts; the r5 test/doc/display items fixed)
 
 ## Residuals
 
