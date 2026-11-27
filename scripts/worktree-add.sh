@@ -119,7 +119,10 @@ cleanup_incomplete_worktree() {
   git -C "$REPO_ROOT" branch -D "$BRANCH" >/dev/null 2>&1 || true
 }
 
-if ! ABS_WORKTREE="$(CDPATH='' cd -- "$WORKTREE_PATH" && pwd -P)"; then
+# Physical cd (A7, follow-ups r2): git resolves "<symlink>/.." through the
+# link, so a logical cd would land elsewhere (e.g. REPO_ROOT reached through a
+# symlinked alias plus "../wt") and could seed an unrelated directory.
+if ! ABS_WORKTREE="$(CDPATH='' cd -P -- "$WORKTREE_PATH" && pwd -P)"; then
   cleanup_incomplete_worktree
   exit 1
 fi

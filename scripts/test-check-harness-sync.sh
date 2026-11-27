@@ -690,6 +690,19 @@ if command -v jq >/dev/null 2>&1; then
   [ "$(jq -r .branch "$cdpath_repo/rel-from-elsewhere/.context/workflow-state.json")" = "cdpath-else" ] \
     || fail "worktree not seeded at the repository-relative path"
   [ ! -e "$TMP_DIR/rel-from-elsewhere" ] || fail "a worktree path was created relative to the caller's directory"
+  # A7 (follow-ups r2): through a symlinked alias of the repository, "../wt"
+  # is where git puts it (the link's physical parent), never the alias's
+  # parent; an unrelated directory there must stay untouched.
+  mkdir -p "$TMP_DIR/alias-parent/sib-wt"
+  ln -s "$cdpath_repo" "$TMP_DIR/alias-parent/repo"
+  LABEL="worktree-add resolves ../<wt> physically through a symlinked repository path"
+  CASES=$((CASES + 1))
+  capture bash -c 'cd "$1" && exec bash "$2/scripts/worktree-add.sh" ../sib-wt -b cdpath-alias HEAD' _ \
+    "$TMP_DIR" "$TMP_DIR/alias-parent/repo"
+  expect_rc 0
+  [ "$(jq -r .branch "$TMP_DIR/sib-wt/.context/workflow-state.json")" = "cdpath-alias" ] \
+    || fail "worktree not seeded at git's (physical) location"
+  [ ! -e "$TMP_DIR/alias-parent/sib-wt/.context" ] || fail "state seeded into the unrelated alias-side directory"
 fi
 
 # 17d. PR #25: a managed destination that exists but is not a regular file
