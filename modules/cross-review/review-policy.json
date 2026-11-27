@@ -84,8 +84,6 @@
       "expected_cost": { "weekly": 0.013, "session": 0.03 },
       "expected_cost_note": "Provisional. Measured: one full view_file review used about 0.01 of the Gemini weekly window (r5/r6, 2026-11-25); the 24-file runner review r1 (2026-11-26) used 0.032 of gemini_5h (0.9269 -> 0.8945) and 0.006 of gemini_weekly; the r2 re-review used 0.028 of gemini_5h (0.8881 -> 0.86) and 0.013 of gemini_weekly (0.8124 -> 0.7996). session = 5 h window.",
       "runtime": {
-        "runtime_root": "~/.t3/tools/antigravity-acp/{platform}-{arch}/versions",
-        "profile_root": "~/.t3/userdata/providers/antigravity",
         "expect_agent_version": null
       }
     }

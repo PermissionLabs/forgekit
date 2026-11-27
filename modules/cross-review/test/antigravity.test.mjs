@@ -8,7 +8,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadPolicy, defaultPolicyPath } from "../lib/policy.mjs";
 import { runReview } from "../lib/run.mjs";
-import { buildEnv, exitReason, findRuntime, isAgy, launchArgs, planTurns, stopGroup, totalBudget } from "../adapters/antigravity.mjs";
+import { buildEnv, exitReason, findRuntime, installationRoots, isAgy, launchArgs, planTurns, stopGroup, totalBudget } from "../adapters/antigravity.mjs";
 import { decodeGeneration, normalizeModelName, protoFields } from "../lib/agy-session-db.mjs";
 import { plan } from "../lib/plan.mjs";
 import { PAR_LAYOUT_DEFAULTS, TURN_DEFAULTS, layoutConfig, runTurns } from "../lib/turns.mjs";
@@ -22,6 +22,22 @@ const DIMS = ["correctness", "tests"];
 // The 1.5 adapter reads the session database with node:sqlite (Node 22.13+ without flags).
 const noSqlite = await import("node:sqlite").then(() => false, () => "node:sqlite unavailable (Node < 22.13)");
 const ctest = (name, fn) => test(name, { skip: noSqlite }, fn);
+
+test("T3 discovery keeps runtime and profile together and respects explicit paths", () => {
+  const home = path.join(tmp, "managed-t3-home");
+  const standard = installationRoots({}, home);
+  const runtime = path.relative(path.join(home, ".t3"), standard.runtime);
+  const custom = path.join(home, ".t3-custom");
+  fs.mkdirSync(path.join(custom, runtime), { recursive: true });
+  assert.deepEqual(installationRoots({}, home), {
+    runtime: path.join(custom, runtime),
+    profiles: path.join(custom, "userdata", "providers", "antigravity"),
+  });
+  assert.equal(installationRoots({ profile_root: "/explicit" }, home).runtime, standard.runtime);
+  assert.equal(installationRoots({ runtime_root: "/explicit" }, home).profiles, standard.profiles);
+  fs.mkdirSync(standard.runtime, { recursive: true });
+  assert.deepEqual(installationRoots({}, home), standard);
+});
 
 before(() => {
   tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cross-review-agy-test-")));

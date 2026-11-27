@@ -275,6 +275,9 @@ model call whose first byte takes > 300 s, so `par_layout` (over the top-level v
 `PAR_LAYOUT_DEFAULTS`) keeps one turn per dimension group (`security`, `correctness`, `tests` +
 `contract_docs`) and 8-file / 120 KB chunks with the old timings. Keys missing from the policy fall
 back to `TURN_DEFAULTS` (32 files, 400000 bytes, `turn_timeout_sec` 1200, `retry_timeout_sec` 600).
+By default the adapter checks for the platform runtime in `~/.t3` first, then `~/.t3-custom`.
+It selects the login profile from the same installation. Explicit runtime or profile settings
+retain the configured paths and the original `~/.t3` defaults for unspecified fields.
 `runtime_root` accepts `{platform}-{arch}`; the highest valid version of either layout is used:
 1.5 directories hold `.install-complete.json` naming the executable (a regular executable file of the
 recorded size, run as `antigravity acp --gemini-dir <isolated home> --app-data-dir antigravity-acp

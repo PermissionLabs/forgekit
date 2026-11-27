@@ -110,6 +110,22 @@ export function writeBrowserShims(shimDir, markerFile) {
   }
 }
 
+/** Use the executable and login profile from the same T3 installation. */
+export function installationRoots(settings, home = os.homedir()) {
+  const runtime = path.join("tools", "antigravity-acp", `${process.platform}-${process.arch}`, "versions");
+  const profiles = path.join("userdata", "providers", "antigravity");
+  let installation = path.join(home, ".t3");
+  if (!settings.runtime_root && !settings.profile_root && !settings.profile &&
+      !fs.existsSync(path.join(installation, runtime))) {
+    const custom = path.join(home, ".t3-custom");
+    if (fs.existsSync(path.join(custom, runtime))) installation = custom;
+  }
+  return {
+    runtime: settings.runtime_root ?? path.join(installation, runtime),
+    profiles: settings.profile_root ?? path.join(installation, profiles),
+  };
+}
+
 function findProfile(profileRoot) {
   const cands = fs.readdirSync(profileRoot).filter((d) => fs.existsSync(path.join(profileRoot, d, "antigravity-acp")));
   if (cands.length !== 1) throw new Error(`expected exactly one Antigravity profile under ${profileRoot}, found ${cands.length}; set hosts.antigravity.runtime.profile`);
@@ -232,7 +248,8 @@ export async function run(ctx) {
   const scopeFiles = input.files.filter((f) => f.kind === "scope");
 
   // ---- runtime + profile (directory names only; files inside are never opened, except a session's .meta/.db)
-  const runtime = findRuntime(rt.runtime_root);
+  const roots = installationRoots(rt);
+  const runtime = findRuntime(roots.runtime);
   const { root: runtimeRoot, version, layout } = runtime;
   if (!version) { reasons.push(`runtime_not_found:${runtimeRoot}`); return out; }
   // Turn split and timings for this runtime layout: one turn on 1.5 "cli", the old per-group split on <= 1.4 "par"
@@ -255,7 +272,7 @@ export async function run(ctx) {
     ? "set_config_option currentValue; session database gen_metadata model on every turn"
     : "set_config_option currentValue; stderr proxy model on every turn";
   let profile;
-  try { profile = rt.profile ? expandHome(rt.profile) : findProfile(expandHome(rt.profile_root ?? "~/.t3/userdata/providers/antigravity")); }
+  try { profile = rt.profile ? expandHome(rt.profile) : findProfile(expandHome(roots.profiles)); }
   catch (e) { reasons.push(`profile_not_found:${e.message}`); return out; }
   const acpDir = path.join(profile, "antigravity-acp");
   if (!fs.existsSync(acpDir) || !fs.statSync(acpDir).isDirectory()) { reasons.push("profile_acp_dir_missing"); return out; }
