@@ -83,7 +83,7 @@ if [ "$#" -ne 1 ]; then
   exit 2
 fi
 
-forgekit_root="$(cd "$(dirname "$0")/.." && pwd)"
+forgekit_root="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 templates="$forgekit_root/templates"
 
 if [ ! -d "$templates" ]; then

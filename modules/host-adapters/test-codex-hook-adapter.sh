@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)"
 ADAPTER="$ROOT/modules/host-adapters/codex-hook-adapter.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT

@@ -26,7 +26,7 @@ if [ "$#" -lt 2 ] || [ "$#" -gt 4 ]; then
   exit 2
 fi
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 WORKTREE_PATH="$1"
 
 default_branch() {

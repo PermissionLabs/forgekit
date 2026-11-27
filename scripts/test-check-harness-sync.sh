@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -624,6 +624,47 @@ expect_has "ok:   docs/WORKFLOW.md"
 run_check "check-harness-sync on a target containing [1]" "$glob_repo"
 expect_rc 0
 expect_no_line "STALE"
+
+# 17c-5. A16/A17 (r11): an exported CDPATH and a relative invocation
+#        (`bash scripts/<writer>.sh`) do not change the ForgeKit root. With a
+#        plain `cd "$(dirname "$0")/.."`, cd finds `scripts/..` through
+#        CDPATH=. and prints it, so the root becomes two lines and the run
+#        fails with "templates/ not found" (worktree-add: git -C fails).
+cdpath_repo="$TMP_DIR/cdpath-boot"
+mkdir -p "$cdpath_repo"
+git -C "$cdpath_repo" init -q
+LABEL="bootstrap ignores an exported CDPATH (relative invocation)"
+CASES=$((CASES + 1))
+capture bash -c 'cd "$1" && CDPATH=. exec bash scripts/bootstrap.sh "$2"' _ \
+  "$ROOT" "$cdpath_repo"
+expect_rc 0
+expect_lacks "templates/ not found"
+[ -f "$cdpath_repo/docs/WORKFLOW.md" ] || fail "bootstrap did not copy docs/WORKFLOW.md"
+printf '\nlocal edit\n' >> "$cdpath_repo/CLAUDE.md"
+LABEL="update-harness ignores an exported CDPATH (relative invocation)"
+CASES=$((CASES + 1))
+capture bash -c 'cd "$1" && CDPATH=. exec bash scripts/update-harness.sh "$2" --force' _ \
+  "$ROOT" "$cdpath_repo"
+expect_rc 0
+expect_lacks "templates/ not found"
+diff <(tail -n +2 "$cdpath_repo/CLAUDE.md") <(tail -n +2 "$ROOT/templates/CLAUDE.md") >/dev/null \
+  || fail "CLAUDE.md not updated"
+LABEL="check-harness-sync ignores an exported CDPATH (relative invocation)"
+CASES=$((CASES + 1))
+capture bash -c 'cd "$1" && CDPATH=. exec bash scripts/check-harness-sync.sh "$2"' _ \
+  "$ROOT" "$cdpath_repo"
+expect_rc 0
+expect_lacks "templates/ not found"
+expect_has "Downstream harness sync check: $cdpath_repo"
+git -C "$cdpath_repo" add -A
+git -C "$cdpath_repo" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false commit -qm init
+LABEL="worktree-add ignores an exported CDPATH (relative invocation)"
+CASES=$((CASES + 1))
+capture bash -c 'cd "$1" && CDPATH=. exec bash scripts/worktree-add.sh "$2" -b cdpath-task HEAD' _ \
+  "$cdpath_repo" "$TMP_DIR/cdpath-wt"
+expect_rc 0
+[ "$(jq -r .branch "$TMP_DIR/cdpath-wt/.context/workflow-state.json")" = "cdpath-task" ] \
+  || fail "worktree not created or state not seeded"
 
 # 17d. PR #25: a managed destination that exists but is not a regular file
 #      (a directory) is refused by both writers.
