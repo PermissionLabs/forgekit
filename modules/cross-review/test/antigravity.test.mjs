@@ -564,6 +564,11 @@ ctest("cli layout: session files are kept when the database workspace is not thi
 // ---------------------------------------------------------------- r8 full-PR review fixes
 ctest("cli: a non-JSON stdout line makes the run incomplete (X35)", async () => {
   withheld(await goCli({ garbage: { 0: true } }), /acp_stdout_unparseable:1/);
+  withheld(await goCli({ nonRpc: { 0: true } }), /acp_stdout_unparseable:1/);
+  // A87: an unterminated last line is parsed when stdout closes, both garbage and a late non-read tool call.
+  withheld(await goCli({ trailingStdout: "garbled" }), /acp_stdout_unparseable:1/);
+  const late = JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "tool_call", toolCallId: "late", name: "run_command", title: "Run", args: { command: "ls" } } } });
+  withheld(await goCli({ trailingStdout: late }), /non_view_file_tool_calls:1/);
 });
 
 ctest("cli: a descendant outside the group that keeps the pipes open makes the run incomplete (X36)", async () => {

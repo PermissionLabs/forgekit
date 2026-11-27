@@ -471,3 +471,29 @@ test("checklist: an absolute in-repo path in another letter case is still read f
   assert.equal(c.source, `git:${rev}`);
   assert.equal(c.text, "CHECKLIST AT REV\n");
 });
+
+test("matchesPinned also reads per-attempt audit reasons a pipe/timeout branch did not propagate (A84, r8 delta)", async () => {
+  setFake({ FAKE_REVIEW: review(), FAKE_ASSISTANT_MODEL: "claude-sonnet-5-5", FAKE_ESCAPE: "1" });
+  const ev = await runReview(opts("claude", "out-r8-asst-escape"), policy(), policyPath);
+  assertWithheld(ev, /pipes_abandoned/);
+  assert.match(ev.attempts[0].auditReasons.join(), /assistant_model_mismatch/);
+  assert.equal(ev.matchesPinned, false);
+});
+
+test("checklist: an absolute path through an in-repo directory symlink is never read from disk (A86, r8 delta)", () => {
+  const outside = fs.mkdtempSync(path.join(tmp, "outside-cl-"));
+  fs.writeFileSync(path.join(outside, "check.md"), "OUTSIDE\n");
+  fs.symlinkSync(outside, path.join(repo, "docs", "ext"));
+  const alias = path.join(tmp, "repo-alias");
+  fs.symlinkSync(repo, alias);
+  try {
+    // Through the repository itself and through an alias of it: the in-repo symlink is refused (git object only).
+    for (const root of [repo, alias]) assert.throws(() => readChecklist(repo, rev, path.join(root, "docs", "ext", "check.md")), /does not exist|not a regular file/);
+    // An alias of the repository still reads the committed checklist from the git object.
+    assert.equal(readChecklist(repo, rev, path.join(alias, "docs", "check.md")).source, `git:${rev}`);
+    if (caseInsensitive()) {
+      const upper = path.join(path.dirname(repo), path.basename(repo).toUpperCase());
+      assert.throws(() => readChecklist(repo, rev, path.join(upper, "docs", "ext", "check.md")), /does not exist|not a regular file/);
+    }
+  } finally { fs.unlinkSync(path.join(repo, "docs", "ext")); fs.unlinkSync(alias); }
+});

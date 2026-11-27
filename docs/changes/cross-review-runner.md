@@ -171,6 +171,9 @@ flowchart TD
 
 ## Verification
 
+- After the r8 delta follow-up (2026-11-27): 161 tests pass; the 3 new/extended tests (X35/A87, A84,
+  A86) fail on the c764be6 sources. Every incoming message in all saved real Antigravity runs (r2–r8,
+  smoke) is a JSON-RPC 2.0 object, so the stricter stdout check has no known false positive.
 - After the r8 full-PR fixes (2026-11-27): `node --test modules/cross-review/test/*.test.mjs`: 159
   tests pass (12 new). Run against the 4ac78e9 sources (new tests and fixtures, old code), all 12 new
   tests fail there (X31–X38, A82, A84–A86). A82 also reproduced by hand on APFS before the fix (all four
@@ -383,6 +386,7 @@ the group split: run2 found the med finding (and two lows) run3 missed, run3 fou
 | 10 (r6b) | Confirmation of 2658948..d1ae18b (rebased onto 2253e59): Codex and Antigravity complete, no new findings (Antigravity: 2 turns, every `gen_metadata` row `gemini-4-neon-high`). Not verified: X30/A81 (the cli happy-path test used `test` instead of the `node:sqlite`-aware `ctest`) and, by Codex, X27/A76 (a row committed more than the 1.5 s window after its turn's reply still confirms the next turn) | X30/A81 fixed in the r6b commit. X27/A76 still open at r6b, addressed in the session-isolation follow-up below |
 | 11 (r7) | Delta review of the single-turn change (1b048ec..5e4bf66, correctness + security; prior X26–X30, A72–A81): Codex complete (`gpt-6.1-sol`/high, 223 s, 128K tokens), verdict fix with 0 findings (only A77 not verified: `lib/agy-session-db.mjs` was outside the snapshot); Antigravity complete (`gemini-4-neon`/high, ONE turn of 291 s, 1200 s budget, 555K tokens), verdict pass, 0 findings, every prior verified | No change needed. A77 stays fixed (r6 commit; the decoder file did not change in r7) |
 | 12 (r8) | FULL-PR review of `git diff 2a81372 4ac78e9` (all 34 files, correctness + security; no prior, new ids from X31/A82; `plan` skipped by human decision: always run Antigravity): Codex complete (`gpt-6.1-sol`/high, 410 s, 239K tokens), verdict block, X31–X38 (3 high, 5 med); Antigravity complete (`gemini-4-neon`/high, 2 scope chunks of 34 files / 511 KB diff, 668 s of a 1200 s budget, every `gen_metadata` row `gemini-4-neon-high`), verdict block, A82–A86 (1 high, 4 med); overlap X34 = A83 | Every finding real (severity adjusted below) and fixed with a regression test in the r8 commit; the delta rounds r1–r7 had missed all of them |
+| 13 (r8 delta) | Confirmation of 4ac78e9..c764be6 (13 files + 4 context, prior X31–X38/A82–A86 all `fixed`): Codex complete (229 s, 132K tokens), verdict fix, 0 new findings, not verified X35, A84, A86 (partial fixes); Antigravity complete (ONE turn, 385 s, 608K tokens, env allowlist in effect, `pipesClosed: true`), verdict fix, 1 low A87, not verified A86 | The three partial fixes and A87 completed in the r8 follow-up commit with tests (below); per the round limit not re-reviewed |
 
 ### r8 dispositions
 
@@ -400,6 +404,9 @@ the group split: run2 found the med finding (and two lows) run3 missed, run3 fou
 | A85 (med) | fixed | with evidence present, `merge` uses only its review; a separate `review.json` never stands in for a null one |
 | A84 (med → low) | fixed | `matchesPinned` is false when any model check failed (generation/proxy/usage/assistant), not only the header pin; status was already `incomplete` |
 | X38 (med → low) | fixed | `hashTree` uses a null-prototype object, so a root file named `__proto__` is hashed |
+| X35 (delta, not verified) / A87 (low) | fixed (follow-up) | the unterminated last stdout line is parsed when the pipe closes, and any JSON that is not a JSON-RPC 2.0 message (id or method) counts as unparseable; a late `run_command` tool call in that tail is audited |
+| A84 (delta, not verified) | fixed (follow-up) | `matchesPinned` also scans every attempt's `auditReasons` (a Claude timeout / pipes branch did not propagate them) |
+| A86 (delta, not verified) | fixed (follow-up) | `readChecklist` first finds the ancestor of the path as written that is the repository (alias and case resolved) and keeps the rest lexical, so a path through an in-repo directory symlink goes to `gitBlob` (refused) instead of disk |
 
 The X27/A76 follow-up was checked against the code and security review checklists.
 The fake 1.5 server can commit a prior generation while the next split or retry
@@ -521,7 +528,7 @@ before the OTi pointer change; the forced rejection was a test condition.
 
 - Working branch: `agent/cross-review-runner` (based on `agent/antigravity-support` @ f9aa6ff, not yet merged)
 - Target branch: `main` (after `agent/antigravity-support`)
-- PR URL: TBD (no PR in this step). Status: ready for PR after the r5 fixes (no open high/critical; r5 confirmation review verified every r4 fix on both hosts; the r5 test/doc/display items fixed)
+- PR URL: https://github.com/PermissionLabs/forgekit/pull/30. Status: r8 full-PR findings fixed; the r8 delta confirmation verified all but X35/A84/A86, which the follow-up commit completed (not re-reviewed)
 
 ## Residuals
 
@@ -555,6 +562,7 @@ before the OTi pointer change; the forced rejection was a test condition.
 | Runtime 1.5 | The model check depends on the undocumented `gen_metadata` protobuf layout (fields 1/19/21, as decoded by T3) | `accepted_with_reason` | A layout change yields an unreadable or mismatching record → `incomplete`, never a silent pass |
 | Runtime 1.5 | Sign-in comes from the OS keyring; if T3 later forces file storage (`SSH_CONNECTION`, `antigravity-oauth-token`) the keyring may be stale | `accepted_with_reason` | Fails closed as `auth_required`; the runner never opens a browser (PATH shims) |
 | antigravity-host-support C6 | Shared review contract and per-host adapters | `fixed` | This change |
+| r8 (operator) | `redact`'s `https://accounts.google.com/\S+` rule can eat past the end of a JSON string in `raw/antigravity-messages.jsonl` (one r1 log line no longer parses) | `filed_followup` | Raw logs only; the audit uses the parsed messages, never the redacted log |
 
 ## Compound Capture
 

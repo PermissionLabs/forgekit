@@ -81,6 +81,13 @@ export function readChecklist(repo, rev, p) {
   let rel = null;
   if (path.isAbsolute(s)) {
     const top = realish(repo);
+    // (r8 delta, A86) first: the ancestor of the path as written that IS the repository (aliases and letter case
+    // resolved by realish); the rest stays lexical, so an in-repo directory symlink is never followed (gitBlob
+    // then refuses it). Only otherwise the parent-directory candidates below (a link pointing into the repo).
+    const parts = path.resolve(s).split(path.sep).filter(Boolean);
+    for (let k = 0; top && k < parts.length && rel === null; k++) {
+      if (realish(path.sep + parts.slice(0, k).join(path.sep)) === top) rel = parts.slice(k).join(path.sep);
+    }
     const lexical = path.resolve(s);
     const parent = realish(path.dirname(lexical));
     const candidates = [lexical, parent ? path.join(parent, path.basename(lexical)) : null].filter(Boolean);

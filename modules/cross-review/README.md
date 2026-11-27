@@ -270,8 +270,9 @@ group after cleanup started (a crash before cleanup, or a different signal), mak
 `incomplete`; each turn must carry a matching model record (1.5: at least one `gen_metadata` row, and
 every row must be the pinned model at the pinned thinking level; ≤1.4: a `Proxy extracted model`
 line); finding ids continue
-across turns; a spawn failure or early server exit fails at once; a stdout line that is not a
-JSON-RPC object (`acp_stdout_unparseable`), or server pipes still open 2 s after its group is gone
+across turns; a spawn failure or early server exit fails at once; a stdout line (also an
+unterminated last one, parsed when the pipe closes) that is not a JSON-RPC 2.0 message
+(`acp_stdout_unparseable`), or server pipes still open 2 s after its group is gone
 (`pipes_abandoned`), makes the run `incomplete`.
 Turn split by runtime layout (`lib/turns.mjs` `layoutConfig`). Runtime 1.5 (`cli`, the policy's
 top-level values): ONE turn reviews every dimension (`groups: []`), and the scope is split into

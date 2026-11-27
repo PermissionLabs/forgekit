@@ -370,7 +370,8 @@ export async function run(ctx) {
     let m;
     // X35: a line that is not JSON-RPC could hide a tool call from the audit; it is logged and makes the run incomplete.
     try { m = JSON.parse(line); } catch { stdoutUnparseable++; msgLines.push(redact(line.slice(0, 500))); return; }
-    if (!m || typeof m !== "object" || Array.isArray(m)) { stdoutUnparseable++; return; }
+    // (r8 delta) only JSON-RPC 2.0 objects with an id or a method count; any other JSON is unauditable too.
+    if (!m || typeof m !== "object" || Array.isArray(m) || m.jsonrpc !== "2.0" || (m.id === undefined && typeof m.method !== "string")) { stdoutUnparseable++; msgLines.push(redact(line.slice(0, 500))); return; }
     logMsg("in", m);
     if (m.id !== undefined && m.method === undefined) {
       const p = pending.get(m.id);
@@ -511,7 +512,8 @@ export async function run(ctx) {
       let nl;
       while ((nl = errBuf.indexOf("\n")) !== -1) { const line = errBuf.slice(0, nl); errBuf = errBuf.slice(nl + 1); onStderrLine(line); }
     });
-    child.stdout.on("close", () => resolveOutClosed());
+    // (r8 delta, A87) an unterminated last stdout line is still parsed (and audited) when the pipe closes.
+    child.stdout.on("close", () => { if (buf.trim()) { const line = buf.replace(/\r$/, ""); buf = ""; onStdoutLine(line); } resolveOutClosed(); });
     child.stderr.on("close", () => { if (errBuf) { onStderrLine(errBuf); errBuf = ""; } resolveErrClosed(); });
 
     const init = await request("initialize", { protocolVersion: 2, clientCapabilities: CLIENT_CAPABILITIES, clientInfo: { name: "zed", version: "0.0.0" } });

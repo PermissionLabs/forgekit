@@ -132,7 +132,9 @@ async function reviewWithInput({ opts, adapter, pin, prefix, policyPath, prior, 
     pinned: { model: pin.model, effort: pin.effort, review_effort: pin.review_effort, policyFile: policyPath, policySha256: sha256(fs.readFileSync(policyPath)) },
     reported: res.reported ?? null,
     // A84: false as well when an adapter's own per-turn/per-message model check failed (generation, proxy, usage).
-    matchesPinned: checkReported(pin, res.reported, { effortReported }).length === 0 && !uniq.some((r) => MODEL_REASON.test(r)),
+    // (r8 delta) also the per-attempt audit reasons, which a timeout or abandoned-pipe branch may not have propagated.
+    matchesPinned: checkReported(pin, res.reported, { effortReported }).length === 0
+      && ![...uniq, ...(res.attempts ?? []).flatMap((a) => (Array.isArray(a?.auditReasons) ? a.auditReasons : []))].some((r) => MODEL_REASON.test(String(r))),
     effortCheck: effortReported ? "verified against host report" : "unreported (host does not report effort; pinned value only)",
     prompt: { sha256: sha256(prompt), chars: prompt.length, file: "prompt.txt", jsonSchemaSha256: sha256(JSON.stringify(jsonSchema)) },
     timeoutMs: res.timeoutMs ?? pin.timeoutMs,
