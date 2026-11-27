@@ -248,7 +248,14 @@ second as the exit, which ps cannot tell apart (accepted residual, as is pid reu
 read and the kill). A descendant that keeps the host's
 pipes open after exit makes the run `incomplete` (`pipes_abandoned`).
 
-**Antigravity turns.** Every turn (first and corrective retry) is checked for timeout, upstream
+**Antigravity turns.** Runtime 1.5 creates a fresh, model-pinned native session for
+each prompt, including file chunks and corrective retries. Each gets the full prompt context.
+After the writer exits the runner verifies every generation in that session's SQLite database,
+its session ID and its snapshot workspace. A missing row leaves that attempt unconfirmed.
+Late writes stay with the session that generated them. Attempt evidence includes each session ID
+and its models; `extra.sessionCleanups` lists the cleanup outcome for each native session.
+
+Every turn (first and corrective retry) is checked for timeout, upstream
 failure, RPC error, a stop reason other than `end_turn`, fatal agent errors and auth prompts before
 its text is used; after the last turn the unterminated last stderr line is flushed and checked
 again, and an upstream 5xx seen outside any turn (e.g. during session setup) is a reason too; a

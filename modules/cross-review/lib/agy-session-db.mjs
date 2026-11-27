@@ -74,7 +74,7 @@ export function decodeTrajectory(data) {
 
 let sqliteMod = null;
 async function openReadOnly(dbPath) {
-  if (!fs.existsSync(dbPath)) throw new Error("session database missing");
+  if (!fs.lstatSync(dbPath).isFile()) throw new Error("session database is not a regular file");
   if (!sqliteMod) {
     // node:sqlite prints an ExperimentalWarning on first load in Node 22; it is the only warning silenced here.
     const orig = process.emitWarning;
@@ -86,27 +86,31 @@ async function openReadOnly(dbPath) {
   return db;
 }
 
-/** Generations in order -> [{ model, display, normalized }]. Throws when the database or a row cannot be read. */
-export async function readGenerations(dbPath) {
-  const db = await openReadOnly(dbPath);
-  try {
-    return db.prepare("SELECT data FROM gen_metadata ORDER BY idx").all().map((r) => decodeGeneration(r.data));
-  } finally { db.close(); }
-}
-
 /** Number of generation rows so far (cheap; used after each turn). Throws when unreadable. */
 export async function countGenerations(dbPath) {
   const db = await openReadOnly(dbPath);
   try { return Number(db.prepare("SELECT count(*) AS c FROM gen_metadata").get().c); } finally { db.close(); }
 }
 
-/** Owner of the session -> { sessionId, workspacePaths } or throws (missing table, several rows, bad blob, non-file URI). */
-export async function readTrajectoryOwner(dbPath) {
+/** Read all models from one owned session in one read-only snapshot after the writer exits. */
+export async function sessionGenerations(dbPath, sessionId, cwd) {
   const db = await openReadOnly(dbPath);
   try {
+    db.exec("BEGIN");
     const rows = db.prepare("SELECT data FROM trajectory_metadata_blob LIMIT 2").all();
-    if (rows.length !== 1) throw new Error(`expected one trajectory metadata row, found ${rows.length}`);
-    const t = decodeTrajectory(rows[0].data);
-    return { sessionId: t.sessionId, workspacePaths: t.workspaceUris.map((u) => fileURLToPath(u)) };
+    if (rows.length !== 1) throw new Error("expected one trajectory metadata row");
+    const owner = decodeTrajectory(rows[0].data);
+    if (owner.sessionId === null) throw new Error("session database has no session id");
+    if (owner.sessionId !== sessionId) throw new Error("session database belongs to another session id");
+    if (!owner.workspaceUris.length) throw new Error("session database has no workspace");
+    const want = fs.realpathSync(cwd);
+    const sameWorkspace = uri => {
+      const workspace = fileURLToPath(uri);
+      try { return fs.realpathSync(workspace) === want; } catch { return false; }
+    };
+    if (!owner.workspaceUris.every(sameWorkspace)) {
+      throw new Error("session database workspace differs from runner cwd");
+    }
+    return db.prepare("SELECT data FROM gen_metadata ORDER BY idx").all().map(row => decodeGeneration(row.data));
   } finally { db.close(); }
 }

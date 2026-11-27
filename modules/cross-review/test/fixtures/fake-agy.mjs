@@ -14,7 +14,7 @@
 //   mode: "auto", toolName: {turn: "run_command"}, steps: true (an update_steps call without a path),
 //   browser: true (authenticate runs `open <url>` from PATH, then fails like 1.5 without a sign-in),
 //   noDb: true (no session database at all), noTrajSid: true (trajectory metadata without the session id),
-//   lateGen: true (turn 0 commits a second generation 300 ms after its reply), idless: {turn: true} (a read_file
+//   lateGen: true (turn 0 commits a second generation during the next prompt), idless: {turn: true} (a read_file
 //   tool_call without toolCallId), namelessSteps: {turn: true} (a nameless "view_file" call without a path that a
 //   later update renames to update_steps).
 // Per-turn stderr is written (and flushed) before any stdout for that turn, so the parent always sees it first.
@@ -34,11 +34,13 @@ const sqlite = CLI ? await import("node:sqlite") : null;
 const varint = (x) => { const o = []; while (x > 127) { o.push((x & 127) | 128); x = Math.floor(x / 128); } o.push(x); return Buffer.from(o); };
 const enc = (fields) => Buffer.concat(fields.map(([n, v]) => { const b = Buffer.isBuffer(v) ? v : Buffer.from(String(v)); return Buffer.concat([varint(n * 8 + 2), varint(b.length), b]); }));
 const errOut = (text, cb) => { if (CLI) { fs.appendFileSync(logFile, text); cb?.(); } else process.stderr.write(text, cb); };
-const SID = "11111111-1111-4111-8111-111111111111";
+const firstSid = "11111111-1111-4111-8111-111111111111";
+let SID = firstSid, sessionCount = 0, lateWrite;
+const dbs = [];
 let model = "default-model", thinking = "low", cwd = null, turn = 0, findingsSoFar = 0;
 const send = (m) => process.stdout.write(JSON.stringify(m) + "\n");
 const opts = () => [{ id: "model", currentValue: model }, { id: "thinking", category: "thought_level", currentValue: thinking }];
-const notify = (update) => send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: SID, update } });
+const notify = (update, sessionId = SID) => send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update } });
 const has = (list, t) => Array.isArray(list) && list.includes(t);
 function review(text) {
   const dims = (text.match(/THIS TURN covers only these dimensions: ([^.]+)\./)?.[1] ?? text.match(/for dimensions ([^(]+?) \(/)?.[1] ?? "correctness").split(",").map((s) => s.trim());
@@ -65,10 +67,14 @@ process.stdin.setEncoding("utf8").on("data", (c) => {
     }
     else if (m.method === "session/new") {
       cwd = m.params.cwd;
+      sessionCount++;
+      if (CLI && !cfg.repeatId) SID = firstSid.slice(0, -4) + (0x1110 + sessionCount).toString(16);
+      model = "default-model"; thinking = "low";
       const conv = path.join(process.env.GEMINI_HOME, "antigravity-acp", "conversations");
       fs.mkdirSync(conv, { recursive: true });
-      if (CLI && !cfg.noDb) {
+      if (CLI && !cfg.noDb && !(cfg.repeatId && sessionCount > 1)) {
         db = new sqlite.DatabaseSync(path.join(conv, `${SID}.db`));
+        dbs.push(db);
         db.exec("CREATE TABLE gen_metadata (idx INTEGER, data BLOB); CREATE TABLE trajectory_metadata_blob (data BLOB);");
         const uri = pathToFileURL(cfg.workspace ?? cwd).href;
         db.prepare("INSERT INTO trajectory_metadata_blob (data) VALUES (?)").run(enc([[1, enc([[1, uri]])], ...(cfg.noTrajSid ? [] : [[6, SID]]), [7, uri]]));
@@ -91,12 +97,21 @@ process.stdin.setEncoding("utf8").on("data", (c) => {
       reply({ configOptions: opts() });
     } else if (m.method === "session/prompt") {
       const t = turn++;
+      if (CLI && (m.params.sessionId !== SID || !m.params.prompt.some(b => b.resource?.mimeType === "text/x-diff") || !m.params.prompt.some(b => b.text?.includes("FILES YOU MAY READ")))) {
+        send({ jsonrpc: "2.0", id: m.id, error: { code: -1, message: "missing session context" } });
+        continue;
+      }
+      if (lateWrite) { lateWrite(); lateWrite = null; }
       const text = m.params.prompt.filter((b) => b.type === "text").map((b) => b.text).join("\n");
       let err = "";
       if (!CLI && !has(cfg.noProxy, t)) err += `I1126 proxy.go:1] Proxy extracted model from path: ${cfg.proxyModel ?? `${model}-${thinking}`}\n`;
       const gen = () => enc([[1, enc([[19, cfg.genModel ?? model], [21, cfg.genDisplay ?? `${model} (${thinking})`]])]]);
       if (CLI && db && !has(cfg.noGen, t)) db.prepare("INSERT INTO gen_metadata (idx, data) VALUES (?, ?)").run(t * 10, gen());
-      if (CLI && db && cfg.lateGen && t === 0) setTimeout(() => db.prepare("INSERT INTO gen_metadata (idx, data) VALUES (?, ?)").run(1, gen()), 330);
+      if (CLI && db && cfg.lateGen && t === 0) {
+        // The first session commits while the next prompt is already running.
+        const first = db, row = cfg.lateWrongModel ? enc([[1, enc([[19, "other"], [21, "Other (High)"]])]]) : gen();
+        lateWrite = () => first.prepare("INSERT INTO gen_metadata (idx, data) VALUES (?, ?)").run(1, row);
+      }
       if (cfg.stderrLine?.[t]) err += cfg.stderrLine[t] + "\n";
       const id = m.id;
       // stderr first, flushed, and a pause: stdout for this turn can never overtake its stderr (A44).
@@ -107,6 +122,7 @@ process.stdin.setEncoding("utf8").on("data", (c) => {
 });
 function answer(t, text, id) {
   const reply = (result) => send({ jsonrpc: "2.0", id, result });
+  if (cfg.foreignChunk === t) notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "{}" } }, firstSid);
   // longEscape: inside the snapshot for the first 500+ characters, then climbs out.
   const p = cfg.longEscape && t === 0 ? cwd + "/.".repeat(300) + "/../../../../../../../../etc/passwd" : cfg.readPath?.[t] ?? path.join(cwd, "src/a.ts");
   if (CLI && cfg.steps) notify({ sessionUpdate: "tool_call", toolCallId: `s${t}`, name: "update_steps", title: "Run update_steps", kind: "other", status: "completed", args: { steps: [] } });
@@ -123,7 +139,7 @@ function answer(t, text, id) {
   else reply({ stopReason: cfg.stopReason?.[t] ?? "end_turn", usage: { totalTokens: 10, inputTokens: 7, outputTokens: 3 } });
 }
 process.stdin.on("end", () => {
-  try { db?.close(); } catch {}
+  for (const handle of dbs) handle.close();
   if (cfg.signalOnStdinEnd) process.kill(process.pid, cfg.signalOnStdinEnd);
   const code = cfg.exitCode ?? 0;
   if (cfg.trailingStderr) process.stderr.write(cfg.trailingStderr, () => process.exit(code));

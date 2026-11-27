@@ -135,7 +135,7 @@ async function reviewWithInput({ opts, adapter, pin, prefix, policyPath, prior, 
     toolAudit: res.toolAudit ?? null,
     attempts: res.attempts ?? [],
     hostLimits: res.limits ?? [],
-    extra: { groups: res.groups, groupVerdicts: res.groupVerdicts, agent: res.agent, sessionCleanup: res.sessionCleanup, process: res.process, authRequired: res.authRequired, hostVersion: res.hostVersion, codeExecution: res.codeExecution, runtime: res.runtime, sessionMode: res.sessionMode },
+    extra: { groups: res.groups, groupVerdicts: res.groupVerdicts, agent: res.agent, sessionCleanup: res.sessionCleanup, sessionCleanups: res.sessionCleanups, process: res.process, authRequired: res.authRequired, hostVersion: res.hostVersion, codeExecution: res.codeExecution, runtime: res.runtime, sessionMode: res.sessionMode },
     review: status === "complete" ? res.review : null,
     // An incomplete run's draft is kept for humans (never merged): the schema-valid review, or the raw reply text.
     reviewIfIncomplete: status === "incomplete" ? res.review ?? null : undefined,

@@ -19,6 +19,10 @@ let tmp, repo, rev, policyPath, diffPath, briefPath, profileAcp, runtimeRoot, cl
 const git = (...a) => execFileSync("git", ["-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "-C", repo, ...a], { encoding: "utf8" }).trim();
 const DIMS = ["correctness", "tests"];
 
+// The 1.5 adapter reads the session database with node:sqlite (Node 22.13+ without flags).
+const noSqlite = await import("node:sqlite").then(() => false, () => "node:sqlite unavailable (Node < 22.13)");
+const ctest = (name, fn) => test(name, { skip: noSqlite }, fn);
+
 before(() => {
   tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cross-review-agy-test-")));
   repo = path.join(tmp, "repo");
@@ -366,9 +370,6 @@ test("planTurns and findRuntime", () => {
 });
 
 // ---------------------------------------------------------------- 1.5 "cli" runtime layout
-// The 1.5 adapter reads the session database with node:sqlite (Node 22.13+ without flags).
-const noSqlite = await import("node:sqlite").then(() => false, () => "node:sqlite unavailable (Node < 22.13)");
-const ctest = (name, fn) => test(name, { skip: noSqlite }, fn);
 const goCli = (fake = {}, over = {}) => go(fake, { runtime: { ...policy().hosts.antigravity.runtime, runtime_root: cliRoot }, ...over });
 // Two cli turns (explicit groups) for the per-turn checks; the shipped cli policy runs one turn.
 const goCli2 = (fake = {}, over = {}) => goCli(fake, { groups: [["correctness"], ["tests"]], ...over });
@@ -431,6 +432,9 @@ ctest("cli layout happy path: one turn, argv, per-turn generation model, read_fi
   assert.deepEqual(ev.toolAudit.callsWithoutAuditablePath, []);
   assert.equal(ev.extra.sessionCleanup.ownedBy, "session database workspace");
   assert.deepEqual(ev.extra.sessionCleanup.removed.sort(), ["11111111-1111-4111-8111-111111111111.db", "annotations/11111111-1111-4111-8111-111111111111.pbtxt"]);
+  assert.equal(new Set(ev.attempts.map(a => a.sessionId)).size, 2);
+  assert.deepEqual(ev.extra.sessionCleanups.map(s => s.sessionId), ev.attempts.map(a => a.sessionId));
+  assert.ok(ev.extra.sessionCleanups.every(s => s.removed.includes(s.sessionId + ".db")));
   assert.equal(ev.extra.sessionMode, "default");
   assert.equal(fs.existsSync(ev.isolation.geminiHome), false);
 });
@@ -442,16 +446,26 @@ ctest("cli layout: a turn without a generation record, a different model or leve
   withheld(await goCli({ genModel: "gemini-3.8-flash" }), /generation_model_mismatch:gemini-3\.8-flash/);
   withheld(await goCli2({ noGen: [0, 1] }), /model_unconfirmed:group:correctness/);
   const nodb = await goCli({ noDb: true });
-  withheld(nodb, /model_unconfirmed:session database unreadable/);
+  withheld(nodb, /model_unconfirmed:.*session database missing/);
   assert.equal(nodb.extra.sessionCleanup.skipped, ".meta and session database missing");
 });
 
 ctest("cli layout: a late generation of one turn never confirms a later turn without its own (X27/A76)", async () => {
-  // Needs two turns (explicit groups or a split scope); the default single cli turn has no later turn.
-  const ev = await goCli2({ lateGen: true, noGen: [1] });
-  withheld(ev, /model_unconfirmed:group:tests/);
+  const split = goCli2;
+  const ev = await split({ lateGen: true, noGen: [1] });
+  withheld(ev, /model_unconfirmed:/);
+  assert.ok(ev.incompleteReasons.includes(`model_unconfirmed:${ev.attempts[1].label}`));
   assert.equal(ev.attempts[0].generationModels.length, 2);
-  assert.equal((await goCli2({ lateGen: true })).status, "complete");
+  assert.deepEqual(ev.attempts[1].generationModels, []);
+  assert.equal((await split({ lateGen: true })).status, "complete");
+
+  const retry = await goCli({ invalid: [0], lateGen: true, noGen: [1] });
+  withheld(retry, /model_unconfirmed:.*:retry/);
+  assert.notEqual(retry.attempts[0].sessionId, retry.attempts[1].sessionId);
+  assert.equal((await goCli({ invalid: [0] })).status, "complete");
+  withheld(await split({ repeatId: true }), /session id missing, invalid or reused/);
+  withheld(await split({ lateGen: true, lateWrongModel: true }), /generation_model_mismatch:other/);
+  withheld(await split({ foreignChunk: 1 }), /session_update_id_mismatch/);
 });
 
 ctest("cli layout: tool audit keeps a call's name across title-only updates, and refuses idless or nameless-then-renamed calls (X29/A78)", async () => {
@@ -468,10 +482,10 @@ ctest("cli layout: the top-level turn_timeout_sec bounds the single turn (r7)", 
 
 ctest("cli layout: session files are kept when the database has no session id (X26/A77)", async () => {
   const ev = await goCli({ noTrajSid: true });
-  assert.equal(ev.status, "complete", ev.incompleteReasons.join());
+  withheld(ev, /model_unconfirmed/);
   assert.equal(ev.extra.sessionCleanup.skipped, "session database has no session id");
   assert.deepEqual(ev.extra.sessionCleanup.removed, []);
-  fs.rmSync(path.join(profileAcp, "conversations", "11111111-1111-4111-8111-111111111111.db"));
+  for (const item of ev.extra.sessionCleanups) fs.rmSync(path.join(profileAcp, "conversations", item.sessionId + ".db"));
 });
 
 ctest("cli layout: non-read tools, reads outside the snapshot, log-file errors, auth and session mode are fatal", async () => {
@@ -486,9 +500,9 @@ ctest("cli layout: non-read tools, reads outside the snapshot, log-file errors, 
 
 ctest("cli layout: session files are kept when the database workspace is not this run's snapshot", async () => {
   const ev = await goCli({ workspace: "/somewhere/else" });
-  assert.equal(ev.status, "complete", ev.incompleteReasons.join());
+  withheld(ev, /model_unconfirmed/);
   assert.equal(ev.extra.sessionCleanup.skipped, "session database workspace differs from runner cwd");
   assert.deepEqual(ev.extra.sessionCleanup.removed, []);
   assert.ok(fs.existsSync(path.join(profileAcp, "conversations", "11111111-1111-4111-8111-111111111111.db")));
-  fs.rmSync(path.join(profileAcp, "conversations", "11111111-1111-4111-8111-111111111111.db"));
+  for (const item of ev.extra.sessionCleanups) fs.rmSync(path.join(profileAcp, "conversations", item.sessionId + ".db"));
 });

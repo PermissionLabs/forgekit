@@ -23,7 +23,7 @@
 //    gap 20 s, a 495 s turn succeeded), so it runs ONE turn for every dimension and splits only a scope above
 //    max_files_per_turn / max_bytes_per_turn (32 files / 400 KB). "par": the local proxy aborts a model call whose
 //    first byte takes > 300 s (HTTP 502), so par_layout keeps one turn per dimension group and 8-file / 120 KB
-//    chunks. Turns run in the same session, then merged. The first upstream failure cancels the run.
+//    chunks. CLI prompts and retries use independent native sessions; par shares one session. The first upstream failure cancels the run.
 //  - Every turn (first and retry) is checked for timeout, upstream failure, RPC error, non-end_turn stop reason,
 //    fatal agent errors and auth prompts before its text is used; any of them withholds the review.
 //  - Per-turn schema validation with contiguous ids across turns and at most one corrective re-ask.
@@ -37,7 +37,7 @@ import { expandHome } from "../lib/policy.mjs";
 import { insideRoot, redact, sha256 } from "../lib/inputs.mjs";
 import { bypassFlags, groupMembers, ownedMembers } from "../lib/proc.mjs";
 import { TURN_DEFAULTS, groupsFor, layoutConfig, planTurns, runTurns, totalBudget } from "../lib/turns.mjs";
-import { countGenerations, readGenerations, readTrajectoryOwner } from "../lib/agy-session-db.mjs";
+import { countGenerations, sessionGenerations } from "../lib/agy-session-db.mjs";
 
 export { groupsFor, layoutConfig, planTurns, totalBudget }; // re-exported for callers/tests of the adapter
 
@@ -261,9 +261,12 @@ export async function run(ctx) {
   if (!fs.existsSync(acpDir) || !fs.statSync(acpDir).isDirectory()) { reasons.push("profile_acp_dir_missing"); return out; }
 
   const cwd = input.snapshot;
+  const sessions = new Set();
+  const deadline = t0 + budget.totalMs;
+  const remaining = () => deadline - Date.now();
   let home = null, tmpDir = null, child = null, exitInfo = null, spawnFailed = null, sessionId, spawnedWall = 0;
   let authRequired = false, nextId = 1, collecting = null, upstreamFailures = 0, upstreamInTurns = 0, cleanupStartedWall = null;
-  let logFile = null, browserMarker = null, logOffset = 0, logBuf = "", logAll = "", genCount = 0, genReadError = null;
+  let logFile = null, browserMarker = null, logOffset = 0, logBuf = "", logAll = "";
   const msgLines = [];
   let errAll = "", errBuf = "";
   const pending = new Map();
@@ -289,6 +292,8 @@ export async function run(ctx) {
     // A dead or never-started server fails at once instead of waiting for the RPC timeout.
     if (spawnFailed) return reject(new Error(`spawn failed: ${spawnFailed}`));
     if (exitInfo) return reject(new Error(`agent exited (${exitInfo.code ?? exitInfo.signal})`));
+    timeoutMs = Math.min(timeoutMs, remaining());
+    if (timeoutMs <= 0) return reject(new Error("review budget expired"));
     const id = nextId++;
     const timer = setTimeout(() => { pending.delete(id); reject(new Error(`timeout ${method}`)); }, timeoutMs);
     pending.set(id, { resolve: (v) => { clearTimeout(timer); resolve(v); }, reject: (e) => { clearTimeout(timer); reject(e); } });
@@ -307,11 +312,19 @@ export async function run(ctx) {
   const onNotification = (m) => {
     if (m.method !== "session/update") return;
     const u = m.params?.update ?? {};
+    const sid = m.params?.sessionId;
+    const isTool = u.sessionUpdate === "tool_call" || u.sessionUpdate === "tool_call_update";
+    if (cli && (isTool || (collecting && u.sessionUpdate === "agent_message_chunk")) && sid !== sessionId) {
+      reasons.push("session_update_id_mismatch");
+      return;
+    }
+    // ACP tool call IDs are scoped to a session and may repeat in the next session.
+    const toolId = cli && u.toolCallId !== undefined ? JSON.stringify([sid, u.toolCallId]) : u.toolCallId;
     if (u.sessionUpdate === "agent_message_chunk" && u.content?.type === "text" && collecting) collecting.push(u.content.text);
-    if (u.sessionUpdate === "tool_call" || u.sessionUpdate === "tool_call_update") {
-      toolItems.push({ update: u.sessionUpdate, id: u.toolCallId, name: u.name, title: u.title, kind: u.kind, status: u.status });
+    if (isTool) {
+      toolItems.push({ update: u.sessionUpdate, id: toolId, name: u.name, title: u.title, kind: u.kind, status: u.status });
       // Full values are audited; only the messages log is size-limited. 1.5 sends `args`, 1.4 `rawInput`.
-      if (u.rawInput || u.args || u.locations) toolInputs.push({ id: u.toolCallId,
+      if (u.rawInput || u.args || u.locations) toolInputs.push({ id: toolId,
         rawInput: u.rawInput && typeof u.rawInput === "object" ? u.rawInput : undefined,
         args: u.args && typeof u.args === "object" ? u.args : undefined,
         locations: Array.isArray(u.locations) ? u.locations.map((l) => l?.path) : undefined });
@@ -355,32 +368,37 @@ export async function run(ctx) {
     let nl;
     while ((nl = logBuf.indexOf("\n")) !== -1) { const line = logBuf.slice(0, nl); logBuf = logBuf.slice(nl + 1); onStderrLine(line); }
   };
-  const sessionDb = () => (sessionId && UUID_V4.test(sessionId) ? path.join(acpDir, "conversations", `${sessionId}.db`) : null);
-  const readCount = async () => {
-    const db = sessionDb();
-    if (!db) return null;
-    try { const n = await countGenerations(db); genReadError = null; return n; } catch (e) { genReadError = e.message; return null; }
-  };
-  // After a cli turn: wait until its generation records stop changing (unchanged for 1.5 s, at most 10 s), so a
-  // record committed shortly after the turn's reply is still counted for this turn and not for the next one.
-  const settleGenerations = async (before) => {
-    let n = before, last = before, stableSince = Date.now();
-    const until = Date.now() + 10_000;
-    while (Date.now() < until) {
-      const c = await readCount();
-      if (c !== null) n = c;
-      if (n !== last) { last = n; stableSince = Date.now(); }
-      if (n > before && Date.now() - stableSince >= 1500) break;
-      await sleep(250);
+  const sessionDb = (id) => path.join(acpDir, "conversations", id + ".db");
+
+  // Generation rows have no prompt identifier. On 1.5 every actual prompt, including a
+  // corrective retry, must be the only prompt ever sent in its native session.
+  const newSession = async () => {
+    const ns = await request("session/new", sessionNewParams(cwd));
+    const id = ns.sessionId;
+    if (cli && (typeof id !== "string" || !UUID_V4.test(id) || id !== id.toLowerCase() || sessions.has(id))) {
+      throw new Error("session id missing, invalid or reused");
     }
-    return n;
+    if (cli && fs.existsSync(sessionDb(id)) && await countGenerations(sessionDb(id)) !== 0) {
+      throw new Error("session already contains generation records");
+    }
+    sessionId = id;
+    sessions.add(id);
+    out.sessionId = id;
+    out.sessionMode = ns.modes?.currentModeId ?? null;
+    if (cli && out.sessionMode !== "default") throw new Error(`session_mode_not_default:${out.sessionMode}`);
+    const r1 = await request("session/set_config_option", { sessionId, configId: "model", value: pin.model });
+    const opts = r1?.configOptions ?? ns.configOptions ?? [];
+    const thinkingOpt = opts.find((o) => o.category === "thought_level");
+    if (!thinkingOpt) throw new Error("no_thought_level_option");
+    const r2 = await request("session/set_config_option", { sessionId, configId: thinkingOpt.id, value: thinking });
+    const applied = r2?.configOptions ?? opts;
+    out.reported.model = applied.find((o) => o.id === "model")?.currentValue ?? null;
+    out.reported.effort = applied.find((o) => o.id === thinkingOpt.id)?.currentValue ?? null;
+    if (out.reported.model !== pin.model || out.reported.effort !== thinking) throw new Error("model_pin_not_applied");
   };
 
   const runPrompt = async (blocks, label, timeoutMs) => {
-    // cli: re-read the generation count right before the prompt, so rows that landed after the previous turn's
-    // settle window (or before the first turn) are never credited to this turn.
-    let genStart = genCount;
-    if (cli) { const c = await readCount(); if (c !== null) genStart = genCount = c; }
+    if (cli || !sessions.size) await newSession();
     collecting = [];
     const started = ms();
     const failBefore = upstreamFailures;
@@ -403,7 +421,7 @@ export async function run(ctx) {
     collecting = null;
     if (resp?.usage) promptUsage.push({ label, ...resp.usage });
     const rec = { label, durationMs: ms() - started, timedOut, upstreamFailure: upstream, stopReason: resp?.stopReason ?? null, error: err ? String(err.message ?? err) : null, agentErrors: agentErrors.slice(errBefore), outputChars: text.length, promptSha256: sha256(JSON.stringify(blocks)), proxyStart };
-    if (cli) { rec.genStart = genStart; genCount = await settleGenerations(genStart); rec.genEnd = genCount; }
+    if (cli) rec.sessionId = sessionId;
     out.attempts.push(rec);
     return { rec, text };
   };
@@ -468,25 +486,6 @@ export async function run(ctx) {
       const signIn = /AUTH_REQUIRED|No browser is available|not logged in/i.test(e.message ?? "");
       reasons.push(authRequired || signIn ? "auth_required" : `authenticate_failed:${e.message}`); return;
     }
-    const ns = await request("session/new", sessionNewParams(cwd), 120_000);
-    sessionId = ns.sessionId;
-    out.sessionId = sessionId;
-    // 1.5 advertises session modes; anything but "default" (ask before edits and commands) is refused.
-    out.sessionMode = ns.modes?.currentModeId ?? null;
-    if (cli && out.sessionMode !== "default") { reasons.push(`session_mode_not_default:${out.sessionMode}`); return; }
-    let opts = ns.configOptions ?? [];
-    const r1 = await request("session/set_config_option", { sessionId, configId: "model", value: pin.model });
-    opts = r1?.configOptions ?? opts;
-    const thinkingOpt = opts.find((o) => o.category === "thought_level");
-    if (!thinkingOpt) { reasons.push("no_thought_level_option"); return; }
-    const r2 = await request("session/set_config_option", { sessionId, configId: thinkingOpt.id, value: thinking });
-    opts = r2?.configOptions ?? opts;
-    out.reported.model = opts.find((o) => o.id === "model")?.currentValue ?? null;
-    out.reported.effort = opts.find((o) => o.id === thinkingOpt.id)?.currentValue ?? null;
-    if (out.reported.model !== pin.model || out.reported.effort !== thinking) { reasons.push("model_pin_not_applied"); return; }
-
-    const deadline = t0 + budget.totalMs;
-    const remaining = () => deadline - Date.now();
     const turnMs = (cfg.turn_timeout_sec ?? TURN_DEFAULTS.turn_timeout_sec) * 1000;
     const retryMs = (cfg.retry_timeout_sec ?? TURN_DEFAULTS.retry_timeout_sec) * 1000;
     const fileList = input.files.map((f) => `${path.join(cwd, f.path)}  (${f.lines} lines${f.kind === "context" ? ", context only" : ""})`).join("\n");
@@ -507,7 +506,7 @@ export async function run(ctx) {
         ` New finding ids in this turn start at ${prefix}${turnStart} and continue in order.` +
         (priorIds.length ? (last ? ` THIS IS THE LAST TURN: prior_verification must cover every earlier id not reported in previous turns (${mustCover.join(", ") || "none left"}).` : " prior_verification may be [] in this turn if no earlier finding concerns these dimensions or files.") : "");
       const core = ctx.promptFor({ dimensions: dims, toolNote, includeDiff: false, idStart: turnStart });
-      const blocks = ti === 0 ? [
+      const blocks = cli || ti === 0 ? [
         { type: "text", text: `${core}\n\n${turnRule}` },
         { type: "resource", resource: { uri: `file://${path.join(cwd, "__review__", "diff.patch")}`, mimeType: "text/x-diff", text: input.diffText } },
         { type: "text", text: `=== FILES YOU MAY READ (absolute paths) ===\n${fileList}` },
@@ -523,7 +522,9 @@ export async function run(ctx) {
       if (v.errors.length) {
         const rb = Math.min(retryMs, remaining() - 30_000);
         if (rb < 60_000) { reasons.push(`total_timeout_before_retry:${label}`); break; }
-        const retry = await runPrompt([{ type: "text", text: `Your previous reply failed validation:\n- ${v.errors.join("\n- ")}\nReply again with ONLY the corrected JSON object for dimensions ${dims.join(", ")} (no prose, no code fences, no tool calls). Finding ids start at ${prefix}${turnStart}.` }], `${label}:retry`, rb);
+        const correction = { type: "text", text: `Your previous reply failed validation:\n- ${v.errors.join("\n- ")}\nReply again with ONLY the corrected JSON object for dimensions ${dims.join(", ")} (no prose, no code fences, no tool calls). Finding ids start at ${prefix}${turnStart}.` };
+        const retryBlocks = cli ? [...blocks, { type: "text", text: `Repeat the review from the supplied evidence. Correct these validation errors from the earlier attempt:\n${v.errors.join("\n")}` }] : [correction];
+        const retry = await runPrompt(retryBlocks, `${label}:retry`, rb);
         const f2 = fatalReasons(retry.rec, `${label}:retry`);
         if (f2.length) { reasons.push(...f2); break; }
         v = validateGroup(retry.text, dims, mustCover, turnStart);
@@ -555,6 +556,52 @@ export async function run(ctx) {
     out.groupVerdicts = parts.map((p) => ({ dims: p.dims, files: p.files, verdict: p.value.verdict }));
   };
 
+  // Inspect each native session after the producer exits, including records written
+  // during a later attempt. Ownership is required for both using and removing its data.
+  const confirmAndCleanSession = async (sessionId) => {
+    const sc = { sessionId: sessionId ?? null, removed: [], skipped: null };
+    const attempt = out.attempts.find((rec) => rec.sessionId === sessionId);
+    try {
+      if (!sessionId || !UUID_V4.test(sessionId)) sc.skipped = "no native session id";
+      else {
+        const base = path.join(acpDir, "conversations", sessionId);
+        const brain = path.join(acpDir, "brain", sessionId);
+        const annotation = path.join(acpDir, "annotations", `${sessionId}.pbtxt`);
+        if (!cli && fs.existsSync(`${base}.meta`)) {
+          let metaCwd;
+          try { metaCwd = JSON.parse(fs.readFileSync(`${base}.meta`, "utf8"))?.cwd; } catch (e) { sc.skipped = `.meta unreadable: ${e.message}`; }
+          if (!sc.skipped && metaCwd !== cwd) sc.skipped = ".meta cwd differs from runner cwd";
+          if (!sc.skipped) sc.ownedBy = ".meta cwd";
+        } else if (!cli) sc.skipped = ".meta missing";
+        else if (!fs.existsSync(`${base}.db`)) sc.skipped = ".meta and session database missing";
+        else {
+          try {
+            const rows = await sessionGenerations(sessionDb(sessionId), sessionId, cwd);
+            sc.ownedBy = "session database workspace";
+            if (attempt) {
+              const show = g => `${g.model ?? "?"}/${g.normalized ?? "?"}`;
+              attempt.generationModels = rows.map(show);
+              out.reported.generationModels = out.reported.generationModels.concat(attempt.generationModels);
+              const bad = rows.filter(g => g.model !== pin.model || g.normalized !== expectedProxyModel);
+              if (bad.length) reasons.push(`generation_model_mismatch:${[...new Set(bad.map(show))].join(",")}`);
+            }
+          } catch (e) { sc.skipped = e.message; }
+        }
+        if (!sc.skipped) {
+          for (const s of SESSION_SUFFIXES) if (fs.existsSync(base + s)) { fs.rmSync(base + s, { force: true }); sc.removed.push(sessionId + s); }
+          if (fs.existsSync(brain)) { fs.rmSync(brain, { recursive: true, force: true }); sc.removed.push(`brain/${sessionId}/`); }
+          if (fs.existsSync(annotation)) { fs.rmSync(annotation, { force: true }); sc.removed.push(`annotations/${sessionId}.pbtxt`); }
+        }
+      }
+    } catch (e) { sc.error = e.message; }
+    if (cli && attempt && !attempt.generationModels?.length) {
+      attempt.generationModels = [];
+      reasons.push(`model_unconfirmed:${attempt.label}${sc.skipped ? " (" + sc.skipped + ")" : ""}`);
+    }
+    if (sc.skipped && sessionId) out.warnings.push(`session files not removed: ${sc.skipped}`);
+    return sc;
+  };
+
   let cleaned = false;
   const finish = async () => {
     if (cleaned) return;
@@ -562,6 +609,18 @@ export async function run(ctx) {
     cleanupStartedWall = Date.now();
     const pid = child?.pid;
     if (pid && !spawnFailed) {
+      // The runtime may flush asynchronously after end_turn. Wait once for each
+      // attempt to have evidence, then read every row after process shutdown.
+      if (cli && !reasons.length) {
+        const until = Math.min(deadline, Date.now() + 10_000);
+        const missing = new Set(out.attempts.map(rec => rec.sessionId));
+        while (missing.size && !exitInfo && Date.now() < until) {
+          for (const id of missing) {
+            try { if (await countGenerations(sessionDb(id)) > 0) missing.delete(id); } catch { /* not flushed yet */ }
+          }
+          if (missing.size) await sleep(200);
+        }
+      }
       try { child.stdin.end(); } catch {}
       const signals = await stopGroup({
         pid, spawnedAt: spawnedWall, exitedAt: () => exitInfo?.wall ?? Date.now(),
@@ -585,48 +644,9 @@ export async function run(ctx) {
       out.process = { exit: exitInfo, signals, straysOutsideGroup: strays.length };
     }
     if (browserMarker && fs.existsSync(browserMarker)) authRequired = true; // a sign-in tried to open a browser
-    // "cli" model confirmation source: every generation the session recorded (read before the files are removed).
-    let generations = null;
-    if (cli && sessionDb()) {
-      try { generations = await readGenerations(sessionDb()); } catch (e) { genReadError = e.message; }
-    }
-    // Session files: only when the session provably belongs to this run's snapshot: the .meta cwd ("par"), or,
-    // without .meta ("cli"), the session database's own session id and every workspace URI.
-    const sc = { sessionId: sessionId ?? null, removed: [], skipped: null };
-    try {
-      if (!sessionId || !UUID_V4.test(sessionId)) sc.skipped = "no native session id";
-      else {
-        const base = path.join(acpDir, "conversations", sessionId);
-        const brain = path.join(acpDir, "brain", sessionId);
-        const annotation = path.join(acpDir, "annotations", `${sessionId}.pbtxt`);
-        if (fs.existsSync(`${base}.meta`)) {
-          let metaCwd;
-          try { metaCwd = JSON.parse(fs.readFileSync(`${base}.meta`, "utf8"))?.cwd; } catch (e) { sc.skipped = `.meta unreadable: ${e.message}`; }
-          if (!sc.skipped && metaCwd !== cwd) sc.skipped = ".meta cwd differs from runner cwd";
-          if (!sc.skipped) sc.ownedBy = ".meta cwd";
-        } else if (!cli) sc.skipped = ".meta missing";
-        else if (!fs.existsSync(`${base}.db`)) sc.skipped = ".meta and session database missing";
-        else {
-          let owner;
-          try { owner = await readTrajectoryOwner(`${base}.db`); } catch (e) { sc.skipped = `session database ownership unreadable: ${e.message}`; }
-          if (!sc.skipped) {
-            const real = (p) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
-            const want = real(cwd);
-            if (owner.sessionId !== sessionId) sc.skipped = owner.sessionId === null ? "session database has no session id" : "session database belongs to another session id";
-            else if (!owner.workspacePaths.length) sc.skipped = "session database has no workspace";
-            else if (!owner.workspacePaths.every((w) => real(w) === want)) sc.skipped = "session database workspace differs from runner cwd";
-            else sc.ownedBy = "session database workspace";
-          }
-        }
-        if (!sc.skipped) {
-          for (const s of SESSION_SUFFIXES) if (fs.existsSync(base + s)) { fs.rmSync(base + s, { force: true }); sc.removed.push(sessionId + s); }
-          if (fs.existsSync(brain)) { fs.rmSync(brain, { recursive: true, force: true }); sc.removed.push(`brain/${sessionId}/`); }
-          if (fs.existsSync(annotation)) { fs.rmSync(annotation, { force: true }); sc.removed.push(`annotations/${sessionId}.pbtxt`); }
-        }
-      }
-    } catch (e) { sc.error = e.message; }
-    out.sessionCleanup = sc;
-    if (sc.skipped && sessionId) out.warnings.push(`session files not removed: ${sc.skipped}`);
+    out.sessionCleanups = [];
+    for (const id of sessions) out.sessionCleanups.push(await confirmAndCleanSession(id));
+    out.sessionCleanup = out.sessionCleanups[0] ?? { sessionId: null, removed: [], skipped: "no native session id" };
     // Tool/path audit (snapshot still exists; the runner removes it after this adapter returns).
     const pathFields = (o) => Object.entries(o ?? {}).filter(([k, x]) => typeof x === "string" && /path|file|uri|dir/i.test(k)).map(([, x]) => x);
     const pathsOf = (t) => [...(t.locations ?? []), ...pathFields(t.rawInput), ...pathFields(t.args)].filter(Boolean);
@@ -659,23 +679,7 @@ export async function run(ctx) {
     if (idless) reasons.push(`tool_calls_without_id:${idless}`);
     if (clientRequests.length) reasons.push(`unexpected_client_requests:${clientRequests.length}`);
     if (permissionRequests.length) out.warnings.push(`permission requests rejected (reject_once): ${permissionRequests.length}`);
-    if (cli) {
-      // Per-turn model confirmation from the session database: every prompt turn must add at least one generation,
-      // and every generation must be the pinned model at the pinned thinking level. Rows committed after a turn's
-      // settle window count for the last turn they could belong to; all rows are checked either way.
-      if (generations === null && out.attempts.length) reasons.push(`model_unconfirmed:session database unreadable (${genReadError ?? "no session"})`);
-      else if (generations !== null) {
-        const shown = (g) => `${g.model ?? "?"}/${g.normalized ?? "?"}`;
-        out.reported.generationModels = generations.map(shown);
-        out.attempts.forEach((rec, i) => {
-          const end = i === out.attempts.length - 1 ? generations.length : rec.genEnd;
-          rec.generationModels = generations.slice(rec.genStart, end).map(shown);
-          if (!rec.generationModels.length) reasons.push(`model_unconfirmed:${rec.label}`);
-        });
-        const bad = generations.filter((g) => g.model !== pin.model || g.normalized !== expectedProxyModel);
-        if (bad.length) reasons.push(`generation_model_mismatch:${[...new Set(bad.map(shown))].join(",")}`);
-      }
-    } else {
+    if (!cli) {
       // Per-turn model confirmation: every prompt turn must carry at least one matching proxy line.
       out.attempts.forEach((rec, i) => {
         const end = out.attempts[i + 1]?.proxyStart ?? proxyModels.length;
@@ -715,7 +719,7 @@ export async function run(ctx) {
   out.limits = cli ? [
     "Antigravity does not report the model per response; the pin is checked from set_config_option and from the session database's per-generation model records (gen_metadata), whose layout may change between runtime versions.",
     "Runtime 1.5 ignores the enabledTools allowlist: the tool restriction is enforced after the fact by the audit (any non-read tool makes the run incomplete) and, for edits and commands, by rejecting every permission request.",
-    "Session persistence cannot be disabled; session files are deleted after the run when the session database's workspace matches.",
+    "Every prompt has its own native session. Session files are removed after the run when the database confirms both its session ID and snapshot workspace.",
   ] : [
     "Antigravity does not report the model per response; the pin is checked from set_config_option and the local proxy's stderr line on every turn, which may change between runtime versions.",
     "Session persistence cannot be disabled; session files are deleted after the run when their .meta cwd matches.",
