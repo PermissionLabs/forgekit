@@ -603,7 +603,7 @@ before the OTi pointer change; the forced rejection was a test condition.
 | Runtime 1.5 | The model check depends on the undocumented `gen_metadata` protobuf layout (fields 1/19/21, as decoded by T3) | `accepted_with_reason` | A layout change yields an unreadable or mismatching record → `incomplete`, never a silent pass |
 | Runtime 1.5 | Sign-in comes from the OS keyring; if T3 later forces file storage (`SSH_CONNECTION`, `antigravity-oauth-token`) the keyring may be stale | `accepted_with_reason` | Fails closed as `auth_required`; the runner never opens a browser (PATH shims) |
 | antigravity-host-support C6 | Shared review contract and per-host adapters | `fixed` | This change |
-| r8 (operator) | `redact`'s `https://accounts.google.com/\S+` rule can eat past the end of a JSON string in `raw/antigravity-messages.jsonl` (one r1 log line no longer parses) | `filed_followup` | Raw logs only; the audit uses the parsed messages, never the redacted log |
+| r8 (operator) | `redact`'s `https://accounts.google.com/\S+` rule can eat past the end of a JSON string in `raw/antigravity-messages.jsonl` (one r1 log line no longer parses) | `fixed` (followups-cc98deb) | The URL rule stops at a JSON string boundary (`"`, `\`, whitespace) and consumes `\uXXXX` / `\/` escapes inside the URL; test: JSON lines with the URL before more fields, Go-style `\u0026`, nested JSON and `\n` still parse and lose the query. See `docs/changes/followups-cc98deb.md` |
 
 ## Compound Capture
 
