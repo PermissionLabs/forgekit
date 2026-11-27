@@ -7,7 +7,7 @@ import * as claude from "../adapters/claude.mjs";
 import * as codex from "../adapters/codex.mjs";
 import * as ag from "../adapters/antigravity.mjs";
 import { jsonSchemaFor } from "../lib/schema.mjs";
-import { insideRoot, plainPath } from "../lib/inputs.mjs";
+import { insideRoot, plainPath, redact } from "../lib/inputs.mjs";
 import { policyProblems } from "../lib/policy.mjs";
 import * as sandbox from "../lib/sandbox.mjs";
 import * as fs from "node:fs";
@@ -574,4 +574,30 @@ test("bypass guard catches =-joined and value forms", () => {
   assert.deepEqual(bypassFlags(["-c", 'approval_policy="on-request"', "-c", "approval_policy='on-failure'", "-c", "approval_policy=untrusted", "-c", 'sandbox_mode="workspace-write"', "-a", "on-request", "--sandbox", "danger-full-access"]).length, 6);
   // Paths and JSON values are not scanned: a temp dir named like a bypass word is not a false positive.
   assert.deepEqual(bypassFlags(["-C", "/tmp/cross-review-snap-YoLo12", "--json-schema", '{"description":"yolo full-auto"}', "-"]), []);
+});
+
+test("redact: the sign-in URL stops at a JSON string boundary, so redacted JSONL lines still parse (r8)", () => {
+  const url = "https://accounts.google.com/o/oauth2/auth?client_id=CID&state=SECRETSTATE&code_challenge=PKCE";
+  const lines = [
+    // A message logged by the adapter (JSON.stringify), with a field after the URL.
+    JSON.stringify({ t: 1, dir: "in", m: { params: { text: `Open ${url}`, next: "kept" } } }),
+    // The URL ends the string, then more fields follow.
+    JSON.stringify({ m: { error: { message: url, code: -32603 } }, after: true }),
+    // A Go-style encoder escapes & as & inside the URL: the query after it is still removed.
+    `{"m":{"message":"${url.replaceAll("&", "\\u0026")}","n":1}}`,
+    // The URL inside a JSON string that is itself JSON (escaped quotes) and before an escaped newline.
+    JSON.stringify({ m: { data: JSON.stringify({ url }), text: `${url}\nnext line` } }),
+  ];
+  for (const line of lines) {
+    const out = redact(line);
+    assert.doesNotThrow(() => JSON.parse(out), `redacted line no longer parses: ${out}`);
+    assert.ok(out.includes("[auth-url-redacted]"), out);
+    for (const secret of ["CID", "SECRETSTATE", "PKCE", "oauth2"]) assert.ok(!out.includes(secret), `${secret} leaked: ${out}`);
+  }
+  assert.equal(JSON.parse(redact(lines[0])).m.params.next, "kept");
+  assert.equal(JSON.parse(redact(lines[1])).after, true);
+  assert.equal(JSON.parse(redact(lines[3])).m.text, "[auth-url-redacted]\nnext line");
+  assert.deepEqual(JSON.parse(JSON.parse(redact(lines[3])).m.data), { url: "[auth-url-redacted]" });
+  // Plain text (stderr) keeps the old behaviour: the URL up to whitespace is removed.
+  assert.equal(redact(`Open the following link: ${url} now`), "Open the following link: [auth-url-redacted] now");
 });

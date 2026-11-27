@@ -161,13 +161,36 @@ export function buildInput(opts) {
   };
 }
 
+/** Thrown by buildPrompt when the parts that are never cut (rules, brief, earlier findings, dispositions, diff) exceed the budget. */
+export class PromptBudgetError extends Error {
+  constructor(message, detail) { super(message); this.name = "PromptBudgetError"; this.detail = detail; }
+}
+
+const utf8Bytes = (s) => Buffer.byteLength(s, "utf8");
+/** The longest prefix of `s` that is at most `n` UTF-8 bytes, never splitting a character. */
+function utf8Prefix(s, n) {
+  const b = Buffer.from(s, "utf8");
+  if (b.length <= n) return s;
+  let end = Math.max(0, n);
+  while (end > 0 && (b[end] & 0xc0) === 0x80) end--;
+  return b.subarray(0, end).toString("utf8");
+}
+
 /**
  * Host-neutral reviewer prompt. Adapters may wrap it (turn splitting, attachments) but never change its rules.
  * The scope is listed with repo-relative paths; the reviewer's working directory is the snapshot root.
+ *
+ * Order: rules, schema, brief, EARLIER FINDINGS, AUTHOR DISPOSITIONS, checklist, diff. The prior blocks come
+ * before the checklist so a host that cuts a long prompt text cuts the checklist, never the prior findings (r8:
+ * an Antigravity re-review whose first text block was cut at 134,525 bytes lost both prior blocks).
+ * maxBytes (a host's max_prompt_text_bytes) bounds the UTF-8 size of the returned text plus reserveBytes (text the
+ * adapter appends to the same block). Only the checklist is truncated to fit, with a marker that points at the full
+ * copy in the snapshot; when the other parts alone do not fit, PromptBudgetError is thrown (the run is incomplete).
+ * meta, when given, receives { bytes, maxBytes, checklist: { totalBytes, shownBytes, truncated } }.
  */
-export function buildPrompt(input, { prefix, idStart, dimensions = input.dimensions, priorIds = [], toolNote, includeDiff = true }) {
+export function buildPrompt(input, { prefix, idStart, dimensions = input.dimensions, priorIds = [], toolNote, includeDiff = true, maxBytes = null, reserveBytes = 0, meta = null }) {
   const fileList = input.files.map((f) => `- ${f.path} (${f.lines} lines${f.kind === "context" ? ", context only" : ""})`).join("\n");
-  const parts = [
+  const rules = [
     "You are an independent, READ-ONLY code reviewer. You must not modify files, run commands that change state, use the network, or delegate to other agents.",
     toolNote ?? "Your working directory is a read-only snapshot of the files under review at the post-change revision. Read files there with your read-only file tools.",
     `Snapshot root: ${input.snapshot}. The diff is at __review__/diff.patch, the brief at __review__/brief.md${input.checklist.length ? ", the checklist at __review__/checklist.md" : ""}.`,
@@ -181,24 +204,50 @@ export function buildPrompt(input, { prefix, idStart, dimensions = input.dimensi
     `New finding ids are ${prefix}${idStart}, ${prefix}${idStart + 1}, ... in order.`,
   ];
   if (priorIds.length) {
-    parts.push(
+    rules.push(
       `RE-REVIEW: earlier findings ${priorIds.join(", ")} and the author's dispositions are attached below. The diff contains only the new commit(s).`,
       "In prior_verification give one entry per earlier id: verified=true only if you read the current code and the disposition holds (fixed: the defect is resolved; followup/accepted/blocked: the stated reason is accurate and nothing regressed); otherwise verified=false. note cites what you checked (file:line).",
       "Do not repeat an earlier finding as a new finding; a remaining or partial defect goes in prior_verification as verified=false.",
     );
   }
-  parts.push("Respond with ONLY one JSON object, no prose and no code fences, matching exactly this shape:", schemaText(dimensions, prefix, idStart, priorIds));
-  parts.push("", "=== REVIEW BRIEF ===", input.briefText);
-  if (input.checklist.length) parts.push("", "=== CHECKLIST ===", ...input.checklist.map((c) => `--- ${path.basename(c.path)} ---\n${c.text}`));
-  if (priorIds.length) {
-    parts.push("", "=== EARLIER FINDINGS ===", JSON.stringify(input.prior, null, 2));
-    parts.push("", "=== AUTHOR DISPOSITIONS ===", JSON.stringify(input.dispositions, null, 2));
+  rules.push("Respond with ONLY one JSON object, no prose and no code fences, matching exactly this shape:", schemaText(dimensions, prefix, idStart, priorIds));
+  const brief = ["", "=== REVIEW BRIEF ===", input.briefText];
+  const priorFindings = priorIds.length ? ["", "=== EARLIER FINDINGS ===", JSON.stringify(input.prior, null, 2)] : [];
+  const dispositions = priorIds.length ? ["", "=== AUTHOR DISPOSITIONS ===", JSON.stringify(input.dispositions, null, 2)] : [];
+  const diff = includeDiff ? ["", "=== DIFF UNDER REVIEW ===", input.diffText] : [];
+  const checklistBody = input.checklist.map((c) => `--- ${path.basename(c.path)} ---\n${c.text}`).join("\n");
+  const checklistTotal = utf8Bytes(checklistBody);
+  const assemble = (checklist) => [...rules, ...brief, ...priorFindings, ...dispositions, ...checklist, ...diff].join("\n");
+  const full = assemble(input.checklist.length ? ["", "=== CHECKLIST ===", checklistBody] : []);
+  const record = (text, shown) => {
+    if (meta) Object.assign(meta, { bytes: utf8Bytes(text), maxBytes, checklist: { totalBytes: checklistTotal, shownBytes: shown, truncated: shown < checklistTotal } });
+    return text;
+  };
+  if (maxBytes == null || utf8Bytes(full) + reserveBytes <= maxBytes) return record(full, checklistTotal);
+
+  // Over budget: keep every other part whole and cut only the checklist.
+  const head = (shown) => `=== CHECKLIST (TRUNCATED to fit this host's prompt budget: the first ${shown} of ${checklistTotal} bytes are shown; the full checklist is __review__/checklist.md in the snapshot, read the rest there with your read-only file tool) ===`;
+  const tailMark = "[... checklist truncated here; continue in __review__/checklist.md ...]";
+  const fixed = utf8Bytes(assemble([])) + reserveBytes;
+  // Bytes the truncated section adds besides the shown text: "\n" + "" + "\n" + head + "\n" + text + "\n" + mark.
+  const overhead = input.checklist.length ? 4 + utf8Bytes(head(checklistTotal)) + utf8Bytes(tailMark) : 0;
+  const room = maxBytes - fixed - overhead;
+  if (!input.checklist.length || room < 0) {
+    const sizes = { rules_and_schema: utf8Bytes(rules.join("\n")), brief: utf8Bytes(brief.join("\n")), earlier_findings: utf8Bytes(priorFindings.join("\n")), author_dispositions: utf8Bytes(dispositions.join("\n")), diff: utf8Bytes(diff.join("\n")), reserved: reserveBytes };
+    const list = Object.entries(sizes).filter(([, v]) => v).map(([k, v]) => `${k} ${v}`).join(", ");
+    throw new PromptBudgetError(`prompt_over_budget: the parts that are never cut need ${fixed} bytes (${list}) of max_prompt_text_bytes ${maxBytes}; only the checklist can be truncated`, { maxBytes, fixedBytes: fixed, sizes });
   }
-  if (includeDiff) parts.push("", "=== DIFF UNDER REVIEW ===", input.diffText);
-  return parts.join("\n");
+  const shownText = utf8Prefix(checklistBody, room);
+  const shown = utf8Bytes(shownText);
+  return record(assemble(["", head(shown), shownText, tailMark]), shown);
 }
 
 // ---------------------------------------------------------------- redaction (raw logs are local, still scrubbed)
+// r8: the sign-in URL ends at a JSON string boundary (`"`, `\`, whitespace), so a redacted line of
+// raw/antigravity-messages.jsonl stays valid JSON. JSON escapes that may sit inside the URL itself
+// (`\uXXXX`, e.g. Go's `\u0026` for `&`, and `\/`) are consumed whole, so the query after them is
+// still removed; any other escape (`\"`, `\n`, `\\`) ends the URL and stays intact.
+const AUTH_URL = /https:\/\/accounts\.google\.com\/(?:[^\s"\\]|\\u[0-9A-Fa-f]{4}|\\\/)*/g;
 export function redact(s) {
   return String(s)
     .replace(/ya29\.[A-Za-z0-9_\-.]+/g, "[REDACTED]")
@@ -206,7 +255,7 @@ export function redact(s) {
     .replace(/eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]+/g, "[REDACTED]")
     .replace(/AIza[0-9A-Za-z_\-]{30,}/g, "[REDACTED]")
     .replace(/\bsk-(?:ant-)?[A-Za-z0-9_\-]{20,}/g, "[REDACTED]")
-    .replace(/https:\/\/accounts\.google\.com\/\S+/g, "[auth-url-redacted]");
+    .replace(AUTH_URL, "[auth-url-redacted]");
 }
 
 /**
