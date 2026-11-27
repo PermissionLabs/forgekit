@@ -382,8 +382,13 @@ The X27/A76 follow-up was checked against the code and security review checklist
 The fake 1.5 server can commit a prior generation while the next split or retry
 is running. The regression checks that missing evidence for the new session keeps
 the entire review incomplete, and that a late model mismatch in the previous
-session is still visible. Authenticated runtime verification and independent
-review of the integrated change are pending.
+session is still visible. On 2026-11-27 the authenticated MacBook CLI 1.5.18
+at ForgeKit 9497d7d reviewed a synthetic change across two dimensions. An
+external test hook rejected the first schema-valid response once. The retry
+and second dimension completed, for three prompts in three distinct owned
+sessions. All six database generation records reported Gemini 4 Neon High
+and all three sessions were cleaned up. This checks runtime attribution
+before the OTi pointer change; the forced rejection was a test condition.
 
 ### r6 dispositions
 

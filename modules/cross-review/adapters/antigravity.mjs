@@ -504,7 +504,7 @@ export async function run(ctx) {
       reasons.push(authRequired || signIn ? "auth_required" : `authenticate_failed:${e.message}`); return;
     }
     const turnMs = (cfg.turn_timeout_sec ?? TURN_DEFAULTS.turn_timeout_sec) * 1000;
-    const retryMs = (cfg.retry_timeout_sec ?? TURN_DEFAULTS.retry_timeout_sec) * 1000;
+    const retryMs = cli ? turnMs : (cfg.retry_timeout_sec ?? TURN_DEFAULTS.retry_timeout_sec) * 1000;
     const fileList = input.files.map((f) => `${path.join(cwd, f.path)}  (${f.lines} lines${f.kind === "context" ? ", context only" : ""})`).join("\n");
     const tool = cli ? "read_file" : "view_file";
     const toolNote = cli

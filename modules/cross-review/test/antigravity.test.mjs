@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { loadPolicy, defaultPolicyPath } from "../lib/policy.mjs";
 import { runReview } from "../lib/run.mjs";
 import { buildEnv, exitReason, findRuntime, installationRoots, isAgy, launchArgs, planTurns, stopGroup, totalBudget } from "../adapters/antigravity.mjs";
-import { decodeGeneration, normalizeModelName, protoFields } from "../lib/agy-session-db.mjs";
+import { countGenerations, decodeGeneration, normalizeModelName, protoFields } from "../lib/agy-session-db.mjs";
 import { plan } from "../lib/plan.mjs";
 import { PAR_LAYOUT_DEFAULTS, TURN_DEFAULTS, layoutConfig, runTurns } from "../lib/turns.mjs";
 
@@ -419,6 +419,18 @@ test("isAgy matches the 1.4 server, the 1.5 `antigravity acp` process and this r
   assert.ok(isAgy("/opt/x/runtime-bin --worker", "/opt/x/runtime-bin"));
   assert.ok(!isAgy("/Applications/Antigravity.app/Contents/MacOS/Antigravity"));
   assert.ok(!isAgy("vim antigravity.md"));
+});
+
+ctest("a fresh native session may create its generation table after the first prompt", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const file = path.join(tmp, "initializing.db");
+  const db = new DatabaseSync(file);
+  try {
+    db.exec("CREATE TABLE setup(id INTEGER)");
+    assert.equal(await countGenerations(file), 0);
+    db.exec("CREATE TABLE gen_metadata(data BLOB); INSERT INTO gen_metadata VALUES (NULL)");
+    assert.equal(await countGenerations(file), 1);
+  } finally { db.close(); }
 });
 
 ctest("session database decoding: generation model and display name, normalisation", () => {

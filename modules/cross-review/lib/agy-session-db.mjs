@@ -86,10 +86,14 @@ async function openReadOnly(dbPath) {
   return db;
 }
 
-/** Number of generation rows so far (cheap; used after each turn). Throws when unreadable. */
+/** Count recorded generations. A new session may exist before its first table is created. */
 export async function countGenerations(dbPath) {
   const db = await openReadOnly(dbPath);
-  try { return Number(db.prepare("SELECT count(*) AS c FROM gen_metadata").get().c); } finally { db.close(); }
+  try {
+    db.exec("BEGIN");
+    if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'gen_metadata'").get()) return 0;
+    return Number(db.prepare("SELECT count(*) AS c FROM gen_metadata").get().c);
+  } finally { db.close(); }
 }
 
 /** Read all models from one owned session in one read-only snapshot after the writer exits. */
