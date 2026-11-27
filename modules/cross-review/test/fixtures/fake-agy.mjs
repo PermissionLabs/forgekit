@@ -19,7 +19,7 @@
 //   later update renames to update_steps), garbage: {turn: true} (a non-JSON stdout line before the reply, X35),
 //   escapeStdio: true (on stdin end, a detached descendant outside the group keeps stdout/stderr open for 6 s, X36),
 //   nonRpc: {turn: true} (a JSON line that is not a JSON-RPC 2.0 message), trailingStdout: "text" (written without a
-//   newline at stdin end, right before exit; A87).
+//   newline at stdin end, right before exit; A87; `__SID__` becomes the current session id).
 // Per-turn stderr is written (and flushed) before any stdout for that turn, so the parent always sees it first.
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -148,7 +148,7 @@ process.stdin.on("end", () => {
   if (cfg.signalOnStdinEnd) process.kill(process.pid, cfg.signalOnStdinEnd);
   if (cfg.escapeStdio) spawn(process.execPath, ["-e", "setTimeout(()=>{},6000)"], { detached: true, stdio: ["ignore", "inherit", "inherit"] }).unref();
   const code = cfg.exitCode ?? 0;
-  if (cfg.trailingStdout) process.stdout.write(cfg.trailingStdout, () => process.exit(code));
+  if (cfg.trailingStdout) process.stdout.write(cfg.trailingStdout.replaceAll("__SID__", SID), () => process.exit(code));
   else if (cfg.trailingStderr) process.stderr.write(cfg.trailingStderr, () => process.exit(code));
   else process.exit(code);
 });
