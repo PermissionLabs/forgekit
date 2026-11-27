@@ -35,6 +35,8 @@ test("T3 discovery keeps runtime and profile together and respects explicit path
     fs.writeFileSync(path.join(release, "agy_acp_server.par"), "fixture", { mode: 0o700 });
   };
   fakeInstall(path.join(custom, runtime));
+  const customProfiles = path.join(custom, "userdata", "providers", "antigravity");
+  fs.mkdirSync(path.join(customProfiles, "one", "antigravity-acp"), { recursive: true });
   const review = planForInstallation({ policy: basePolicy, author: "codex", dimensions: ["security", "tests"], paths: ["src/a.ts"], usage: null }, home);
   assert.equal(review.hosts.antigravity.budget.layout, "par");
   assert.equal(review.hosts.antigravity.budget.estimatedTurns, 2);
@@ -45,7 +47,11 @@ test("T3 discovery keeps runtime and profile together and respects explicit path
   assert.equal(installationRoots({ profile_root: "/explicit" }, home).runtime, standard.runtime);
   assert.equal(installationRoots({ runtime_root: "/explicit" }, home).profiles, standard.profiles);
   fakeInstall(standard.runtime);
+  assert.equal(installationRoots({}, home).profiles, customProfiles);
+  fs.mkdirSync(path.join(standard.profiles, "one", "antigravity-acp"), { recursive: true });
   assert.deepEqual(installationRoots({}, home), standard);
+  fs.mkdirSync(path.join(standard.profiles, "two", "antigravity-acp"), { recursive: true });
+  assert.equal(installationRoots({}, home).profiles, customProfiles);
 });
 
 before(() => {

@@ -114,20 +114,31 @@ export function writeBrowserShims(shimDir, markerFile) {
 export function installationRoots(settings, home = os.homedir()) {
   const runtime = path.join("tools", "antigravity-acp", `${process.platform}-${process.arch}`, "versions");
   const profiles = path.join("userdata", "providers", "antigravity");
-  let installation = path.join(home, ".t3");
-  if (!settings.runtime_root && !settings.profile_root && !settings.profile &&
-      !findRuntime(path.join(installation, runtime)).version) {
-    const custom = path.join(home, ".t3-custom");
-    if (findRuntime(path.join(custom, runtime)).version) installation = custom;
+  const roots = installation => ({
+    runtime: settings.runtime_root ?? path.join(home, installation, runtime),
+    profiles: settings.profile_root ?? path.join(home, installation, profiles),
+  });
+  const standard = roots(".t3");
+  if (settings.runtime_root || settings.profile_root || settings.profile) return standard;
+  let firstRuntime;
+  for (const candidate of [standard, roots(".t3-custom")]) {
+    if (!findRuntime(candidate.runtime).version) continue;
+    firstRuntime ??= candidate;
+    if (profileCandidates(candidate.profiles).length === 1) return candidate;
   }
-  return {
-    runtime: settings.runtime_root ?? path.join(installation, runtime),
-    profiles: settings.profile_root ?? path.join(installation, profiles),
-  };
+  // Preserve runtime/profile diagnostics even when neither installation has a complete pair.
+  return firstRuntime ?? standard;
+}
+
+function profileCandidates(root) {
+  if (!fs.statSync(root, { throwIfNoEntry: false })?.isDirectory()) return [];
+  return fs.readdirSync(root).filter(name =>
+    fs.statSync(path.join(root, name), { throwIfNoEntry: false })?.isDirectory() &&
+    fs.statSync(path.join(root, name, "antigravity-acp"), { throwIfNoEntry: false })?.isDirectory());
 }
 
 function findProfile(profileRoot) {
-  const cands = fs.readdirSync(profileRoot).filter((d) => fs.existsSync(path.join(profileRoot, d, "antigravity-acp")));
+  const cands = profileCandidates(profileRoot);
   if (cands.length !== 1) throw new Error(`expected exactly one Antigravity profile under ${profileRoot}, found ${cands.length}; set hosts.antigravity.runtime.profile`);
   return path.join(profileRoot, cands[0]);
 }

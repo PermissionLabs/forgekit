@@ -276,10 +276,13 @@ model call whose first byte takes > 300 s, so `par_layout` (over the top-level v
 `contract_docs`) and 8-file / 120 KB chunks with the old timings. Keys missing from the policy fall
 back to `TURN_DEFAULTS` (32 files, 400000 bytes, `turn_timeout_sec` 1200).
 A 1.5 retry repeats the full review in a new session and uses the same turn timeout. An explicit
-larger `retry_timeout_sec` extends its cap within the remaining run budget. In 1.4 the shorter
+larger `retry_timeout_sec` extends its cap within the remaining run budget. All attempts share one
+deadline. The runner reserves 30 seconds for cleanup and records an incomplete review when less
+than 60 seconds remain for a retry after that reserve. In 1.4 the shorter
 in-session correction uses `par_layout.retry_timeout_sec` (default 280 seconds).
-By default the adapter checks for the platform runtime in `~/.t3` first, then `~/.t3-custom`.
-It selects the login profile from the same installation. Explicit runtime or profile settings
+The adapter chooses the first installation with a valid platform runtime and exactly one ACP
+profile directory, checking `~/.t3` before `~/.t3-custom`. It uses the runtime and profile from
+that installation. Authentication is checked when starting the session. Explicit runtime or profile settings
 retain the configured paths and the original `~/.t3` defaults for unspecified fields.
 `runtime_root` accepts `{platform}-{arch}`; the highest valid version of either layout is used:
 1.5 directories hold `.install-complete.json` naming the executable (a regular executable file of the
