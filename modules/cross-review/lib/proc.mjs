@@ -1,6 +1,7 @@
 // Child process helper: own process group, stdin prompt, hard timeout, SIGTERM -> SIGKILL group cleanup,
 // bypass-flag refusal before spawn, minimal environment.
 import { execFileSync, spawn as nodeSpawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 
 export const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 
@@ -17,13 +18,44 @@ export function scrubEnv(base, passthrough = []) {
 }
 
 // ---------------------------------------------------------------- process groups
-/**
- * Live members of process group `pgid` with their start time: [{ pid, startMs }] (POSIX `ps -eo pid,pgid,lstart`,
- * C locale, one-second resolution). An unreadable process table yields []: never signal blind.
- */
+// Linux ps reconstructs lstart from a whole-second boot epoch. Around a second boundary
+// that can put a new process before its own spawn. Use boot time on both sides instead.
+export function ownershipTimeMs() {
+  if (process.platform !== "linux") return Date.now();
+  try {
+    const uptime = readFileSync("/proc/uptime", "utf8").split(" ")[0];
+    return /^\d+\.\d+$/.test(uptime) ? Math.round(Number(uptime) * 1000) : NaN;
+  } catch { return NaN; }
+}
+
+let ticksPerSecond;
+function linuxGroupMembers(pgid) {
+  ticksPerSecond ??= Number(execFileSync("getconf", ["CLK_TCK"], { encoding: "utf8" }).trim());
+  if (!Number.isSafeInteger(ticksPerSecond) || ticksPerSecond <= 0) return [];
+  const resolutionMs = 1000 / ticksPerSecond;
+  const rows = execFileSync("ps", ["-eo", "pid=,pgid="], { encoding: "utf8" });
+  const members = [];
+  for (const row of rows.trim().split("\n")) {
+    const [pid, group] = row.trim().split(/\s+/).map(Number);
+    if (group !== pgid) continue;
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      // The parenthesized command can contain spaces, closing parentheses and newlines.
+      const fields = stat.slice(stat.lastIndexOf(") ") + 2).split(" ");
+      const ticks = Number(fields[19]); // field 22 (starttime); fields[0] is field 3.
+      if (Number(fields[2]) === pgid && !["Z", "X"].includes(fields[0]) && Number.isSafeInteger(ticks) && ticks >= 0) {
+        members.push({ pid, startMs: ticks * resolutionMs, resolutionMs });
+      }
+    } catch { /* A process may disappear between enumeration and the stat read. */ }
+  }
+  return members;
+}
+
+/** Live group members in the same clock domain as ownershipTimeMs; unknown provenance is excluded. */
 export function groupMembers(pgid) {
   if (!pgid) return [];
   try {
+    if (process.platform === "linux") return linuxGroupMembers(pgid);
     return execFileSync("ps", ["-eo", "pid=,pgid=,lstart="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, LC_ALL: "C" } }).split("\n")
       .map((l) => l.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/)).filter(Boolean)
       .map((m) => ({ pid: Number(m[1]), pgid: Number(m[2]), startMs: Date.parse(m[3]) }))
@@ -34,15 +66,16 @@ export function groupMembers(pgid) {
 /**
  * Members of an exited child's group that are provably ours: a numeric pgid match alone is never enough (the
  * number may already belong to a replacement group). A member counts only when its start time is known and lies
- * in the spawn..exit window: ps reports start times floored to the second, so the window is
- * [floor(spawn to s), exit] with no slack after exit. A process started after the child's exit is never
- * accepted, except one started within the same wall-clock second as the exit (it cannot be told apart at ps's
- * one-second resolution; accepted residual). Bare numbers or unknown start times are skipped.
+ * in the spawn..exit window. Round the lower bound down to the reported start time's precision
+ * (one kernel tick on Linux, one second with ps lstart). The upper bound gets no slack.
  */
 export function ownedMembers(list, { spawnedAt, exitedAt }) {
-  const lo = Math.floor(spawnedAt / 1000) * 1000;
-  return (list ?? []).filter((m) => m && typeof m === "object" && Number.isInteger(m.pid) && m.pid > 0 && Number.isFinite(m.startMs)
-    && m.startMs >= lo && m.startMs <= exitedAt).map((m) => m.pid);
+  if (!Number.isFinite(spawnedAt) || !Number.isFinite(exitedAt) || exitedAt < spawnedAt) return [];
+  return (list ?? []).filter(m => {
+    if (!Number.isInteger(m?.pid) || m.pid <= 0 || !Number.isFinite(m.startMs)) return false;
+    const step = m.resolutionMs ?? 1000;
+    return step > 0 && Number.isFinite(step) && m.startMs >= Math.floor(spawnedAt / step) * step && m.startMs <= exitedAt;
+  }).map(m => m.pid);
 }
 
 /**
@@ -69,7 +102,7 @@ export async function runProcess({ bin, args = [], cwd, env, input, timeoutMs, a
   const refused = bypassFlags(args, { allowedConfig, shape });
   if (refused.length) return result({ spawnError: `refused before spawn: bypass flags ${refused.join(" ")}`, refusedFlags: refused });
   let child;
-  const spawnedAt = Date.now();
+  const spawnedAt = ownershipTimeMs();
   try {
     child = spawn(bin, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"], detached: true });
   } catch (e) {
@@ -116,7 +149,7 @@ export async function runProcess({ bin, args = [], cwd, env, input, timeoutMs, a
   };
   // A descendant that keeps stdout/stderr open after the child exits: signal our members, then drop the pipes.
   child.on("exit", (code, signal) => {
-    exitInfo = { code, signal, atMs: Date.now() };
+    exitInfo = { code, signal, atMs: ownershipTimeMs() };
     later(() => {
       killGroup("SIGTERM", "pipes open after exit");
       later(() => { killGroup("SIGKILL", "pipes open after exit"); later(abandonPipes, graceMs); }, graceMs);
@@ -134,7 +167,7 @@ export async function runProcess({ bin, args = [], cwd, env, input, timeoutMs, a
   // Descendants that closed their stdio but stayed in the group.
   let leftoversKilled = 0;
   if (child.pid && !spawnError) {
-    if (!exitInfo) exitInfo = { code, signal, atMs: Date.now() };
+    if (!exitInfo) exitInfo = { code, signal, atMs: ownershipTimeMs() };
     leftoversKilled = signalOwned("SIGKILL", "leftovers after close");
     if (signals.at(-1)?.why === "leftovers after close" && signals.at(-1).skipped === "no live group member") signals.pop(); // keep the log to real events
   }

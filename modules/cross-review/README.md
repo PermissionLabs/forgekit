@@ -239,13 +239,12 @@ the cat-and-mouse over audit bypasses (A36/X10/A49/A51/X21): what a command coul
 profile allowed.
 
 **Process groups.** A host runs in its own process group. While the child is not reaped it holds
-the group id, so signalling the group is safe. After it exits, a numeric pgid match is never taken
-as membership: `ps -eo pid,pgid,lstart` is read right before each signal and only members whose
-start time lies between the child's spawn and exit are signalled, each by pid. ps reports start
-times floored to the second, so the window is [spawn second, exit] with no slack after the exit: a
-process started after the exit is never signalled, except one started within the same wall-clock
-second as the exit, which ps cannot tell apart (accepted residual, as is pid reuse between the ps
-read and the kill). A descendant that keeps the host's
+the group id, so signalling the group is safe. After exit the runner checks each candidate's
+group and start time before signalling it by PID. On Linux it compares the kernel start tick in
+`/proc/<pid>/stat` with boot time sampled at spawn and exit. Other POSIX hosts use `ps lstart`
+and wall time. The lower bound is rounded down to the precision of the start time; the upper
+bound is the observed exit. Timestamps within one clock unit can be indistinguishable, and a
+PID can be reused between observation and signalling. A descendant that keeps the host's
 pipes open after exit makes the run `incomplete` (`pipes_abandoned`).
 
 **Antigravity turns.** Runtime 1.5 creates a fresh, model-pinned native session for

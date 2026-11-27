@@ -35,7 +35,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { expandHome } from "../lib/policy.mjs";
 import { insideRoot, redact, sha256 } from "../lib/inputs.mjs";
-import { bypassFlags, groupMembers, ownedMembers } from "../lib/proc.mjs";
+import { bypassFlags, groupMembers, ownedMembers, ownershipTimeMs } from "../lib/proc.mjs";
 import { TURN_DEFAULTS, groupsFor, layoutConfig, planTurns, runTurns, totalBudget } from "../lib/turns.mjs";
 import { countGenerations, sessionGenerations } from "../lib/agy-session-db.mjs";
 
@@ -230,7 +230,7 @@ export function exitReason({ exitInfo, cleanupStartedWall, signals, pid }) {
  * deps: { pid, spawnedAt, exitedAt(), exited(), waitExit(ms), members(pid) -> [{pid,startMs}], kill(pid, sig), sleep(ms) }.
  * Returns the signal log.
  */
-export async function stopGroup({ pid, spawnedAt = 0, exitedAt = () => Date.now(), exited, waitExit, members, kill, sleep: nap = sleep }) {
+export async function stopGroup({ pid, spawnedAt = 0, exitedAt = ownershipTimeMs, exited, waitExit, members, kill, sleep: nap = sleep }) {
   const log = [];
   const sig = (target, s, why) => { try { kill(target, s); log.push({ sig: s, why, target }); } catch (e) { log.push({ sig: s, why, target, error: e.code ?? String(e) }); } };
   if (!exited()) await waitExit(3000);
@@ -292,7 +292,7 @@ export async function run(ctx) {
   const sessions = new Set();
   const deadline = t0 + budget.totalMs;
   const remaining = () => deadline - Date.now();
-  let home = null, tmpDir = null, child = null, exitInfo = null, spawnFailed = null, sessionId, spawnedWall = 0;
+  let home = null, tmpDir = null, child = null, exitInfo = null, spawnFailed = null, sessionId, spawnedOwnershipMs = 0;
   let authRequired = false, nextId = 1, collecting = null, upstreamFailures = 0, upstreamInTurns = 0, cleanupStartedWall = null;
   let logFile = null, browserMarker = null, logOffset = 0, logBuf = "", logAll = "";
   const msgLines = [];
@@ -484,9 +484,9 @@ export async function run(ctx) {
     out.isolation = { geminiHome: home, antigravityAcpLink: acpDir, cwd, clientCapabilities: CLIENT_CAPABILITIES, sessionMeta: { antigravity: { enabledTools: ENABLED_TOOLS } }, enabledToolsEnforcedBy: cli ? "audit only (1.5 ignores enabledTools)" : "runtime + audit", permissionPolicy: "reject_once", runtime: version, layout, browserShim: shimDir };
     psBefore = psList().filter((p) => isAgy(p.cmd, serverBin)).map((p) => p.pid);
     const env = buildEnv(process.env, { geminiHome: home, tmpDir, harness: path.join(runtimeDir, "localharness_external"), layout, shimDir });
-    spawnedWall = Date.now();
+    spawnedOwnershipMs = ownershipTimeMs();
     child = spawn(serverBin, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"], detached: true });
-    child.on("exit", (code, signal) => { exitInfo = { code, signal, atMs: ms(), wall: Date.now(), duringCleanup: cleanupStartedWall !== null }; failPending(`agent exited (${code ?? signal})`); resolveExited(); });
+    child.on("exit", (code, signal) => { exitInfo = { code, signal, atMs: ms(), wall: Date.now(), ownershipMs: ownershipTimeMs(), duringCleanup: cleanupStartedWall !== null }; failPending(`agent exited (${code ?? signal})`); resolveExited(); });
     child.on("error", (e) => { spawnFailed = e.message; reasons.push(`spawn_error:${e.message}`); failPending(`spawn failed: ${e.message}`); resolveExited(); resolveErrClosed(); });
     child.stdin.on("error", () => {});
     let buf = "";
@@ -652,7 +652,7 @@ export async function run(ctx) {
       }
       try { child.stdin.end(); } catch {}
       const signals = await stopGroup({
-        pid, spawnedAt: spawnedWall, exitedAt: () => exitInfo?.wall ?? Date.now(),
+        pid, spawnedAt: spawnedOwnershipMs, exitedAt: () => exitInfo?.ownershipMs ?? ownershipTimeMs(),
         exited: () => exitInfo !== null, waitExit: (n) => Promise.race([childExited, sleep(n)]),
         members: groupMembers, kill: (p, s) => process.kill(p, s),
       });

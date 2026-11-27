@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ownedMembers, runProcess } from "../lib/proc.mjs";
+import { execFileSync } from "node:child_process";
+import { groupMembers, ownedMembers, ownershipTimeMs, runProcess } from "../lib/proc.mjs";
 
 const node = process.execPath;
 
@@ -57,7 +58,7 @@ test("after exit, a numeric pgid match is never membership: only members started
   const { PassThrough } = await import("node:stream");
   let spawnT = 0;
   const fake = () => {
-    spawnT = Date.now();
+    spawnT = ownershipTimeMs();
     const c = new EventEmitter();
     c.pid = 424242;
     c.stdout = new PassThrough(); c.stderr = new PassThrough(); c.stdin = new PassThrough();
@@ -77,7 +78,7 @@ test("after exit, a numeric pgid match is never membership: only members started
     // A bare pid number (no start time) is a numeric match only: never signalled.
     assert.deepEqual((await go(() => [7])).kills, []);
     // A replacement group: its member started after our child exited -> never signalled.
-    assert.deepEqual((await go(() => [{ pid: 7, startMs: Date.now() + 60_000 }])).kills, []);
+    assert.deepEqual((await go(() => [{ pid: 7, startMs: ownershipTimeMs() + 60_000 }])).kills, []);
     // Our own descendant (started before the exit) is signalled individually; the group id never is.
     // Started at spawn time (inside the spawn..exit window; ps would floor it to the spawn second).
     const mine = await go(() => [{ pid: 7, startMs: spawnT }]);
@@ -94,6 +95,22 @@ test("ownedMembers: start time inside the spawn..exit window only; nothing start
   // by the old +1000 ms slack); 04:59:59 predates the spawn.
   const list = [{ pid: 1, startMs: at("2026-11-26T05:00:00Z") }, { pid: 2, startMs: at("2026-11-26T05:00:10Z") }, { pid: 3, startMs: at("2026-11-26T05:00:11Z") }, { pid: 6, startMs: at("2026-11-26T04:59:59Z") }, { pid: 4, startMs: NaN }, 5];
   assert.deepEqual(ownedMembers(list, { spawnedAt, exitedAt }), [1, 2]);
+});
+
+test("Linux group membership and the spawn clock use kernel boot time", { skip: process.platform !== "linux" }, () => {
+  const pgid = Number(execFileSync("ps", ["-o", "pgid=", "-p", String(process.pid)], { encoding: "utf8" }));
+  const member = groupMembers(pgid).find(m => m.pid === process.pid);
+  assert.ok(member);
+  assert.ok(member.resolutionMs > 0);
+  assert.ok(member.startMs <= ownershipTimeMs());
+  assert.ok(ownershipTimeMs() - member.startMs < (process.uptime() + 5) * 1000);
+});
+
+test("kernel ticks bound ownership at spawn and exit; unknown bounds cannot authorize cleanup", () => {
+  const members = [9790, 9800, 9820, 9830].map((startMs, i) => ({ pid: i + 1, startMs, resolutionMs: 10 }));
+  assert.deepEqual(ownedMembers(members, { spawnedAt: 9804, exitedAt: 9827 }), [2, 3]);
+  assert.deepEqual(ownedMembers(members, { spawnedAt: NaN, exitedAt: 9827 }), []);
+  assert.deepEqual(ownedMembers(members, { spawnedAt: 9804, exitedAt: NaN }), []);
 });
 
 test("bypass flags are refused before anything is spawned (A3)", async () => {
