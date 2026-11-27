@@ -401,7 +401,7 @@ test("planTurns and findRuntime", () => {
 });
 
 // ---------------------------------------------------------------- 1.5 "cli" runtime layout
-const goCli = (fake = {}, over = {}) => go(fake, { runtime: { ...policy().hosts.antigravity.runtime, runtime_root: cliRoot }, ...over });
+const goCli = (fake = {}, over = {}, extra = {}) => go(fake, { runtime: { ...policy().hosts.antigravity.runtime, runtime_root: cliRoot }, ...over }, extra);
 // Two cli turns (explicit groups) for the per-turn checks; the shipped cli policy runs one turn.
 const goCli2 = (fake = {}, over = {}) => goCli(fake, { groups: [["correctness"], ["tests"]], ...over });
 
@@ -604,4 +604,41 @@ test("antigravity env: minimal allowlist plus env_passthrough; the credential de
   assert.equal(env.PATH, "/bin");
   assert.equal(env.LC_ALL, "C");
   assert.equal(env.GEMINI_HOME, "/iso");
+});
+
+// ---------------------------------------------------------------- r8: prompt budget keeps the prior blocks whole
+const priorFiles = (claimBytes = 10) => {
+  const prior = path.join(tmp, `budget-prior-${claimBytes}.json`), disp = path.join(tmp, `budget-disp-${claimBytes}.json`);
+  fs.writeFileSync(prior, JSON.stringify([{ id: "X1", sev: "med", loc: "src/a.ts:1", claim: "c".repeat(claimBytes), evidence: "e", check: "k" }, { id: "C2", sev: "low", loc: "src/a.ts:2", claim: "c", evidence: "e", check: "k" }]));
+  fs.writeFileSync(disp, JSON.stringify([{ id: "X1", disposition: "fixed", ref: "abc" }, { id: "C2", disposition: "accepted", ref: "why" }]));
+  return { prior, dispositions: disp };
+};
+const bigChecklist = () => {
+  const f = path.join(tmp, "big-checklist.md");
+  fs.writeFileSync(f, `# Big checklist\n${"- check every branch of the change and its tests ✓\n".repeat(4000)}`);
+  return f;
+};
+
+ctest("r8: a large checklist is truncated, never the earlier findings or dispositions; the runtime's 134,525-byte cut is avoided", async () => {
+  const fake = { cutTextAt: 134_525, priorAware: true };
+  const ev = await goCli(fake, {}, { ...priorFiles(), checklist: [bigChecklist()] });
+  assert.equal(ev.status, "complete", ev.incompleteReasons.join());
+  assert.deepEqual(ev.review.prior_verification.map((p) => [p.id, p.verified]), [["X1", true], ["C2", true]]);
+  const b = ev.prompt.budget;
+  assert.equal(b.maxBytes, 120_000);
+  assert.equal(b.turns.length, 1);
+  assert.ok(b.turns[0].bytes <= 120_000, `first text block ${b.turns[0].bytes} bytes`);
+  assert.equal(b.turns[0].checklist.truncated, true);
+  assert.ok(b.turns[0].checklist.shownBytes > 0 && b.turns[0].checklist.shownBytes < b.turns[0].checklist.totalBytes);
+  assert.ok(ev.warnings.some((w) => /^checklist truncated in .* to fit max_prompt_text_bytes 120000/.test(w)), ev.warnings.join("\n"));
+  // Without a budget the block passes the runtime cut, which drops the turn rule at its end: incomplete.
+  withheld(await goCli(fake, { max_prompt_text_bytes: null }, { ...priorFiles(), checklist: [bigChecklist()] }), /schema_invalid_after_retry/);
+});
+
+ctest("r8: earlier findings + dispositions that alone exceed the budget make the run incomplete before the server starts", async () => {
+  const ev = await goCli({ priorAware: true }, { max_prompt_text_bytes: 8192 }, { ...priorFiles(20_000), checklist: [bigChecklist()] });
+  withheld(ev, /^prompt_over_budget: the parts that are never cut need \d+ bytes \(.*earlier_findings \d+.*\) of max_prompt_text_bytes 8192/m);
+  assert.deepEqual(ev.attempts, []);
+  assert.equal(ev.argv, null);
+  assert.ok(ev.prompt.budget.overBudget.sizes.earlier_findings > 20_000);
 });

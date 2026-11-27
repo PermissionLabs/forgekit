@@ -3,7 +3,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { hostPin } from "./policy.mjs";
-import { buildInput, buildPrompt, hashTree, removeSnapshot, sha256 } from "./inputs.mjs";
+import { buildInput, buildPrompt, hashTree, PromptBudgetError, removeSnapshot, sha256 } from "./inputs.mjs";
 import { jsonSchemaFor, nextIdStart, parseReviewText, priorFindingsFrom, validateDispositions, validateReview } from "./schema.mjs";
 import { bypassFlags } from "./proc.mjs";
 import * as claude from "../adapters/claude.mjs";
@@ -80,8 +80,21 @@ export async function runReview(opts, policy, policyPath) {
 }
 
 async function reviewWithInput({ opts, adapter, pin, prefix, policyPath, prior, dispositions, priorIds, idStart, dimensions, input, rawDir }) {
-  const promptFor = (o = {}) => buildPrompt(input, { prefix, idStart, priorIds, ...o });
-  const prompt = promptFor();
+  // hosts.<h>.max_prompt_text_bytes bounds one prompt text (r8): only the checklist is cut to fit, and parts that
+  // are never cut (rules, brief, earlier findings, dispositions, diff) over the budget make the run incomplete.
+  // Claude/Codex send `prompt` itself; an adapter that builds its own text blocks (promptBudget "per_turn",
+  // Antigravity) applies the budget to each block through promptFor and reports it as res.promptBudget.
+  const maxPromptBytes = pin.config?.max_prompt_text_bytes ?? null;
+  const perTurnBudget = adapter.promptBudget === "per_turn";
+  const promptFor = (o = {}) => buildPrompt(input, { prefix, idStart, priorIds, maxBytes: maxPromptBytes, ...o });
+  const promptMeta = {};
+  let prompt, budgetError = null;
+  try { prompt = promptFor({ maxBytes: perTurnBudget ? null : maxPromptBytes, meta: promptMeta }); }
+  catch (e) {
+    if (!(e instanceof PromptBudgetError)) throw e;
+    budgetError = e;
+    prompt = promptFor({ maxBytes: null, meta: promptMeta });
+  }
   const jsonSchema = jsonSchemaFor(dimensions, { prior: priorIds.length > 0 });
   fs.writeFileSync(path.join(opts.out, "prompt.txt"), prompt);
   const mkValidate = (dims, mustCoverPrior, start = idStart) => (raw) => {
@@ -93,7 +106,8 @@ async function reviewWithInput({ opts, adapter, pin, prefix, policyPath, prior, 
   const t0 = Date.now();
   const startedAt = new Date().toISOString();
   let res;
-  try {
+  if (budgetError) res = { reasons: [budgetError.message], warnings: [], attempts: [] };
+  else try {
     res = await adapter.run({
       input, pin, prompt, promptFor, jsonSchema, prefix, idStart, priorIds, dimensions, log, workDir: rawDir, deps: opts.deps,
       validate: mkValidate(dimensions, priorIds),
@@ -104,6 +118,9 @@ async function reviewWithInput({ opts, adapter, pin, prefix, policyPath, prior, 
   }
   const reasons = [...(res.reasons ?? [])];
   const warnings = [...(res.warnings ?? [])];
+  const promptBudget = perTurnBudget ? res.promptBudget ?? null : maxPromptBytes == null ? null : { maxBytes: maxPromptBytes, bytes: promptMeta.bytes, checklist: promptMeta.checklist, overBudget: budgetError ? budgetError.detail : undefined };
+  if (!perTurnBudget && !budgetError && promptMeta.checklist?.truncated)
+    warnings.push(`checklist truncated to fit max_prompt_text_bytes ${maxPromptBytes}: ${promptMeta.checklist.shownBytes} of ${promptMeta.checklist.totalBytes} bytes in the prompt (full copy in the snapshot)`);
   // The argv the adapter reports is re-checked against the same exact allowlist it spawned with (A50).
   const argvBypass = res.argv ? bypassFlags(res.argv, { allowedConfig: res.allowedConfig ?? [], shape: res.argvShape ?? null }) : [];
   if (argvBypass.length) reasons.push(`bypass_flags_in_argv:${argvBypass.join(",")}`);
@@ -136,7 +153,7 @@ async function reviewWithInput({ opts, adapter, pin, prefix, policyPath, prior, 
     matchesPinned: checkReported(pin, res.reported, { effortReported }).length === 0
       && ![...uniq, ...(res.attempts ?? []).flatMap((a) => (Array.isArray(a?.auditReasons) ? a.auditReasons : []))].some((r) => MODEL_REASON.test(String(r))),
     effortCheck: effortReported ? "verified against host report" : "unreported (host does not report effort; pinned value only)",
-    prompt: { sha256: sha256(prompt), chars: prompt.length, file: "prompt.txt", jsonSchemaSha256: sha256(JSON.stringify(jsonSchema)) },
+    prompt: { sha256: sha256(prompt), chars: prompt.length, file: "prompt.txt", jsonSchemaSha256: sha256(JSON.stringify(jsonSchema)), budget: promptBudget },
     timeoutMs: res.timeoutMs ?? pin.timeoutMs,
     startedAt, finishedAt: new Date().toISOString(), durationMs: Date.now() - t0,
     usage: res.usage ?? null,

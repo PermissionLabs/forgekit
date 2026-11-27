@@ -9,7 +9,7 @@ run is `incomplete` with `model_unconfirmed`; its tests are skipped).
 ```text
 modules/cross-review/
   cross-review.mjs        CLI: plan | run | merge
-  review-policy.json      pinned models, effort map, grade rules, pace thresholds, per-host usage windows
+  review-policy.json      pinned models, effort map, grade rules, pace thresholds, per-host usage windows, prompt budget
   lib/policy.mjs          policy loading/validation (model ids live only in the policy)
   lib/plan.mjs            grade, reviewer selection, pace, Antigravity budget estimate
   lib/turns.mjs           Antigravity turn groups / file chunks / total budget (shared by plan and the adapter)
@@ -85,6 +85,20 @@ reviewer child gets a minimal environment (`PATH`, `HOME`, `USER`, `LOGNAME`, `S
 `hosts.<h>.env_passthrough`); for Antigravity the provider-credential denylist is applied on top and
 wins over `env_passthrough`.
 
+**Prompt order and budget.** The prompt is rules, schema, brief, `EARLIER FINDINGS`, `AUTHOR
+DISPOSITIONS`, checklist, diff (Antigravity sends the diff as its own resource block). The prior blocks
+come before the checklist so a host that cuts a long prompt text cuts the checklist, not the prior
+findings: an Antigravity 1.5 re-review had its first text block cut at 134,525 bytes, which dropped
+both prior blocks. `hosts.<h>.max_prompt_text_bytes` (null or an integer ≥ 4096; Antigravity 120000,
+unset for Claude/Codex) bounds the UTF-8 size of one prompt text: the whole stdin prompt for
+Claude/Codex, each turn's first text block (with its turn rule) for Antigravity. Over the bound only
+the checklist is truncated, at a character boundary, under a `CHECKLIST (TRUNCATED …)` header and an
+end marker that point at the full copy in `__review__/checklist.md`; a warning says so and
+`evidence.prompt.budget` records the sizes. When the parts that are never cut (rules, brief, earlier
+findings, dispositions, and for Claude/Codex the diff) do not fit, the run is `incomplete` with
+`prompt_over_budget` naming each part's size, and no host is started (Antigravity checks every planned
+turn before starting the server).
+
 **Output.**
 
 ```json
@@ -119,7 +133,10 @@ whatever the outcome; Claude keeps it on timeout and abandoned pipes too; Antigr
 merged accepted turns, with unreviewed dimensions marked `n/a:not reviewed`; an unparseable reply is
 kept as `reviewDraftRawIfIncomplete`). Incomplete reasons name the
 offending command or path (truncated, first three plus a count). The runner never switches to
-another reviewer or model.
+another reviewer or model. Raw logs are scrubbed of token-like strings and Google sign-in URLs
+(`lib/inputs.mjs` `redact`); a sign-in URL ends at a JSON string boundary (`"`, `\`, whitespace;
+`\uXXXX` and `\/` escapes inside it are removed with it), so every line of
+`raw/antigravity-messages.jsonl` still parses as JSON.
 
 ## Selection and pace (`plan`)
 

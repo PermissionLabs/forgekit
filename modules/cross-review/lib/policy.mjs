@@ -53,6 +53,8 @@ export function policyProblems(policy) {
     if (h?.env_passthrough !== undefined && (!Array.isArray(h.env_passthrough) || !h.env_passthrough.every((k) => typeof k === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(k))))
       errs.push(`hosts.${name}.env_passthrough must be an array of variable names`);
     for (const [k, v] of Object.entries(h?.expected_cost ?? {})) if (typeof v !== "number" || !(v >= 0 && v <= 1)) errs.push(`hosts.${name}.expected_cost.${k} must be a fraction in [0, 1]`);
+    if (h?.max_prompt_text_bytes !== undefined && h.max_prompt_text_bytes !== null && !(Number.isInteger(h.max_prompt_text_bytes) && h.max_prompt_text_bytes >= 4096))
+      errs.push(`hosts.${name}.max_prompt_text_bytes must be null or an integer >= 4096`);
     turnKeyProblems(h, `hosts.${name}`, errs);
     if (h?.par_layout !== undefined) {
       if (name !== "antigravity") errs.push(`hosts.${name}.par_layout: only antigravity has runtime layouts`);

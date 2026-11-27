@@ -7,7 +7,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadPolicy, defaultPolicyPath, policyProblems } from "../lib/policy.mjs";
-import { buildInput, hashTree, readChecklist, removeSnapshot } from "../lib/inputs.mjs";
+import { buildInput, buildPrompt, hashTree, PromptBudgetError, readChecklist, removeSnapshot } from "../lib/inputs.mjs";
 import { runReview, summarize } from "../lib/run.mjs";
 import { SELF_TEST_KEYS } from "../lib/sandbox.mjs";
 
@@ -531,4 +531,71 @@ test("checklist: an absolute path through an in-repo directory symlink is never 
       assert.throws(() => readChecklist(repo, rev, path.join(upper, "docs", "ext", "check.md")), /does not exist|not a regular file/);
     }
   } finally { fs.unlinkSync(path.join(repo, "docs", "ext")); fs.unlinkSync(alias); }
+});
+
+// ---------------------------------------------------------------- r8: prompt budget (shared builder)
+const budgetInput = (checklistText, claim = "c") => ({
+  snapshot: "/snap", scope: ["src/a.ts"], files: [{ path: "src/a.ts", kind: "scope", lines: 2 }], dimensions: DIMS,
+  briefText: "BRIEF\n", diffText: "DIFF\n", checklist: [{ path: "docs/check.md", text: checklistText }],
+  prior: [{ id: "X1", sev: "med", loc: "src/a.ts:1", claim, evidence: "e", check: "k" }], dispositions: [{ id: "X1", disposition: "fixed", ref: "abc" }],
+});
+
+test("buildPrompt: prior blocks come before the checklist; over the budget only the checklist is cut, marked, UTF-8 safe (r8)", () => {
+  const input = budgetInput(`start\n${"é".repeat(60_000)}\nEND OF CHECKLIST`);
+  const full = buildPrompt(input, { prefix: "C", idStart: 2, priorIds: ["X1"] });
+  const at = (s, k) => s.indexOf(k);
+  assert.ok(at(full, "=== EARLIER FINDINGS ===") < at(full, "=== AUTHOR DISPOSITIONS ===") && at(full, "=== AUTHOR DISPOSITIONS ===") < at(full, "=== CHECKLIST ===") && at(full, "=== CHECKLIST ===") < at(full, "=== DIFF UNDER REVIEW ==="));
+  assert.ok(full.includes("END OF CHECKLIST"));
+  const meta = {};
+  const cut = buildPrompt(input, { prefix: "C", idStart: 2, priorIds: ["X1"], maxBytes: 50_000, reserveBytes: 300, meta });
+  assert.ok(Buffer.byteLength(cut) + 300 <= 50_000, `${Buffer.byteLength(cut)} bytes`);
+  assert.ok(Buffer.byteLength(cut) + 300 > 49_000, "the budget is used, not dropped wholesale");
+  assert.ok(!cut.includes("�"), "a character was split");
+  for (const block of [`=== EARLIER FINDINGS ===\n${JSON.stringify(input.prior, null, 2)}`, `=== AUTHOR DISPOSITIONS ===\n${JSON.stringify(input.dispositions, null, 2)}`, "=== REVIEW BRIEF ===\nBRIEF\n", "=== DIFF UNDER REVIEW ===\nDIFF\n"])
+    assert.ok(cut.includes(block), `missing verbatim: ${block.slice(0, 40)}`);
+  assert.match(cut, /=== CHECKLIST \(TRUNCATED to fit this host's prompt budget: the first \d+ of \d+ bytes are shown; the full checklist is __review__\/checklist\.md/);
+  assert.ok(cut.includes("[... checklist truncated here; continue in __review__/checklist.md ...]"));
+  assert.ok(!cut.includes("END OF CHECKLIST"));
+  assert.equal(meta.checklist.truncated, true);
+  assert.equal(meta.bytes, Buffer.byteLength(cut));
+  // Within the budget: unchanged.
+  assert.equal(buildPrompt(input, { prefix: "C", idStart: 2, priorIds: ["X1"], maxBytes: 1_000_000 }), full);
+  // The parts that are never cut do not fit: PromptBudgetError naming the sizes, never a silent drop.
+  assert.throws(() => buildPrompt(budgetInput("x", "c".repeat(9000)), { prefix: "C", idStart: 2, priorIds: ["X1"], maxBytes: 8192 }),
+    (e) => e instanceof PromptBudgetError && /^prompt_over_budget: .*earlier_findings \d+.*max_prompt_text_bytes 8192/.test(e.message) && e.detail.sizes.earlier_findings > 9000);
+});
+
+test("max_prompt_text_bytes applies to the Claude/Codex prompt too: checklist cut, prior blocks whole; over budget -> incomplete without a run (r8)", async () => {
+  const prior = path.join(tmp, "budget-prior.json"), disp = path.join(tmp, "budget-disp.json");
+  fs.writeFileSync(prior, JSON.stringify([{ id: "X1", sev: "med", loc: "src/a.ts:1", claim: "c", evidence: "e", check: "k" }]));
+  fs.writeFileSync(disp, JSON.stringify([{ id: "X1", disposition: "fixed", ref: "abc" }]));
+  const list = path.join(tmp, "budget-checklist.md");
+  fs.writeFileSync(list, "- item\n".repeat(20_000));
+  const p = policy();
+  p.hosts.claude.max_prompt_text_bytes = 30_000;
+  setFake({ FAKE_REVIEW: JSON.stringify({ verdict: "pass", coverage: { correctness: "checked", tests: "checked" }, findings: [], limits: [], prior_verification: [{ id: "X1", verified: true, note: "src/a.ts:1" }] }) });
+  const ev = await runReview(opts("claude", "out-budget", { prior, dispositions: disp, checklist: [list] }), p, policyPath);
+  assert.equal(ev.status, "complete", ev.incompleteReasons.join());
+  const sent = fs.readFileSync(path.join(tmp, "out-budget", "prompt.txt"), "utf8");
+  assert.ok(Buffer.byteLength(sent) <= 30_000);
+  assert.ok(sent.includes(`=== EARLIER FINDINGS ===\n${JSON.stringify(JSON.parse(fs.readFileSync(prior, "utf8")), null, 2)}`));
+  assert.ok(sent.includes("=== AUTHOR DISPOSITIONS ==="));
+  assert.match(sent, /=== CHECKLIST \(TRUNCATED/);
+  assert.equal(ev.prompt.budget.checklist.truncated, true);
+  assert.ok(ev.warnings.some((w) => w.startsWith("checklist truncated to fit max_prompt_text_bytes 30000")));
+  p.hosts.claude.max_prompt_text_bytes = 4096;
+  fs.writeFileSync(prior, JSON.stringify([{ id: "X1", sev: "med", loc: "src/a.ts:1", claim: "c".repeat(6000), evidence: "e", check: "k" }]));
+  const over = await runReview(opts("claude", "out-budget2", { prior, dispositions: disp, checklist: [list] }), p, policyPath);
+  assertWithheld(over, /^prompt_over_budget:/m);
+  assert.deepEqual(over.attempts, []);
+  assert.ok(over.prompt.budget.overBudget.sizes.earlier_findings > 6000);
+});
+
+test("policy: max_prompt_text_bytes must be null or an integer >= 4096 (r8)", () => {
+  for (const bad of [0, 100, 1.5, "120000", -1]) {
+    const p = policy(); p.hosts.codex.max_prompt_text_bytes = bad;
+    assert.ok(policyProblems(p).some((e) => /max_prompt_text_bytes/.test(e)), String(bad));
+  }
+  const ok = policy(); ok.hosts.codex.max_prompt_text_bytes = null; ok.hosts.claude.max_prompt_text_bytes = 4096;
+  assert.deepEqual(policyProblems(ok).filter((e) => /max_prompt_text_bytes/.test(e)), []);
 });

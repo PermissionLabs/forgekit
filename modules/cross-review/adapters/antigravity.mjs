@@ -34,7 +34,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { expandHome } from "../lib/policy.mjs";
-import { insideRoot, redact, sha256 } from "../lib/inputs.mjs";
+import { insideRoot, PromptBudgetError, redact, sha256 } from "../lib/inputs.mjs";
 import { bypassFlags, groupMembers, ownedMembers, ownershipTimeMs, scrubEnv } from "../lib/proc.mjs";
 import { TURN_DEFAULTS, groupsFor, layoutConfig, planTurns, runTurns, totalBudget } from "../lib/turns.mjs";
 import { countGenerations, sessionGenerations } from "../lib/agy-session-db.mjs";
@@ -42,6 +42,9 @@ import { countGenerations, sessionGenerations } from "../lib/agy-session-db.mjs"
 export { groupsFor, layoutConfig, planTurns, totalBudget }; // re-exported for callers/tests of the adapter
 
 export const ENABLED_TOOLS = ["view_file"];
+// The adapter builds its own text block per turn and applies hosts.antigravity.max_prompt_text_bytes to each one
+// (run.mjs then leaves the common prompt unbudgeted for this host and records res.promptBudget).
+export const promptBudget = "per_turn";
 export const CLIENT_CAPABILITIES = { fs: { readTextFile: false, writeTextFile: false }, terminal: false, session: { notices: {} } };
 const ALLOWED_TOOL_TITLE = /^(Running |Ran )?view_file\b/;
 /** "cli" tool names (ACP `name`): read tools whose paths are audited, and bookkeeping tools without a path. */
@@ -294,6 +297,34 @@ export async function run(ctx) {
   if (!fs.existsSync(acpDir) || !fs.statSync(acpDir).isDirectory()) { reasons.push("profile_acp_dir_missing"); return out; }
 
   const cwd = input.snapshot;
+  const fileList = input.files.map((f) => `${path.join(cwd, f.path)}  (${f.lines} lines${f.kind === "context" ? ", context only" : ""})`).join("\n");
+  const tool = cli ? "read_file" : "view_file";
+  const toolNote = cli
+    ? `Use ONLY the ${tool} tool. Read files with ${tool} using the absolute paths listed below (snapshot root ${cwd}); read only those files, in several small steps. Any other tool (commands, edits, web search, subagents, questions) invalidates the review. No shell, no web, no writes.`
+    : `You have exactly ONE tool: view_file. Read files with view_file using the absolute paths listed below (snapshot root ${cwd}); read only those files, in several small steps. No shell, no web, no writes.`;
+  const turnRuleFor = ({ dims, files }, turnStart, last, mustCover) => `THIS TURN covers only these dimensions: ${dims.join(", ")}. Report only findings for them; coverage keys are exactly these.` +
+    (files ? ` THIS TURN reviews only these scope files (other listed files may be read for context): ${files.join(", ")}.` : "") +
+    ` New finding ids in this turn start at ${prefix}${turnStart} and continue in order.` +
+    (priorIds.length ? (last ? ` THIS IS THE LAST TURN: prior_verification must cover every earlier id not reported in previous turns (${mustCover.join(", ") || "none left"}).` : " prior_verification may be [] in this turn if no earlier finding concerns these dimensions or files.") : "");
+  // r8: the first text block of a turn (rules, brief, earlier findings, dispositions, checklist + turn rule) is
+  // bounded by max_prompt_text_bytes; only the checklist is cut to fit. Checked for every planned turn before the
+  // server starts (with the longest turn rule and a larger id start), so a prompt whose prior blocks alone do not
+  // fit fails as incomplete without a model call.
+  const maxPromptBytes = pin.config.max_prompt_text_bytes ?? null;
+  out.promptBudget = { maxBytes: maxPromptBytes, turns: [] };
+  const coreFor = (turn, turnStart, turnRule) => {
+    const meta = {};
+    const text = ctx.promptFor({ dimensions: turn.dims, toolNote, includeDiff: false, idStart: turnStart, maxBytes: maxPromptBytes, reserveBytes: Buffer.byteLength(`\n\n${turnRule}`), meta });
+    return { text: `${text}\n\n${turnRule}`, meta };
+  };
+  try {
+    for (const [ti, turn] of turns.entries()) if (cli || ti === 0) coreFor(turn, idStart + 999, turnRuleFor(turn, idStart + 999, true, priorIds));
+  } catch (e) {
+    if (!(e instanceof PromptBudgetError)) throw e;
+    out.promptBudget.overBudget = e.detail;
+    reasons.push(e.message);
+    return out;
+  }
   const sessions = new Set();
   const deadline = t0 + budget.totalMs;
   const remaining = () => deadline - Date.now();
@@ -531,11 +562,6 @@ export async function run(ctx) {
     const turnMs = (cfg.turn_timeout_sec ?? TURN_DEFAULTS.turn_timeout_sec) * 1000;
     const configuredRetryMs = (cfg.retry_timeout_sec ?? 0) * 1000;
     const retryMs = cli ? Math.max(turnMs, configuredRetryMs) : configuredRetryMs;
-    const fileList = input.files.map((f) => `${path.join(cwd, f.path)}  (${f.lines} lines${f.kind === "context" ? ", context only" : ""})`).join("\n");
-    const tool = cli ? "read_file" : "view_file";
-    const toolNote = cli
-      ? `Use ONLY the ${tool} tool. Read files with ${tool} using the absolute paths listed below (snapshot root ${cwd}); read only those files, in several small steps. Any other tool (commands, edits, web search, subagents, questions) invalidates the review. No shell, no web, no writes.`
-      : `You have exactly ONE tool: view_file. Read files with view_file using the absolute paths listed below (snapshot root ${cwd}); read only those files, in several small steps. No shell, no web, no writes.`;
     const parts = [];
     const priorSeen = new Set();
     let nextFinding = idStart;
@@ -544,13 +570,21 @@ export async function run(ctx) {
       const last = ti === turns.length - 1;
       const mustCover = last ? priorIds.filter((x) => !priorSeen.has(x)) : [];
       const turnStart = nextFinding;
-      const turnRule = `THIS TURN covers only these dimensions: ${dims.join(", ")}. Report only findings for them; coverage keys are exactly these.` +
-        (files ? ` THIS TURN reviews only these scope files (other listed files may be read for context): ${files.join(", ")}.` : "") +
-        ` New finding ids in this turn start at ${prefix}${turnStart} and continue in order.` +
-        (priorIds.length ? (last ? ` THIS IS THE LAST TURN: prior_verification must cover every earlier id not reported in previous turns (${mustCover.join(", ") || "none left"}).` : " prior_verification may be [] in this turn if no earlier finding concerns these dimensions or files.") : "");
-      const core = ctx.promptFor({ dimensions: dims, toolNote, includeDiff: false, idStart: turnStart });
-      const blocks = cli || ti === 0 ? [
-        { type: "text", text: `${core}\n\n${turnRule}` },
+      const turnRule = turnRuleFor(turn, turnStart, last, mustCover);
+      const sendsCore = cli || ti === 0;
+      let core = null;
+      if (sendsCore) {
+        try { core = coreFor(turn, turnStart, turnRule); }
+        catch (e) {
+          if (!(e instanceof PromptBudgetError)) throw e;
+          out.promptBudget.overBudget = e.detail;
+          reasons.push(e.message); break;
+        }
+        out.promptBudget.turns.push({ label, bytes: Buffer.byteLength(core.text), checklist: core.meta.checklist });
+        if (core.meta.checklist?.truncated) out.warnings.push(`checklist truncated in ${label} to fit max_prompt_text_bytes ${maxPromptBytes}: ${core.meta.checklist.shownBytes} of ${core.meta.checklist.totalBytes} bytes in the prompt (full copy in the snapshot)`);
+      }
+      const blocks = sendsCore ? [
+        { type: "text", text: core.text },
         { type: "resource", resource: { uri: `file://${path.join(cwd, "__review__", "diff.patch")}`, mimeType: "text/x-diff", text: input.diffText } },
         { type: "text", text: `=== FILES YOU MAY READ (absolute paths) ===\n${fileList}` },
       ] : [{ type: "text", text: `Next turn. The brief, rules, diff and file list from the first turn still apply.\n${turnRule}\nRespond with ONLY one JSON object of the same shape, with coverage keys ${dims.join(", ")}.` }];

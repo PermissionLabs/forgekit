@@ -20,7 +20,10 @@
 //   escapeStdio: true (on stdin end, a detached descendant outside the group keeps stdout/stderr open for 6 s, X36),
 //   nonRpc: {turn: true} (a JSON line that is not a JSON-RPC 2.0 message), trailingStdout: "text" (written without a
 //   newline at stdin end, right before exit; A87; `__SID__` becomes the current session id), rawStdout: {turn: "line"}
-//   (one raw stdout line before the reply, e.g. a JSON-RPC object with an empty method, A1/A3).
+//   (one raw stdout line before the reply, e.g. a JSON-RPC object with an empty method, A1/A3), cutTextAt: n (each
+//   prompt text block is cut to its first n UTF-8 bytes before it is read, like the 1.5 runtime that cut a re-review's
+//   first block at 134,525 bytes, r8), priorAware: true (prior_verification verifies every id of a complete EARLIER
+//   FINDINGS block followed by AUTHOR DISPOSITIONS; a missing or cut block yields [] and fails validation).
 // Per-turn stderr is written (and flushed) before any stdout for that turn, so the parent always sees it first.
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -47,12 +50,16 @@ const opts = () => [{ id: "model", currentValue: model }, { id: "thinking", cate
 const notify = (update, sessionId = SID) => send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update } });
 const has = (list, t) => Array.isArray(list) && list.includes(t);
 function review(text) {
+  const priors = () => {
+    const m = text.match(/=== EARLIER FINDINGS ===\n([\s\S]*?)\n\n=== AUTHOR DISPOSITIONS ===\n(\[[\s\S]*?\n\])/);
+    try { JSON.parse(m[2]); return JSON.parse(m[1]).map((f) => ({ id: f.id, verified: true, note: "src/a.ts:1" })); } catch { return []; }
+  };
   const dims = (text.match(/THIS TURN covers only these dimensions: ([^.]+)\./)?.[1] ?? text.match(/for dimensions ([^(]+?) \(/)?.[1] ?? "correctness").split(",").map((s) => s.trim());
   const start = text.match(/start at ([A-Z])(\d+)/);
   const prefix = start?.[1] ?? "A";
   const n = cfg.restartIds ? 1 : Number(start?.[2] ?? 1);
   const file = text.match(/reviews only these scope files[^:]*: (\S+?)[,.](?:\s|$)/)?.[1] ?? "src/a.ts";
-  return { verdict: "fix", coverage: Object.fromEntries(dims.map((d) => [d, "checked"])), findings: [{ id: `${prefix}${n}`, sev: "low", loc: `${file}:1`, claim: `claim ${dims.join("+")}`, evidence: "e", check: "k" }], limits: [] };
+  return { verdict: "fix", coverage: Object.fromEntries(dims.map((d) => [d, "checked"])), findings: [{ id: `${prefix}${n}`, sev: "low", loc: `${file}:1`, claim: `claim ${dims.join("+")}`, evidence: "e", check: "k" }], limits: [], ...(cfg.priorAware ? { prior_verification: priors() } : {}) };
 }
 let buf = "";
 process.stdin.setEncoding("utf8").on("data", (c) => {
@@ -106,7 +113,8 @@ process.stdin.setEncoding("utf8").on("data", (c) => {
         continue;
       }
       if (lateWrite) { lateWrite(); lateWrite = null; }
-      const text = m.params.prompt.filter((b) => b.type === "text").map((b) => b.text).join("\n");
+      const cut = (t) => (cfg.cutTextAt ? Buffer.from(t, "utf8").subarray(0, cfg.cutTextAt).toString("utf8") : t);
+      const text = m.params.prompt.filter((b) => b.type === "text").map((b) => cut(b.text)).join("\n");
       let err = "";
       if (!CLI && !has(cfg.noProxy, t)) err += `I1126 proxy.go:1] Proxy extracted model from path: ${cfg.proxyModel ?? `${model}-${thinking}`}\n`;
       const gen = () => enc([[1, enc([[19, cfg.genModel ?? model], [21, cfg.genDisplay ?? `${model} (${thinking})`]])]]);
