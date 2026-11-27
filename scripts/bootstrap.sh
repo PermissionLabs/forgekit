@@ -49,13 +49,13 @@ if [ ! -d "$templates" ]; then
   exit 1
 fi
 
+# shellcheck source=lib/repo-paths.sh
+. "$forgekit_root/scripts/lib/repo-paths.sh"
 # shellcheck source=check-target-paths.sh
 . "$forgekit_root/scripts/check-target-paths.sh"
 # Refuses a symlinked target, also when spelled "link/" or "link/.".
 resolve_target_root "$target" || exit 1
 
-# shellcheck source=lib/repo-paths.sh
-. "$forgekit_root/scripts/lib/repo-paths.sh"
 trap forgekit_tmp_cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
@@ -69,7 +69,7 @@ write_targets=(
   ".gitignore"
 )
 while IFS= read -r src; do
-  rel="${src#$templates/}"
+  rel="${src#"$templates"/}"
   if [ "$rel" = "docs/PROJECT_CONTEXT.md" ] && [ -e "$target/$rel" ]; then
     continue
   fi
@@ -140,7 +140,7 @@ chmod +x "$target/scripts/worktree-add.sh"
 # Shared docs. Walk templates/docs and copy each file, but never overwrite
 # PROJECT_CONTEXT.md if it already exists in the target.
 while IFS= read -r src; do
-  rel="${src#$templates/}"
+  rel="${src#"$templates"/}"
   dst="$target/$rel"
   if [ "$rel" = "docs/PROJECT_CONTEXT.md" ] && [ -e "$dst" ]; then
     echo "skip: $rel (existing project content preserved)"
@@ -155,22 +155,14 @@ copy_file "$templates/.context/workflow-state.compact.example.json" "$target/.co
 # Idempotently add .context/ to .gitignore.
 gitignore="$target/.gitignore"
 if [ ! -e "$gitignore" ] || ! grep -qxF ".context/" "$gitignore"; then
-  if [ -L "$gitignore" ]; then
-    # Defence in depth: check_managed_destinations refused a .gitignore link
-    # before any write, so this runs only if one appeared since (a race with
-    # another process). Write .gitignore itself, not the file the link points
-    # to: the link becomes a regular copy with the line added in the same
-    # temp write (covered by the chmod-race tests, case 28).
-    replace_link_with_copy "$gitignore" ".context/"
-  else
-    # No `touch` first: under umask 0222 it would create a read-only file
-    # the append below cannot open. A missing file is created by the
-    # append's own open, which writes it even when its mode is read-only.
-    if [ -s "$gitignore" ] && [ "$(tail -c1 "$gitignore" | wc -l | tr -d ' ')" = "0" ]; then
-      printf '\n' >> "$gitignore"
-    fi
-    echo ".context/" >> "$gitignore"
-  fi
+  # Through a sibling temp file, never an in-place append: an existing
+  # read-only (0444) .gitignore is replaced keeping its mode. A .gitignore
+  # link was refused by check_managed_destinations before any write, so one
+  # here appeared since (a race with another process): append_line_via_tmp
+  # re-checks it with write_target_problem and refuses one that resolves
+  # outside the repository; an in-repo link becomes a regular copy with the
+  # line added, never written through (chmod-race tests, case 28).
+  append_line_via_tmp "$gitignore" ".context/" "$target" || exit 1
 fi
 
 # Parity check before declaring success — AGENTS.md and CLAUDE.md must

@@ -54,13 +54,13 @@ if [ ! -d "$templates" ]; then
   exit 1
 fi
 
+# shellcheck source=lib/repo-paths.sh
+. "$forgekit_root/scripts/lib/repo-paths.sh"
 # shellcheck source=check-target-paths.sh
 . "$forgekit_root/scripts/check-target-paths.sh"
 # Refuses a symlinked target, also when spelled "link/" or "link/.".
 resolve_target_root "$target" || exit 1
 
-# shellcheck source=lib/repo-paths.sh
-. "$forgekit_root/scripts/lib/repo-paths.sh"
 trap forgekit_tmp_cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
@@ -71,8 +71,10 @@ fi
 
 has_override() {
   local f="$1"
+  # grep without -q reads all input: under pipefail an early grep -q exit
+  # could SIGPIPE head and turn a match into a miss (seen under load).
   [ -f "$f" ] && head -n 5 "$f" 2>/dev/null \
-    | grep -qE '^[[:space:]]*((<!--|#|//)[[:space:]]*forgekit-override:|"forgekit-override"[[:space:]]*:)'
+    | grep -E '^[[:space:]]*((<!--|#|//)[[:space:]]*forgekit-override:|"forgekit-override"[[:space:]]*:)' >/dev/null
 }
 
 # Pre-check for one write target (relative path $1). Reports the path and
@@ -204,7 +206,7 @@ managed_write_paths() {
   {
     printf '%s\n' CLAUDE.md scripts/worktree-add.sh .context/workflow-state.json .gitignore
     find "$templates/docs" -type f | while IFS= read -r src; do
-      printf '%s\n' "${src#$templates/}"
+      printf '%s\n' "${src#"$templates"/}"
     done
   } | while IFS= read -r rel; do
     dir="$(CDPATH='' cd -P "$(dirname "$target/$rel")" 2>/dev/null && pwd -P)" || continue
@@ -269,7 +271,7 @@ would_keep_gemini_alias() {
     root_phys="$(CDPATH='' cd -P "$target" && pwd -P)"
     if link_chain_reaches "$f" "$root_phys/AGENTS.md"; then
       if hop="$(link_chain_hop_in "$f" "$root_phys/AGENTS.md" "$(managed_write_paths)")"; then
-        echo "LINK: GEMINI.md reaches AGENTS.md through ${hop#$root_phys/}, which update-harness replaces with a regular file; --force does not fix this. Fix: (cd \"$target\" && ln -sfn AGENTS.md GEMINI.md)" >&2
+        echo "LINK: GEMINI.md reaches AGENTS.md through ${hop#"$root_phys"/}, which update-harness replaces with a regular file; --force does not fix this. Fix: (cd \"$target\" && ln -sfn AGENTS.md GEMINI.md)" >&2
         return 1
       fi
       return 0
@@ -306,7 +308,7 @@ would_keep_gemini_alias || drift=1
 would_update_file "$forgekit_root/scripts/worktree-add.sh" "scripts/worktree-add.sh" || drift=1
 
 while IFS= read -r src; do
-  rel="${src#$templates/}"
+  rel="${src#"$templates"/}"
   would_update_file "$src" "$rel" || drift=1
 done < <(find "$templates/docs" -type f | sort)
 
@@ -333,7 +335,7 @@ done
 update_file "$forgekit_root/scripts/worktree-add.sh" "scripts/worktree-add.sh"
 
 while IFS= read -r src; do
-  rel="${src#$templates/}"
+  rel="${src#"$templates"/}"
   update_file "$src" "$rel"
 done < <(find "$templates/docs" -type f | sort)
 
@@ -376,22 +378,14 @@ fi
 
 gitignore="$target/.gitignore"
 if [ ! -e "$gitignore" ] || ! grep -qxF ".context/" "$gitignore"; then
-  if [ -L "$gitignore" ]; then
-    # Defence in depth: check_managed_destinations refused a .gitignore link
-    # before any write, so this runs only if one appeared since (a race with
-    # another process). Write .gitignore itself, not the file the link points
-    # to: the link becomes a regular copy with the line added in the same
-    # temp write (covered by the chmod-race tests, case 28).
-    replace_link_with_copy "$gitignore" ".context/"
-  else
-    # No `touch` first: under umask 0222 it would create a read-only file
-    # the append below cannot open. A missing file is created by the
-    # append's own open, which writes it even when its mode is read-only.
-    if [ -s "$gitignore" ] && [ "$(tail -c1 "$gitignore" | wc -l | tr -d ' ')" = "0" ]; then
-      printf '\n' >> "$gitignore"
-    fi
-    echo ".context/" >> "$gitignore"
-  fi
+  # Through a sibling temp file, never an in-place append: an existing
+  # read-only (0444) .gitignore is replaced keeping its mode. A .gitignore
+  # link was refused by check_managed_destinations before any write, so one
+  # here appeared since (a race with another process): append_line_via_tmp
+  # re-checks it with write_target_problem and refuses one that resolves
+  # outside the repository; an in-repo link becomes a regular copy with the
+  # line added, never written through (chmod-race tests, case 28).
+  append_line_via_tmp "$gitignore" ".context/" "$target" || exit 1
   echo "update: .gitignore"
 fi
 
@@ -409,15 +403,15 @@ Harness sync still reports drift. Fix each cause listed above:
 EOF
   # Hints follow the checker's drift classes; forgekit-override only helps
   # template drift, never host load rules or symlinks.
-  if printf '%s\n' "$sync_out" | grep -Eq '^(DRIFT|MISSING|STALE):'; then
+  if printf '%s\n' "$sync_out" | grep -E '^(DRIFT|MISSING|STALE):' >/dev/null; then
     echo "hint: DRIFT/MISSING/STALE: remove stale harness files, or add a forgekit-override" >&2
     echo "      marker where the target should intentionally diverge." >&2
   fi
-  if printf '%s\n' "$sync_out" | grep -Eq '^(SIZE|FORMAT):'; then
+  if printf '%s\n' "$sync_out" | grep -E '^(SIZE|FORMAT):' >/dev/null; then
     echo "hint: SIZE/FORMAT: shrink the entrypoint (move detail into docs/) or remove its" >&2
     echo "      leading YAML frontmatter; forgekit-override does not exempt host load rules." >&2
   fi
-  if printf '%s\n' "$sync_out" | grep -Eq '^LINK:'; then
+  if printf '%s\n' "$sync_out" | grep -E '^LINK:' >/dev/null; then
     echo "hint: LINK: apply the fix named on each LINK line; forgekit-override and --force" >&2
     echo "      do not repair symlinks." >&2
   fi

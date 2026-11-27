@@ -44,18 +44,18 @@ expect_rc() {
 }
 
 expect_has() {
-  printf '%s\n' "$OUT" | grep -Fq -- "$1" || fail "expected output to contain: $1"
+  printf '%s\n' "$OUT" | grep -F -- "$1" >/dev/null || fail "expected output to contain: $1"
 }
 
 expect_lacks() {
-  if printf '%s\n' "$OUT" | grep -Fq -- "$1"; then
+  if printf '%s\n' "$OUT" | grep -F -- "$1" >/dev/null; then
     fail "expected output not to contain: $1"
   fi
 }
 
 # Fails if any output line starts with the given prefix (a drift class tag).
 expect_no_line() {
-  if printf '%s\n' "$OUT" | grep -q "^$1"; then
+  if printf '%s\n' "$OUT" | grep "^$1" >/dev/null; then
     fail "expected no output line starting with: $1"
   fi
 }
@@ -226,6 +226,21 @@ for name in AGENTS.md CLAUDE.md GEMINI.md; do
   run_check "$name symlink outside repository" "$repo"
   expect_rc 1
   expect_has "LINK:  $name"
+  expect_lacks "OUTSIDE_SECRET_7f3a"
+done
+
+# 13a. r12 (A5 of the PR #26 full review): GEMINI.md and AGENTS.md resolving
+#      to the same outside file are not a deduplicated alias: GEMINI.md is
+#      reported as a LINK in the same run as AGENTS.md.
+for gemini_link in "$TMP_DIR/outside/secret.md" AGENTS.md; do
+  repo="$(new_repo "outside-alias-$(basename "$gemini_link")")"
+  rm -f "$repo/AGENTS.md"
+  ln -s "$TMP_DIR/outside/secret.md" "$repo/AGENTS.md"
+  ln -s "$gemini_link" "$repo/GEMINI.md"
+  run_check "GEMINI.md -> $gemini_link with AGENTS.md outside" "$repo"
+  expect_rc 1
+  expect_has "LINK:  GEMINI.md resolves outside the repository"
+  expect_lacks "deduplicated by realpath"
   expect_lacks "OUTSIDE_SECRET_7f3a"
 done
 
@@ -438,7 +453,7 @@ run_script "update-harness --force refuses in-repo symlinks on managed paths" \
 expect_rc 1
 for f in AGENTS.md .gitignore docs/WORKFLOW.md; do
   expect_has "error: symlink in managed destination: "
-  printf '%s\n' "$OUT" | grep -Fq -- "/write-inside-links/$f" || fail "no refusal for $f"
+  printf '%s\n' "$OUT" | grep -F -- "/write-inside-links/$f" >/dev/null || fail "no refusal for $f"
   [ -L "$repo/$f" ] || fail "$f was replaced despite the refusal"
 done
 expect_has "update stopped before changing files"
@@ -457,7 +472,7 @@ run_script "update-harness --force refuses an in-repo symlinked directory" \
   "$ROOT/scripts/update-harness.sh" "$repo" --force
 expect_rc 1
 expect_has "error: symlink in managed destination: "
-printf '%s\n' "$OUT" | grep -Fq -- "/write-inside-dirlink/docs/review-skills" \
+printf '%s\n' "$OUT" | grep -F -- "/write-inside-dirlink/docs/review-skills" >/dev/null \
   || fail "no refusal for docs/review-skills"
 [ "$(tree_hash "$repo")" = "$repo_tree" ] || fail "files written despite the refusal"
 run_script "bootstrap --force refuses an in-repo symlinked directory" \
@@ -518,6 +533,17 @@ for writer in update-harness bootstrap; do
   ln -s "$TMP_DIR/target-link/docs" "$TMP_DIR/box-$writer/sub"
   capture env SHELLOPTS=physical bash "$ROOT/scripts/$writer.sh" "$TMP_DIR/box-$writer/sub/.." --force
   [ "$(tree_hash "$repo")" = "$repo_tree" ] || fail "files written into the linked repo through box/sub/.. (physical mode)"
+  # r12 (A4 of the PR #26 full review): the writer must have resolved
+  # box/sub/.. to box itself, not just stayed out of the linked repo.
+  box_phys="$(cd "$TMP_DIR/box-$writer" && pwd -P)"
+  if [ "$writer" = bootstrap ]; then
+    expect_rc 0
+    expect_has "ForgeKit bootstrapped into: $box_phys"
+    [ -f "$box_phys/AGENTS.md" ] || fail "bootstrap did not write AGENTS.md into box"
+  else
+    expect_rc 1
+    expect_has "error: target is not a git repository: $box_phys"
+  fi
 done
 
 # 17c-2. X11: a target directory literally named "-" (spelled "-", "-/" or
@@ -541,6 +567,63 @@ for spelling in "-" "-/" "-/."; do
     [ "$(tree_hash "$old_repo")" = "$old_tree" ] || fail "$writer wrote into \$OLDPWD"
   done
 done
+
+# 17c-3. r12 (A2 of the PR #26 full review): check-harness-sync resolves its
+#        target like the writers: "-" is the directory named "-" (not
+#        $OLDPWD), "-P"/"-L" are directories (not cd options that switch to
+#        $HOME), and an exported CDPATH does not change a relative target.
+#        HOME and OLDPWD name the repo with drift, so a misresolved target
+#        fails the check; the clean literal target passes.
+mkdir -p "$TMP_DIR/dashopt"
+for name in -P -L; do
+  new_repo "dashopt/$name" >/dev/null
+done
+for spelling in "-" "-/" "-/."; do
+  LABEL="check-harness-sync treats a target spelled $spelling as the directory named -"
+  CASES=$((CASES + 1))
+  capture bash -c 'cd "$1" && OLDPWD="$2" HOME="$2" exec bash "$3" "$4"' _ \
+    "$TMP_DIR/dash" "$old_repo" "$ROOT/scripts/check-harness-sync.sh" "$spelling"
+  expect_rc 0
+  expect_has "Downstream harness sync check: $TMP_DIR/dash/-"
+done
+for name in -P -L; do
+  LABEL="check-harness-sync treats a target named $name as a directory"
+  CASES=$((CASES + 1))
+  capture bash -c 'cd "$1" && HOME="$2" exec bash "$3" "$4"' _ \
+    "$TMP_DIR/dashopt" "$old_repo" "$ROOT/scripts/check-harness-sync.sh" "$name"
+  expect_rc 0
+  expect_has "Downstream harness sync check: $TMP_DIR/dashopt/$name"
+done
+mkdir -p "$TMP_DIR/cdpath-decoy/dashopt/-P"
+LABEL="check-harness-sync ignores an exported CDPATH"
+CASES=$((CASES + 1))
+capture bash -c 'cd "$1" && CDPATH="$2" exec bash "$3" "dashopt/-P"' _ \
+  "$TMP_DIR" "$TMP_DIR/cdpath-decoy" "$ROOT/scripts/check-harness-sync.sh"
+expect_rc 0
+expect_has "Downstream harness sync check: $TMP_DIR/dashopt/-P"
+
+# 17c-4. r12 (A3 of the PR #26 full review): path prefixes are stripped
+#        literally, not as glob patterns. A ForgeKit checkout and a target
+#        whose paths contain "[1]" bootstrap and check cleanly; an unquoted
+#        ${src#$templates/} keeps the absolute path and nests the copies.
+mkdir -p "$TMP_DIR/fk[1]"
+cp -R "$ROOT/scripts" "$ROOT/templates" "$TMP_DIR/fk[1]/"
+glob_repo="$TMP_DIR/app[1]"
+mkdir -p "$glob_repo"
+git -C "$glob_repo" init -q
+run_script "bootstrap from and into paths containing [1]" \
+  "$TMP_DIR/fk[1]/scripts/bootstrap.sh" "$glob_repo"
+expect_rc 0
+[ -f "$glob_repo/docs/WORKFLOW.md" ] || fail "docs/WORKFLOW.md not copied to its literal path"
+[ ! -e "$glob_repo/${TMP_DIR#/}" ] && [ ! -e "$glob_repo/private" ] || fail "copies nested under the absolute templates path"
+printf '\nlocal edit\n' >> "$glob_repo/CLAUDE.md"
+run_script "update-harness from and into paths containing [1]" \
+  "$TMP_DIR/fk[1]/scripts/update-harness.sh" "$glob_repo" --force
+expect_rc 0
+expect_has "ok:   docs/WORKFLOW.md"
+run_check "check-harness-sync on a target containing [1]" "$glob_repo"
+expect_rc 0
+expect_no_line "STALE"
 
 # 17d. PR #25: a managed destination that exists but is not a regular file
 #      (a directory) is refused by both writers.
@@ -656,7 +739,7 @@ expect_planted_intact() {
   done < "$1.planted"
   [ "$(hash_of "$TMP_DIR/outside-x5/canary")" = "$canary_hash" ] \
     || fail "outside canary changed through a predictable temp name"
-  if find "$1" ! -type l \( -name '*forgekit-tmp*' -o -name '.workflow-state.json.tmp.*' \) | grep -q .; then
+  if find "$1" ! -type l \( -name '*forgekit-tmp*' -o -name '.workflow-state.json.tmp.*' \) | grep . >/dev/null; then
     fail "temp file left behind: $(find "$1" ! -type l -name '*tmp*')"
   fi
 }
@@ -665,7 +748,7 @@ mkdir -p "$repo/.harness"
 printf '\nlocal edit\n' >> "$repo/AGENTS.md"
 printf '\nlocal edit\n' >> "$repo/CLAUDE.md"
 # A plain .gitignore without .context/ (a .gitignore link is refused since
-# PR #25, so the in-place append path is exercised here).
+# PR #25, so the regular-file temp path is exercised here).
 printf 'node_modules/\n' > "$repo/.gitignore"
 if command -v jq >/dev/null 2>&1; then
   jq 'del(.resume_protocol.phase_refs_source)' "$repo/.context/workflow-state.json" \
@@ -709,7 +792,7 @@ if command -v jq >/dev/null 2>&1; then
     "$ROOT/scripts/update-harness.sh" "$repo"
   expect_has "warn: could not update .context/workflow-state.json"
   [ "$(cat "$repo/.context/workflow-state.json")" = "not json" ] || fail "state file changed"
-  ! find "$repo" -name '*forgekit-tmp*' | grep -q . || fail "temp file left behind"
+  ! find "$repo" -name '*forgekit-tmp*' | grep . >/dev/null || fail "temp file left behind"
 fi
 
 # 20. Write guard resolves `..` physically (m8): redirect -> ../outside/child,
@@ -773,7 +856,7 @@ mode_of() {
   fi
 }
 expect_no_tmp() {
-  ! find "$1" \( -name '*forgekit-tmp*' -o -name '.workflow-state.json.tmp.*' \) | grep -q . \
+  ! find "$1" \( -name '*forgekit-tmp*' -o -name '.workflow-state.json.tmp.*' \) | grep . >/dev/null \
     || fail "temp file left behind"
 }
 if command -v jq >/dev/null 2>&1; then
@@ -820,6 +903,50 @@ if command -v jq >/dev/null 2>&1; then
     || fail "workflow-state.json was not updated"
   expect_no_tmp "$repo"
 fi
+
+# 21c. r12 (A1 of the PR #26 full review): an existing read-only managed
+#      file that safe_copy_file rewrites (a docs file 0444, the helper script
+#      0555) and a 0444 .gitignore without .context/ are replaced through a
+#      sibling temp file and keep their mode. A plain in-place cp (or `>>`)
+#      failed with Permission denied after earlier files were already
+#      rewritten, leaving a partial update.
+ro_check() {
+  [ "$(mode_of "$1/docs/WORKFLOW.md")" = "444" ] || fail "docs/WORKFLOW.md mode $(mode_of "$1/docs/WORKFLOW.md"), want 444"
+  [ "$(mode_of "$1/scripts/worktree-add.sh")" = "555" ] \
+    || fail "worktree-add.sh mode $(mode_of "$1/scripts/worktree-add.sh"), want 555"
+  [ "$(mode_of "$1/.gitignore")" = "444" ] || fail ".gitignore mode $(mode_of "$1/.gitignore"), want 444"
+  cmp -s "$1/docs/WORKFLOW.md" "$ROOT/templates/docs/WORKFLOW.md" || fail "docs/WORKFLOW.md not updated"
+  cmp -s "$1/docs/HARNESS_NOTES.md" "$ROOT/templates/docs/HARNESS_NOTES.md" || fail "docs/HARNESS_NOTES.md not updated"
+  cmp -s "$1/scripts/worktree-add.sh" "$ROOT/scripts/worktree-add.sh" || fail "worktree-add.sh not updated"
+  [ "$(cat "$1/.gitignore")" = "$(printf 'node_modules/\n.context/')" ] || fail ".gitignore content: $(cat "$1/.gitignore")"
+  expect_no_tmp "$1"
+}
+for writer in update-harness bootstrap; do
+  repo="$(new_repo "readonly-copy-$writer")"
+  printf '\nlocal edit\n' >> "$repo/docs/WORKFLOW.md"
+  printf '\nlocal edit\n' >> "$repo/docs/HARNESS_NOTES.md"
+  printf '\n# local edit\n' >> "$repo/scripts/worktree-add.sh"
+  printf 'node_modules/\n' > "$repo/.gitignore"
+  chmod 444 "$repo/docs/WORKFLOW.md" "$repo/.gitignore"
+  chmod 555 "$repo/scripts/worktree-add.sh"
+  run_script "$writer --force rewrites read-only managed files and keeps their mode" \
+    "$ROOT/scripts/$writer.sh" "$repo" --force
+  expect_rc 0
+  ro_check "$repo"
+done
+
+# A new file copied by safe_copy_file gets the umask default (not the temp
+# file's 0600); the helper script then gets +x.
+dir="$TMP_DIR/new-copy-mode"
+mkdir -p "$dir"
+git -C "$dir" init -q
+LABEL="bootstrap gives new files the umask default mode"
+CASES=$((CASES + 1))
+capture bash -c 'umask 027; exec bash "$0" "$1"' "$ROOT/scripts/bootstrap.sh" "$dir"
+expect_rc 0
+[ "$(mode_of "$dir/docs/WORKFLOW.md")" = "640" ] || fail "docs/WORKFLOW.md mode $(mode_of "$dir/docs/WORKFLOW.md"), want 640"
+[ "$(mode_of "$dir/scripts/worktree-add.sh")" = "750" ] \
+  || fail "worktree-add.sh mode $(mode_of "$dir/scripts/worktree-add.sh"), want 750"
 
 repo="$(new_repo umask-boot)"
 mkdir -p "$repo/.harness"
@@ -1167,7 +1294,7 @@ capture env PATH="$TMP_DIR/term-mv-shim:$PATH" bash "$ROOT/scripts/update-harnes
 expect_no_tmp "$repo"
 
 # Since PR #25 a .gitignore link is refused before any write, so the writers'
-# .gitignore temp path (replace_link_with_copy, kept as defence in depth) is
+# .gitignore link branch (append_line_via_tmp, kept as defence in depth) is
 # reached only when the link appears after the pre-check. A chmod shim
 # simulates that race: on the writers' `chmod +x .../worktree-add.sh` (after
 # the pre-check, before the .gitignore step) it swaps .gitignore for an
@@ -1179,7 +1306,7 @@ cat > "$TMP_DIR/race-chmod-shim/chmod" <<SHIM
 if [ "\$1" = "+x" ] && [ -n "\${RACE_REPO:-}" ]; then
   case "\$2" in */scripts/worktree-add.sh)
     rm -f "\$RACE_REPO/.gitignore"
-    ln -s .harness/gitignore "\$RACE_REPO/.gitignore" ;;
+    ln -s "\${RACE_LINK:-.harness/gitignore}" "\$RACE_REPO/.gitignore" ;;
   esac
 fi
 exec "$real_chmod" "\$@"
@@ -1219,6 +1346,32 @@ for writer in bootstrap update-harness; do
   [ "$(cat "$repo/.gitignore")" = "$(printf 'node_modules/\n.context/')" ] \
     || fail ".gitignore content: $(cat "$repo/.gitignore")"
   [ "$(cat "$repo/.harness/gitignore")" = "node_modules/" ] || fail "$writer wrote through the .gitignore link"
+  expect_no_tmp "$repo"
+done
+
+# r12 (A2/A3 of the PR #26 full review): a .gitignore link that appears
+# after the pre-check and resolves outside the repository is re-checked and
+# refused; its content is never copied into the repository and the outside
+# file is untouched.
+mkdir -p "$TMP_DIR/outside-race"
+printf 'RACE_SECRET_91c2\n' > "$TMP_DIR/outside-race/secret"
+chmod 600 "$TMP_DIR/outside-race/secret"
+race_hash="$(hash_of "$TMP_DIR/outside-race/secret")"
+for writer in bootstrap update-harness; do
+  repo="$(new_repo "race-outside-$writer")"
+  printf '\nlocal edit\n' >> "$repo/CLAUDE.md"
+  LABEL="$writer refuses an outside .gitignore link that appears after the pre-check"
+  CASES=$((CASES + 1))
+  capture env RACE_REPO="$repo" RACE_LINK="$TMP_DIR/outside-race/secret" PATH="$TMP_DIR/race-chmod-shim:$PATH" \
+    bash "$ROOT/scripts/$writer.sh" "$repo" --force
+  expect_rc 1
+  expect_has "resolves outside the repository; refusing to write it"
+  [ -L "$repo/.gitignore" ] || fail "the outside .gitignore link was replaced"
+  [ "$(hash_of "$TMP_DIR/outside-race/secret")" = "$race_hash" ] || fail "$writer changed the outside file"
+  if grep -rqF --exclude=.gitignore RACE_SECRET_91c2 "$repo" 2>/dev/null; then
+    fail "outside content copied into the repository"
+  fi
+  expect_lacks "RACE_SECRET_91c2"
   expect_no_tmp "$repo"
 done
 

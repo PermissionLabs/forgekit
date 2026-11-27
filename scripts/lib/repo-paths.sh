@@ -145,16 +145,20 @@ write_target_problem() {
   return 1
 }
 
-# Copy $1 to $2 without writing through a symlink at $2: an existing link is
-# removed first, so the link itself is replaced by a regular file. Callers
+# Copy $1 to $2 through a sibling temp file renamed onto $2, never writing
+# through a symlink at $2 (the link itself is replaced by a regular file) and
+# never opening $2 for writing, so an existing read-only (0444/0555) managed
+# file is replaced like the entrypoints are instead of failing mid-run with a
+# partial update. An existing regular file keeps its own mode; a new file (or
+# a replaced link) gets the umask default (the templates are not executable;
+# the writers chmod +x scripts/worktree-add.sh after copying it). Callers
 # must have passed $2 through write_target_problem.
 safe_copy_file() {
   local src="$1" dst="$2"
-  mkdir -p "$(dirname "$dst")"
-  if [ -L "$dst" ]; then
-    rm -f "$dst"
-  fi
-  cp "$src" "$dst"
+  mkdir -p "$(dirname "$dst")" || return 1
+  make_sibling_tmp "$dst" || return 1
+  cat "$src" > "$FORGEKIT_TMP" || return 1
+  commit_sibling_tmp "$dst"
 }
 
 # Exclusive sibling temp files. FORGEKIT_TMP holds the temp file this
@@ -220,25 +224,45 @@ commit_sibling_tmp() {
   FORGEKIT_TMP=""
 }
 
-# Replace a symlink at $1 with a regular file holding its current content
-# (empty when the link dangles) so a following in-place edit (append, touch)
-# changes $1 itself, not the file the link points to. No-op for non-links.
-# An optional line $2 is appended to the copy (after a newline if the content
-# lacks one) before it is committed, so the new file never needs a second,
-# in-place write: under a umask such as 0222 the committed file is read-only.
-# Callers must have passed $1 through write_target_problem.
-replace_link_with_copy() {
-  local f="$1" line="${2:-}"
-  [ -L "$f" ] || return 0
-  make_sibling_tmp "$f"
+# Add line $2 to $1 (after a newline if the content lacks one) through a
+# sibling temp file holding the current content (empty when $1 is missing or
+# dangles), so $1 is never opened for writing: a read-only (0444) file is
+# replaced keeping its mode, and a symlink at $1 is replaced by a regular
+# file instead of being written through. A symlink is re-checked against
+# repo root $3 with write_target_problem first (it may have appeared after
+# the writers' pre-check, which refuses .gitignore links); one that resolves
+# outside the repository, or to a non-regular file, is refused (returns 1)
+# before its content is read.
+append_line_via_tmp() {
+  local f="$1" line="$2" root="$3" why
+  if [ -L "$f" ] && why="$(write_target_problem "$f" "$root")"; then
+    echo "LINK: $f $why; refusing to write it" >&2
+    return 1
+  fi
+  make_sibling_tmp "$f" || return 1
   if [ -f "$f" ]; then
     cat "$f" > "$FORGEKIT_TMP" || return 1
   fi
-  if [ -n "$line" ]; then
-    if [ -s "$FORGEKIT_TMP" ] && [ "$(tail -c1 "$FORGEKIT_TMP" | wc -l | tr -d ' ')" = "0" ]; then
-      printf '\n' >> "$FORGEKIT_TMP" || return 1
-    fi
-    printf '%s\n' "$line" >> "$FORGEKIT_TMP" || return 1
+  if [ -s "$FORGEKIT_TMP" ] && [ "$(tail -c1 "$FORGEKIT_TMP" | wc -l | tr -d ' ')" = "0" ]; then
+    printf '\n' >> "$FORGEKIT_TMP" || return 1
   fi
+  printf '%s\n' "$line" >> "$FORGEKIT_TMP" || return 1
   commit_sibling_tmp "$f"
+}
+
+# Print $1 as an operand cd takes literally: trailing "/" and "/." are
+# stripped ("/" itself is kept) and a bare "-" (cd's $OLDPWD operand, even
+# after --) becomes "./-". Callers still pass it after `CDPATH='' cd -L --`.
+literal_dir_operand() {
+  local arg="$1"
+  while :; do
+    case "$arg" in
+      /) break ;;
+      */) arg="${arg%/}" ;;
+      */.) arg="${arg%/.}"; [ -n "$arg" ] || arg=/ ;;
+      *) break ;;
+    esac
+  done
+  [ "$arg" != "-" ] || arg="./-"
+  printf '%s\n' "$arg"
 }

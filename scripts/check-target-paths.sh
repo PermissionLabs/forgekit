@@ -1,5 +1,6 @@
 # shellcheck shell=bash
-# Sourced by bootstrap and update. Defines functions only: callers run
+# Sourced by bootstrap and update after lib/repo-paths.sh (resolve_target_root
+# uses its literal_dir_operand). Defines functions only: callers run
 # resolve_target_root first (it sets $target, physical via pwd -P), then
 # check_managed_destinations (which also needs $templates) before writing any
 # managed path.
@@ -14,18 +15,10 @@
 # (not a link). The strip alone is redundant with that check but keeps the
 # raw-argument test meaningful. --force does not override this.
 resolve_target_root() {
-  local arg="$1" logical
-  while :; do
-    case "$arg" in
-      /) break ;;
-      */) arg="${arg%/}" ;;
-      */.) arg="${arg%/.}"; [ -n "$arg" ] || arg=/ ;;
-      *) break ;;
-    esac
-  done
-  # cd treats a bare "-" as $OLDPWD (even after --), so a directory named
-  # "-" (spelled "-", "-/" or "-/.") is passed as "./-".
-  [ "$arg" != "-" ] || arg="./-"
+  local arg logical
+  # Trailing "/" and "/." stripped, a bare "-" (cd's $OLDPWD operand, even
+  # after --; spelled "-", "-/" or "-/.") passed as "./-".
+  arg="$(literal_dir_operand "$1")"
   # Explicit -L: an inherited `set -P` (SHELLOPTS=physical) would make a
   # plain cd physical and pwd -L would then see the resolved path.
   logical="$(CDPATH='' cd -L -- "$arg" && pwd -L)" || return 1

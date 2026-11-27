@@ -280,7 +280,10 @@ pointer.
   `update-harness.sh` check every path they would write first and refuse the
   whole run (even with `--force`) when one resolves outside the repository,
   is a symlink or sits under a symlinked directory (even one resolving inside
-  it), or is not a regular file. Rewritten files keep their own mode.
+  it), or is not a regular file. Every write goes through a sibling temp
+  file renamed into place, so a read-only (`0444`/`0555`) managed file or
+  `.gitignore` is replaced, never opened for writing; rewritten files keep
+  their own mode.
 - Skills under `.agents/skills/<name>/SKILL.md` are natively discovered by both
   Codex and Antigravity.
 

@@ -127,7 +127,9 @@ or rewritten through links the same way.
   example a project-owned file the link points to — and the sync check reads
   the named path either way, so replacing the link is the only behaviour
   that keeps writes confined to the harness path.
-- Compatibility change for downstream projects: an in-repo symlinked harness
+- (Superseded by the PR #25 rebase below: an in-repo symlinked harness file
+  is now refused, not replaced; kept as the record of the earlier rule.)
+  Compatibility change for downstream projects: an in-repo symlinked harness
   file (e.g. `AGENTS.md -> .harness/AGENTS.md`) used to be written through,
   updating the link target; it is now replaced by a regular file, leaving
   the old target stale, and git shows a `typechange`. `docs/BOOTSTRAP.md`
@@ -154,6 +156,12 @@ or rewritten through links the same way.
   check their status. A `.gitignore` link is materialised with `.context/`
   added in the same temp write, because the committed `0444` copy cannot be
   appended to.
+- No in-place writes (r12): `safe_copy_file` (docs, the helper script, the
+  state seed) and the `.gitignore` line (`append_line_via_tmp`) also go
+  through `make_sibling_tmp` / `commit_sibling_tmp`, like the entrypoints.
+  A plain `cp` or `>>` onto an existing read-only (`0444`/`0555`) managed
+  file failed with `Permission denied` after earlier files were already
+  rewritten (a partial update); now the file is replaced and keeps its mode.
 
 ### Rebase onto main (PR #25 security remediation)
 
@@ -267,6 +275,24 @@ touched the same writers; the rebase keeps every protection from both sides:
   `resolve_target_root` back to a plain `cd`, the `box/sub/..` case under
   `SHELLOPTS=physical` (box a real directory, `box/sub` linking into the
   symlinked target) writes into the linked repository and fails.
+- Mutation checks (r12): on scratch copies run in parallel, each of these
+  fails the new tests: `safe_copy_file` back to an in-place `cp` (21c,
+  read-only managed files), the `.gitignore` regular-file path back to `>>`
+  (21c), the race re-check in `append_line_via_tmp` disabled (outside
+  `.gitignore` link race), the `guard_outside_repo` call removed from
+  `check_alias_entrypoint` (13a), `check-harness-sync.sh` back to
+  `cd "$1" && pwd` (17c-3), each unquoted `${x#$prefix/}` restored in
+  `bootstrap.sh`, `update-harness.sh` and the three `check-harness-sync.sh`
+  sites (17c-4, `[1]` in the ForgeKit and target paths), and
+  `resolve_target_root` rejecting `box/sub/..` (the A15 case now asserts
+  the exit status and the resolved path). The unmutated copy passed in the
+  same parallel run; before the `grep -q` change below, that load made
+  unrelated cases fail spuriously.
+- `grep -q` under `pipefail` (found while mutation-testing r12): an early
+  `grep -q` exit can SIGPIPE the writer of the pipe (`head` in
+  `has_override`, `printf` in the test helpers), so a match is reported as
+  a miss under load. `has_override` (both scripts), the `update-harness.sh`
+  hint checks and the test helpers now use `grep ... >/dev/null`.
 - Manual checks: Reviewed full `git diff` across root and `templates/`.
 
 ## Review Cycles
@@ -286,6 +312,7 @@ touched the same writers; the rebase keeps every protection from both sides:
 | 11 | Cross-review (Codex + Antigravity, r9, after the PR #25 rebase) | Both verified X1–X9 and A1–A11 except A7. X10 (Codex, low) / A12, A14 (Antigravity, med): a symlinked target spelled with a trailing slash (`target-link/`) passed the raw-argument `[ -L ]` refusal in both writers (lstat follows the link) while `pwd -P` landed in its destination. A13 (low): tests 21 and 17e rewrote only owner-writable files, so moving the final mode into `make_sibling_tmp` passed and X6 lost its regression test. A7 (regressed): the bootstrap EXIT-trap test used a `.gitignore` link that `check_managed_destinations` now refuses first, so it exercised nothing. Nit (Claude): the `update-harness.sh` pre-check comment said "before reading" while the run continues reading. | Fixed in the r9 commit. X10/A12/A14: `resolve_target_root` in `check-target-paths.sh`, shared by both writers, strips trailing `/` and `/.` (keeping `/`) and also checks the logical path `cd` resolves (`pwd -L`, folds `link/sub/..`); `CDPATH` cleared. Tests: `target-link/`, `//`, `/.`, `/./`, `/docs/..` for both writers. A13: case 21b rewrites existing `0444` `CLAUDE.md` and state file and requires them to stay `0444`. A7: the writers' `.gitignore` link branch (`replace_link_with_copy`) is kept as defence in depth against a link appearing after the pre-check (see the TOCTOU residual) and commented so; a `chmod` shim creates that race, so the bootstrap EXIT-trap test reaches the temp write again (marker from the TERM `mv` shim), and race controls for both writers check that the link becomes a regular `.gitignore` and its target is untouched. Nit: comment corrected to the actual behaviour. Each new test mutation-checked (Verification). |
 | 12 | Cross-review (Codex + Antigravity, r10) | Codex X11 (low): the new trailing-slash strip turned a target spelled `-/` or `-/.` into `-`, which `cd` (even after `--`) reads as `$OLDPWD`, so the writers could resolve the target to `$OLDPWD` instead of the directory named `-` (a bare `-` already did this before r9). The first Antigravity run ended incomplete (runtime missing while it was being reinstalled). | X11 fixed in the r10 commit: a normalised `-` is passed as `./-`; test 17c-2 covers `-`, `-/` and `-/.` for both writers with `OLDPWD` set to another repository that must stay unchanged. Confirmation run r10b (Codex: no new findings) marked X10/A12/A14 only partly fixed: under an inherited `set -P` (`SHELLOPTS=physical`) the plain `cd` resolved `link/sub/..` physically before `pwd -L`. Fixed with an explicit `cd -L` plus `SHELLOPTS=physical` cases for both writers. Antigravity r10 and r10b both ended incomplete: the installed runtime (1.5.18, a single `antigravity` executable) no longer has the `agy_acp_server.par` the runner's adapter discovers. |
 | 13 | Cross-review (Codex + Antigravity, r11, 8c0be3d..96a8fb8, runner with Antigravity 1.5 support) | Codex: pass, X1–X11 and A1–A14 verified. Antigravity (`gemini-4-neon`/high, complete): A15 (med) the resolving `cd` in `resolve_target_root` was still plain, so under `SHELLOPTS=physical` `box/sub/..` (box real, `box/sub` -> `target-link/docs`) passed the logical check as `box` but resolved physically to the linked repository; A16/A17 (low) `forgekit_root` is resolved with `cd` without clearing `CDPATH` in both writers. | A15 fixed in the r11 commit: the resolving `cd` is `cd -L` too; `box/sub/..` cases for both writers under `SHELLOPTS=physical`, mutation-checked. A16/A17 (low) left for a follow-up (only an exported `CDPATH` with a relative invocation; the writers then fail closed with `templates/ not found`). |
+| 14 | Full-PR review (Antigravity, single turn and default split, `m/run2`, `m/run3`; findings renumbered A18–A27) | A18 (run2 A1, med): `safe_copy_file` rewrote managed files in place with `cp`, so an existing read-only (`0444`/`0555`) docs file or helper script failed mid-run after earlier files were rewritten (partial update); an existing `0444` `.gitignore` failed the same way. A19 (run2 A2) = A22/A27 (run3 A1/A6, low): `check-harness-sync.sh` resolved its target with a bare `cd "$1" && pwd` (target `-` became `$OLDPWD`, `-P`/`-L` became `cd` options checking `$HOME`, an exported `CDPATH` corrupted `mode_target`). A20 (run2 A3, low): unquoted prefixes in `${src#$templates/}` and similar were glob patterns, so a path containing `[1]` nested the copies. A21 (run2 A4, low): the r11 A15 test asserted neither exit status nor the resolved path. A23/A24 (run3 A2/A3, low): the `.gitignore` race branch called `replace_link_with_copy` without re-checking `write_target_problem`, so an outside link appearing after the pre-check was copied into the repository. A25 (run3 A4, low): a stale bullet in this file. A26 (run3 A5, low): `check_alias_entrypoint` skipped `guard_outside_repo`, so `GEMINI.md` and `AGENTS.md` both resolving to the same outside file reported `GEMINI.md` as a deduplicated alias. | Fixed in the r12 commit. A18: `safe_copy_file` and the new `append_line_via_tmp` write through a sibling temp file and keep the replaced file's mode (case 21c, both writers, plus the new-file umask default). A19/A22/A27: `check-harness-sync.sh` uses `literal_dir_operand` (shared with `resolve_target_root`) and `CDPATH='' cd -L --` (case 17c-3). A20: prefixes quoted at every site (case 17c-4). A21: the A15 case asserts exit status and the resolved `box` path. A23/A24: `append_line_via_tmp` re-checks a link with `write_target_problem` and refuses one resolving outside (race case with an outside `0600` file). A25: bullet marked superseded. A26: `guard_outside_repo` before the realpath dedup (case 13a). Mutation-checked (Verification). |
 
 ## Branch & Merge Evidence
 
@@ -298,7 +325,7 @@ touched the same writers; the rebase keeps every protection from both sides:
 | Source | Finding | Disposition | Link/reason |
 | --- | --- | --- | --- |
 | Cycle 2 / C6 | Shared review contract and per-host review adapters are described but not implemented | `filed_followup` | `docs/review-skills/README.md` states the contract; adapters land in a follow-up change |
-| Cycle 5 / review notes | TOCTOU between the all-paths pre-check and the later writes (a path swapped for a link after the check) | `accepted` | Reviewer judgement: acceptable for a single-user local harness, not an adversarial boundary. Exclusive `mktemp` temp files remove the predictable-name case; the remaining window needs a concurrent writer in the target repo. The `.gitignore` step still replaces a link that appeared in that window instead of appending through it (r9). If that rename then fails, the link has already been removed and `.gitignore` is left missing, not written through. |
+| Cycle 5 / review notes | TOCTOU between the all-paths pre-check and the later writes (a path swapped for a link after the check) | `accepted` | Reviewer judgement: acceptable for a single-user local harness, not an adversarial boundary. Exclusive `mktemp` temp files remove the predictable-name case; the remaining window needs a concurrent writer in the target repo. The `.gitignore` step still replaces a link that appeared in that window instead of appending through it (r9), and since r12 re-checks it with `write_target_problem` first, refusing one that resolves outside the repository (a swap between that re-check and the read remains in the same accepted window). If that rename then fails, the link has already been removed and `.gitignore` is left missing, not written through. |
 | Cycle 6 / X6 review | `scripts/worktree-add.sh` does not check whether `$CTX_DIR` (`<worktree>/.context`) is a link resolving outside the repository before seeding state into it (pre-existing, not introduced by this change) | `fixed` | Fixed in cycle 7 (r5 A2): inline `seed_target_problem` guard in `worktree-add.sh`; test "worktree-add refuses a .context link resolving outside" |
 | Cycle 10 / X9 (Codex r8) | A repository root path containing a newline splits the newline-delimited managed-path set in `update-harness.sh`, so a managed GEMINI.md hop can pass the pre-check (`--force` then rewrites before final validation fails) | `accepted` | Reviewer recommended accepting: newline-containing repository roots are not a supported layout for this local harness; the final sync check still fails the run. After the PR #25 rebase the managed hop is itself a symlink on a managed path and is refused by `check_managed_destinations`, which does not split on newlines. |
 

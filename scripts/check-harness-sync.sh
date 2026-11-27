@@ -110,7 +110,14 @@ case "$1" in
       echo "error: target is not a directory: $1" >&2
       exit 2
     fi
-    mode_target="$(cd "$1" && pwd)"
+    # Same literal resolution as the writers' resolve_target_root: CDPATH
+    # cleared, `--`, a bare "-" passed as "./-" (never $OLDPWD), and an
+    # explicit -L so an inherited `set -P` does not change the result. A
+    # target named "-P" or "-L" is a directory, not a cd option.
+    mode_target="$(CDPATH='' cd -L -- "$(literal_dir_operand "$1")" && pwd -L)" || {
+      echo "error: target cannot be resolved: $1" >&2
+      exit 2
+    }
     ;;
 esac
 
@@ -150,8 +157,10 @@ has_override() {
   # Require a comment prefix, or a JSON key for JSON files, so that prose
   # documenting the marker (e.g. BOOTSTRAP.md, a future runbook template)
   # cannot accidentally bypass the check by mentioning the literal string.
+  # grep without -q reads all input: under pipefail an early grep -q exit
+  # could SIGPIPE head and turn a match into a miss (seen under load).
   [ -f "$f" ] && head -n 5 "$f" 2>/dev/null \
-    | grep -qE '^[[:space:]]*((<!--|#|//)[[:space:]]*forgekit-override:|"forgekit-override"[[:space:]]*:)'
+    | grep -E '^[[:space:]]*((<!--|#|//)[[:space:]]*forgekit-override:|"forgekit-override"[[:space:]]*:)' >/dev/null
 }
 
 # Diff that ignores the first line (used for entrypoints where only the
@@ -239,6 +248,9 @@ check_template_entrypoint() {
 check_alias_entrypoint() {
   local root="$1" name="$2" alias_of="$3"
   local f="$root/$name" a="$root/$alias_of"
+  # Before the realpath dedup: an alias and its target that both resolve to
+  # the same outside file are a LINK, not a deduplicated alias.
+  guard_outside_repo "$f" "$name" && return 0
   if [ -L "$f" ]; then
     if [ -e "$f" ] && [ -e "$a" ] && [ "$f" -ef "$a" ]; then
       echo "ok:    $name (symlink to $alias_of — deduplicated by realpath)"
@@ -306,7 +318,7 @@ check_no_stale_in_dir() {
   guard_outside_repo "$target_dir" "$label_prefix" && return 0
   [ -d "$target_dir" ] || return 0
   while IFS= read -r target_file; do
-    rel="${target_file#$target_dir/}"
+    rel="${target_file#"$target_dir"/}"
     if [ -f "$template_dir/$rel" ]; then
       continue
     fi
@@ -341,7 +353,7 @@ else
   for skill_dir in design-skills review-skills; do
     if [ -d "$templates/docs/$skill_dir" ]; then
       while IFS= read -r src; do
-        rel="${src#$templates/}"
+        rel="${src#"$templates"/}"
         check_exact "$mode_target/$rel" "$src" "$rel"
       done < <(find "$templates/docs/$skill_dir" -type f -name '*.md')
     fi
@@ -365,13 +377,13 @@ else
   # class this script exists to prevent. Also check for *_TEMPLATE.md
   # files in the target that templates no longer ships (renames/removes).
   while IFS= read -r src; do
-    rel="${src#$templates/}"
+    rel="${src#"$templates"/}"
     check_exact "$mode_target/$rel" "$src" "$rel"
   done < <(find "$templates/docs" -type f -name '*_TEMPLATE.md')
 
   if ! guard_outside_repo "$mode_target/docs" "docs"; then
     while IFS= read -r target_file; do
-      rel="${target_file#$mode_target/}"
+      rel="${target_file#"$mode_target"/}"
       if [ -f "$templates/$rel" ]; then
         continue
       fi
