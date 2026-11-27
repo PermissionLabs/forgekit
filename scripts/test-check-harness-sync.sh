@@ -955,6 +955,7 @@ if command -v script >/dev/null 2>&1 && in_pty true >/dev/null 2>&1; then
   LABEL="update-harness --force on a terminal replaces read-only files without a prompt"
   CASES=$((CASES + 1))
   capture in_pty bash "$ROOT/scripts/update-harness.sh" "$repo" --force
+  expect_rc 0  # script(1) returns the writer's exit status (macOS; -e on util-linux)
   expect_lacks "not overwritten"
   same_entry_body "$repo/CLAUDE.md" "$ROOT/templates/CLAUDE.md" || fail "CLAUDE.md body not updated"
   cmp -s "$repo/scripts/worktree-add.sh" "$ROOT/scripts/worktree-add.sh" || fail "worktree-add.sh not updated"
