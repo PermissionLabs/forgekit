@@ -460,15 +460,19 @@ ctest("cli layout happy path: one turn, argv, per-turn generation model, read_fi
   assert.equal(ev.timeoutMs, 1_200_000);
   assert.deepEqual(ev.argv.slice(1, 6), ["acp", "--gemini-dir", ev.isolation.geminiHome, "--app-data-dir", "antigravity-acp"]);
   assert.deepEqual(ev.attempts.map((a) => a.generationModels), [["gemini-4-neon/gemini-4-neon-high"]]);
-  assert.deepEqual((await goCli2({ steps: true })).attempts.map((a) => a.generationModels), [["gemini-4-neon/gemini-4-neon-high"], ["gemini-4-neon/gemini-4-neon-high"]]);
+  const split = await goCli2({ steps: true });
+  assert.equal(split.status, "complete", split.incompleteReasons.join());
+  assert.deepEqual(split.attempts.map((a) => a.generationModels), [["gemini-4-neon/gemini-4-neon-high"], ["gemini-4-neon/gemini-4-neon-high"]]);
   assert.equal(ev.reported.model, "gemini-4-neon");
   assert.deepEqual(ev.toolAudit.nonViewFileCalls, []);
   assert.deepEqual(ev.toolAudit.callsWithoutAuditablePath, []);
   assert.equal(ev.extra.sessionCleanup.ownedBy, "session database workspace");
   assert.deepEqual(ev.extra.sessionCleanup.removed.sort(), ["11111111-1111-4111-8111-111111111111.db", "annotations/11111111-1111-4111-8111-111111111111.pbtxt"]);
-  assert.equal(new Set(ev.attempts.map(a => a.sessionId)).size, 2);
-  assert.deepEqual(ev.extra.sessionCleanups.map(s => s.sessionId), ev.attempts.map(a => a.sessionId));
-  assert.ok(ev.extra.sessionCleanups.every(s => s.removed.includes(s.sessionId + ".db")));
+  assert.equal(new Set(split.attempts.map(a => a.sessionId)).size, 2);
+  for (const run of [ev, split]) {
+    assert.deepEqual(run.extra.sessionCleanups.map(s => s.sessionId), run.attempts.map(a => a.sessionId));
+    assert.ok(run.extra.sessionCleanups.every(s => s.removed.includes(s.sessionId + ".db")));
+  }
   assert.equal(ev.extra.sessionMode, "default");
   assert.equal(fs.existsSync(ev.isolation.geminiHome), false);
 });
