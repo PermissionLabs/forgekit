@@ -79,12 +79,17 @@ Close three follow-ups recorded on `main` at cc98deb:
     attempts, no argv. Fails with the budget ignored or the pre-spawn check removed (the server
     starts).
   - `run.test.mjs` "policy: max_prompt_text_bytes …".
+- Review r1 fixes, each mutation-checked: redact without whole backslash runs fails the nested cases (X1/A1);
+  `ABS_WORKTREE` with a plain `cd` fails the relative `CDPATH=.` case (X2; since the A5 fix a relative path is
+  made absolute first, so this case now guards the whole path); dropping the `REPO_ROOT` join fails the
+  run-from-elsewhere case (A5); the old pre-check reserve fails the property test (X3/A3); a need without the
+  marker fails the A2 assertion; disabling the no-run guard fails both over-budget tests (A4).
 
 ## Review Cycles
 
 | Cycle | Type | Findings | Resolution |
 | --- | --- | --- | --- |
-| 1 | Cross-review (Codex + Antigravity, full diff `origin/main..HEAD`) | pending | pending |
+| 1 | Cross-review (Codex + Antigravity, full diff `origin/main..c195161`, correctness + security, high) | Codex (`gpt-6.1-sol`/high, complete, 168 s): X1 (low) nested JSON doubles the backslash of `\u0026`, so the query after it survived redaction; X2 (low) `worktree-add.sh` still resolved a relative worktree path with a plain `cd` (`ABS_WORKTREE`); X3 (low) the Antigravity pre-check used only the all-priors turn rule, but the last turn can say "none left" (longer for a short prior list), and the id-start allowance was not digit-safe. Antigravity (`gemini-4-neon`/high, complete, 2 file chunks, 1045 s, every generation `gemini-4-neon-high`; turn blocks 10.8 KB, no checklist cut): A1 (med) = X1 plus a prefix with escaped slashes (`https:\/\/accounts.google.com\/`) never matched; A2 (low) `prompt_over_budget` named a need that left out the truncation marker; A3 (low) = X3; A4 (low) the run.mjs short-circuit still ran the reported-model/effort check (spurious reasons, `effortCheck` "verified"); A5 (med) = X2 plus a relative worktree path resolved against the caller's directory while `git -C <root> worktree add` resolves it against the root; A6 (low) case 17c-5 ran `worktree-add.sh`/`jq` without the `command -v jq` guard. | Fixed in 9b88869 (X1–X3) and the r1b commit (A2, A4–A6). X1/A1: `\\+u[0-9A-Fa-f]{4}` and `\\+\/` consume whole backslash runs at any nesting depth, and the prefix accepts escaped slashes; redact test covers two- and three-level nesting with every slash escaped. X2/A5: `CDPATH='' cd --` for `ABS_WORKTREE`, and a relative worktree path is made absolute against `REPO_ROOT` first (also removes the `-`/`-P` operand cases); 17c-5 adds a relative path under `CDPATH=.` and a run from another directory. X3/A3: `preflightReserve` reserves the longest rule over last/not last, all priors/"none left", an id start grown by 4 digits, plus 8 x 4 bytes for the id start inside the core; a property test checks every combination. A2: the need includes `checklist_truncation_marker`. A4: when no host ran (run.mjs refused, or the Antigravity pre-check refused with no attempts) the budget reason is the only reason, `matchesPinned` is false and `effortCheck` says "not run". A6: the worktree-add cases sit under the `jq` guard. Each mutation-checked except A6 (not run without `jq`). |
 
 ## Branch & Merge Evidence
 

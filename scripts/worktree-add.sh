@@ -28,6 +28,14 @@ fi
 
 REPO_ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 WORKTREE_PATH="$1"
+# `git -C "$REPO_ROOT" worktree add` resolves a relative path against
+# REPO_ROOT, so the worktree is located the same way here (A5, follow-ups r1):
+# from another working directory a relative path no longer names a different
+# place, and "-" or "-P" can never reach cd as $OLDPWD or an option.
+case "$WORKTREE_PATH" in
+  /*) ;;
+  *) WORKTREE_PATH="$REPO_ROOT/$WORKTREE_PATH" ;;
+esac
 
 default_branch() {
   # $1 = repo dir. origin 의 default 브랜치명(예: main)을 출력. 못 구하면 main 폴백.

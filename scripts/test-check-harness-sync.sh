@@ -656,28 +656,40 @@ capture bash -c 'cd "$1" && CDPATH=. exec bash scripts/check-harness-sync.sh "$2
 expect_rc 0
 expect_lacks "templates/ not found"
 expect_has "Downstream harness sync check: $cdpath_repo"
-git -C "$cdpath_repo" add -A
-git -C "$cdpath_repo" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false commit -qm init
-LABEL="worktree-add ignores an exported CDPATH (relative invocation)"
-CASES=$((CASES + 1))
-capture bash -c 'cd "$1" && CDPATH=. exec bash scripts/worktree-add.sh "$2" -b cdpath-task HEAD' _ \
-  "$cdpath_repo" "$TMP_DIR/cdpath-wt"
-expect_rc 0
-[ "$(jq -r .branch "$TMP_DIR/cdpath-wt/.context/workflow-state.json")" = "cdpath-task" ] \
-  || fail "worktree not created or state not seeded"
-# X2 (r1 of the follow-ups review): a relative worktree path is resolved with
-# CDPATH cleared too (ABS_WORKTREE); a two-line path would seed state into a
-# directory whose name contains a newline.
-LABEL="worktree-add ignores an exported CDPATH (relative worktree path)"
-CASES=$((CASES + 1))
-capture bash -c 'cd "$1" && CDPATH=. exec bash scripts/worktree-add.sh cdpath-rel-wt -b cdpath-rel HEAD' _ \
-  "$cdpath_repo"
-expect_rc 0
-[ "$(jq -r .branch "$cdpath_repo/cdpath-rel-wt/.context/workflow-state.json")" = "cdpath-rel" ] \
-  || fail "relative worktree not seeded"
-if find "$cdpath_repo" "$TMP_DIR" -maxdepth 2 -name "*
+if command -v jq >/dev/null 2>&1; then
+  git -C "$cdpath_repo" add -A
+  git -C "$cdpath_repo" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false commit -qm init
+  LABEL="worktree-add ignores an exported CDPATH (relative invocation)"
+  CASES=$((CASES + 1))
+  capture bash -c 'cd "$1" && CDPATH=. exec bash scripts/worktree-add.sh "$2" -b cdpath-task HEAD' _ \
+    "$cdpath_repo" "$TMP_DIR/cdpath-wt"
+  expect_rc 0
+  [ "$(jq -r .branch "$TMP_DIR/cdpath-wt/.context/workflow-state.json")" = "cdpath-task" ] \
+    || fail "worktree not created or state not seeded"
+  # X2 (r1 of the follow-ups review): a relative worktree path is resolved with
+  # CDPATH cleared too (ABS_WORKTREE); a two-line path would seed state into a
+  # directory whose name contains a newline.
+  LABEL="worktree-add ignores an exported CDPATH (relative worktree path)"
+  CASES=$((CASES + 1))
+  capture bash -c 'cd "$1" && CDPATH=. exec bash scripts/worktree-add.sh cdpath-rel-wt -b cdpath-rel HEAD' _ \
+    "$cdpath_repo"
+  expect_rc 0
+  [ "$(jq -r .branch "$cdpath_repo/cdpath-rel-wt/.context/workflow-state.json")" = "cdpath-rel" ] \
+    || fail "relative worktree not seeded"
+  if find "$cdpath_repo" "$TMP_DIR" -maxdepth 2 -name "*
 *" | grep . >/dev/null; then
-  fail "a path containing a newline was created"
+    fail "a path containing a newline was created"
+  fi
+  # A5 (follow-ups r1): a relative worktree path is relative to the repository
+  # root (as for `git -C <root> worktree add`), also when run from elsewhere.
+  LABEL="worktree-add resolves a relative worktree path against the repository root"
+  CASES=$((CASES + 1))
+  capture bash -c 'cd "$1" && exec bash "$2/scripts/worktree-add.sh" rel-from-elsewhere -b cdpath-else HEAD' _ \
+    "$TMP_DIR" "$cdpath_repo"
+  expect_rc 0
+  [ "$(jq -r .branch "$cdpath_repo/rel-from-elsewhere/.context/workflow-state.json")" = "cdpath-else" ] \
+    || fail "worktree not seeded at the repository-relative path"
+  [ ! -e "$TMP_DIR/rel-from-elsewhere" ] || fail "a worktree path was created relative to the caller's directory"
 fi
 
 # 17d. PR #25: a managed destination that exists but is not a regular file

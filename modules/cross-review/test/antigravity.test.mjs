@@ -641,6 +641,10 @@ ctest("r8: earlier findings + dispositions that alone exceed the budget make the
   withheld(ev, /^prompt_over_budget: the parts that are never cut need \d+ bytes \(.*earlier_findings \d+.*\) of max_prompt_text_bytes 8192/m);
   assert.deepEqual(ev.attempts, []);
   assert.equal(ev.argv, null);
+  // A4: no host ran, so the budget reason is the only one.
+  assert.deepEqual(ev.incompleteReasons.filter((r) => !r.startsWith("prompt_over_budget")), []);
+  assert.equal(ev.matchesPinned, false);
+  assert.match(ev.effortCheck, /^not run/);
   assert.ok(ev.prompt.budget.overBudget.sizes.earlier_findings > 20_000);
 });
 

@@ -560,6 +560,13 @@ test("buildPrompt: prior blocks come before the checklist; over the budget only 
   assert.equal(meta.bytes, Buffer.byteLength(cut));
   // Within the budget: unchanged.
   assert.equal(buildPrompt(input, { prefix: "C", idStart: 2, priorIds: ["X1"], maxBytes: 1_000_000 }), full);
+  // A2: the never-cut parts fit but not with the truncation marker: the error counts the marker in what is needed.
+  const tight = budgetInput("y".repeat(500));
+  const fixedOnly = Buffer.byteLength(buildPrompt({ ...tight, checklist: [] }, { prefix: "C", idStart: 2, priorIds: ["X1"] }));
+  assert.throws(() => buildPrompt(tight, { prefix: "C", idStart: 2, priorIds: ["X1"], maxBytes: fixedOnly + 100 }), (e) => {
+    const need = Number(e.message.match(/need (\d+) bytes/)[1]);
+    return e instanceof PromptBudgetError && need > fixedOnly + 100 && e.detail.fixedBytes === need && e.detail.sizes.checklist_truncation_marker > 100 && /checklist_truncation_marker \d+/.test(e.message);
+  });
   // The parts that are never cut do not fit: PromptBudgetError naming the sizes, never a silent drop.
   assert.throws(() => buildPrompt(budgetInput("x", "c".repeat(9000)), { prefix: "C", idStart: 2, priorIds: ["X1"], maxBytes: 8192 }),
     (e) => e instanceof PromptBudgetError && /^prompt_over_budget: .*earlier_findings \d+.*max_prompt_text_bytes 8192/.test(e.message) && e.detail.sizes.earlier_findings > 9000);
@@ -587,6 +594,10 @@ test("max_prompt_text_bytes applies to the Claude/Codex prompt too: checklist cu
   fs.writeFileSync(prior, JSON.stringify([{ id: "X1", sev: "med", loc: "src/a.ts:1", claim: "c".repeat(6000), evidence: "e", check: "k" }]));
   const over = await runReview(opts("claude", "out-budget2", { prior, dispositions: disp, checklist: [list] }), p, policyPath);
   assertWithheld(over, /^prompt_over_budget:/m);
+  // A4: no host ran, so the budget reason is the only one and nothing claims a verified effort or a pinned match.
+  assert.equal(over.incompleteReasons.length, 1, over.incompleteReasons.join("\n"));
+  assert.match(over.effortCheck, /^not run/);
+  assert.equal(over.matchesPinned, false);
   assert.deepEqual(over.attempts, []);
   assert.ok(over.prompt.budget.overBudget.sizes.earlier_findings > 6000);
 });

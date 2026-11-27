@@ -131,7 +131,10 @@ async function reviewWithInput({ opts, adapter, pin, prefix, policyPath, prior, 
   if (!snapshotUnchanged) reasons.push("snapshot_modified");
   removeSnapshot(input.snapshot);
   const effortReported = res.effortReported !== false;
-  reasons.push(...checkReported(pin, res.reported, { effortReported }));
+  // A4 (follow-ups r1): with the prompt over budget no host ran (run.mjs refused, or a per-turn adapter refused
+  // before starting it), so there is no reported model or effort to check; the budget reason stays the only reason.
+  const overBudgetNoRun = Boolean(budgetError || (res.promptBudget?.overBudget && !(res.attempts ?? []).length));
+  if (!overBudgetNoRun) reasons.push(...checkReported(pin, res.reported, { effortReported }));
   if (res.review) {
     const final = validateReview(res.review, { dimensions, prefix, idStart, scope: input.scopeLines, priorIds });
     if (final.length) reasons.push(...final.map((e) => `merged_review_invalid:${e}`));
@@ -150,9 +153,9 @@ async function reviewWithInput({ opts, adapter, pin, prefix, policyPath, prior, 
     reported: res.reported ?? null,
     // A84: false as well when an adapter's own per-turn/per-message model check failed (generation, proxy, usage).
     // (r8 delta) also the per-attempt audit reasons, which a timeout or abandoned-pipe branch may not have propagated.
-    matchesPinned: checkReported(pin, res.reported, { effortReported }).length === 0
+    matchesPinned: !overBudgetNoRun && checkReported(pin, res.reported, { effortReported }).length === 0
       && ![...uniq, ...(res.attempts ?? []).flatMap((a) => (Array.isArray(a?.auditReasons) ? a.auditReasons : []))].some((r) => MODEL_REASON.test(String(r))),
-    effortCheck: effortReported ? "verified against host report" : "unreported (host does not report effort; pinned value only)",
+    effortCheck: overBudgetNoRun ? "not run (prompt over budget; no host started)" : effortReported ? "verified against host report" : "unreported (host does not report effort; pinned value only)",
     prompt: { sha256: sha256(prompt), chars: prompt.length, file: "prompt.txt", jsonSchemaSha256: sha256(JSON.stringify(jsonSchema)), budget: promptBudget },
     timeoutMs: res.timeoutMs ?? pin.timeoutMs,
     startedAt, finishedAt: new Date().toISOString(), durationMs: Date.now() - t0,

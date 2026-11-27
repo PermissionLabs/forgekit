@@ -233,9 +233,11 @@ export function buildPrompt(input, { prefix, idStart, dimensions = input.dimensi
   const overhead = input.checklist.length ? 4 + utf8Bytes(head(checklistTotal)) + utf8Bytes(tailMark) : 0;
   const room = maxBytes - fixed - overhead;
   if (!input.checklist.length || room < 0) {
-    const sizes = { rules_and_schema: utf8Bytes(rules.join("\n")), brief: utf8Bytes(brief.join("\n")), earlier_findings: utf8Bytes(priorFindings.join("\n")), author_dispositions: utf8Bytes(dispositions.join("\n")), diff: utf8Bytes(diff.join("\n")), reserved: reserveBytes };
+    // A2 (follow-ups r1): the truncation header and end marker are part of what must fit, so they are named too.
+    const sizes = { rules_and_schema: utf8Bytes(rules.join("\n")), brief: utf8Bytes(brief.join("\n")), earlier_findings: utf8Bytes(priorFindings.join("\n")), author_dispositions: utf8Bytes(dispositions.join("\n")), diff: utf8Bytes(diff.join("\n")), reserved: reserveBytes, checklist_truncation_marker: overhead };
+    const need = fixed + overhead;
     const list = Object.entries(sizes).filter(([, v]) => v).map(([k, v]) => `${k} ${v}`).join(", ");
-    throw new PromptBudgetError(`prompt_over_budget: the parts that are never cut need ${fixed} bytes (${list}) of max_prompt_text_bytes ${maxBytes}; only the checklist can be truncated`, { maxBytes, fixedBytes: fixed, sizes });
+    throw new PromptBudgetError(`prompt_over_budget: the parts that are never cut need ${need} bytes (${list}) of max_prompt_text_bytes ${maxBytes}; only the checklist can be truncated`, { maxBytes, fixedBytes: need, sizes });
   }
   const shownText = utf8Prefix(checklistBody, room);
   const shown = utf8Bytes(shownText);
