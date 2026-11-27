@@ -480,6 +480,19 @@ test("matchesPinned also reads per-attempt audit reasons a pipe/timeout branch d
   assert.equal(ev.matchesPinned, false);
 });
 
+test("checklist: an outside path with link/.. reads the checked lexical file, never through the link (A88, r9)", () => {
+  const outside = fs.mkdtempSync(path.join(tmp, "outside-a88-"));
+  fs.mkdirSync(path.join(outside, "docs"));
+  fs.writeFileSync(path.join(outside, "docs", "check.md"), "LEXICAL\n");
+  fs.symlinkSync(path.join(repo, "docs"), path.join(outside, "link")); // link/.. is <repo> for the kernel
+  const c = readChecklist(repo, rev, path.join(outside, "link") + "/../docs/check.md");
+  assert.equal(c.source, "file");
+  assert.equal(c.path, path.join(outside, "docs", "check.md"));
+  assert.equal(c.text, "LEXICAL\n");
+  fs.rmSync(path.join(outside, "docs"), { recursive: true });
+  assert.throws(() => readChecklist(repo, rev, path.join(outside, "link") + "/../docs/check.md"), /ENOENT/);
+});
+
 test("checklist: an absolute path through an in-repo directory symlink is never read from disk (A86, r8 delta)", () => {
   const outside = fs.mkdtempSync(path.join(tmp, "outside-cl-"));
   fs.writeFileSync(path.join(outside, "check.md"), "OUTSIDE\n");

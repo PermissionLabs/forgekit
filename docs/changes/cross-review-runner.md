@@ -416,6 +416,7 @@ the r7 docs and the two r8 commits remain. Conflicts and how they were joined:
 | 11 (r7) | Delta review of the single-turn change (1b048ec..5e4bf66, correctness + security; prior X26–X30, A72–A81): Codex complete (`gpt-6.1-sol`/high, 223 s, 128K tokens), verdict fix with 0 findings (only A77 not verified: `lib/agy-session-db.mjs` was outside the snapshot); Antigravity complete (`gemini-4-neon`/high, ONE turn of 291 s, 1200 s budget, 555K tokens), verdict pass, 0 findings, every prior verified | No change needed. A77 stays fixed (r6 commit; the decoder file did not change in r7) |
 | 12 (r8) | FULL-PR review of `git diff 2a81372 4ac78e9` (all 34 files, correctness + security; no prior, new ids from X31/A82; `plan` skipped by human decision: always run Antigravity): Codex complete (`gpt-6.1-sol`/high, 410 s, 239K tokens), verdict block, X31–X38 (3 high, 5 med); Antigravity complete (`gemini-4-neon`/high, 2 scope chunks of 34 files / 511 KB diff, 668 s of a 1200 s budget, every `gen_metadata` row `gemini-4-neon-high`), verdict block, A82–A86 (1 high, 4 med); overlap X34 = A83 | Every finding real (severity adjusted below) and fixed with a regression test in the r8 commit; the delta rounds r1–r7 had missed all of them |
 | 13 (r8 delta) | Confirmation of 4ac78e9..c764be6 (13 files + 4 context, prior X31–X38/A82–A86 all `fixed`): Codex complete (229 s, 132K tokens), verdict fix, 0 new findings, not verified X35, A84, A86 (partial fixes); Antigravity complete (ONE turn, 385 s, 608K tokens, env allowlist in effect, `pipesClosed: true`), verdict fix, 1 low A87, not verified A86 | The three partial fixes and A87 completed in the r8 follow-up commit with tests (below); per the round limit not re-reviewed |
+| 14 (r9) | Confirmation after the rebase onto main: `git diff 9fecd93 de6275e` (13 files + 6 context, correctness + security, prior X31–X38/A82–A87 all `fixed`; `plan` skipped by human decision): Codex complete (`gpt-6.1-sol`/high, 192 s, 155K tokens), verdict pass, 0 findings, 14/14 priors verified; Antigravity complete (`gemini-4-neon`/high, ONE turn, 363 s, 798K tokens, every `gen_metadata` row `gemini-4-neon-high`, `pipesClosed: true`, session cleaned), verdict fix, 1 low A88, 14/14 priors verified | A88 (low, real) fixed: `readChecklist` reads the same `path.resolve` path it checked and records (the X32 pattern), test fails without it; not re-reviewed (low) |
 
 ### r8 dispositions
 
@@ -557,7 +558,7 @@ before the OTi pointer change; the forced rejection was a test condition.
 
 - Working branch: `agent/cross-review-runner` (based on `agent/antigravity-support` @ f9aa6ff, not yet merged)
 - Target branch: `main` (after `agent/antigravity-support`)
-- PR URL: https://github.com/PermissionLabs/forgekit/pull/30. Status: r8 full-PR findings fixed; the r8 delta confirmation verified all but X35/A84/A86, which the follow-up commit completed (not re-reviewed)
+- PR URL: https://github.com/PermissionLabs/forgekit/pull/30. Status: rebased onto main 9fecd93; the r9 confirmation verified every r8 fix (X31–X38, A82–A87) on both hosts; its one low (A88) fixed after the review
 
 ## Residuals
 

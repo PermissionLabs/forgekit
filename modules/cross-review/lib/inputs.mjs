@@ -102,8 +102,10 @@ export function readChecklist(repo, rev, p) {
     const buf = gitBlob(repo, rev, r);
     return { path: r, source: `git:${rev}`, text: buf.toString("utf8"), sha256: sha256(buf) };
   }
-  const buf = fs.readFileSync(s);
-  return { path: path.resolve(s), source: "file", text: buf.toString("utf8"), sha256: sha256(buf) };
+  // (r9 A88) read the lexically resolved path that was checked and is recorded (never re-resolve `link/..`).
+  const file = path.resolve(s);
+  const buf = fs.readFileSync(file);
+  return { path: file, source: "file", text: buf.toString("utf8"), sha256: sha256(buf) };
 }
 
 export function removeSnapshot(dir) {
