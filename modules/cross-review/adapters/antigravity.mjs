@@ -370,8 +370,11 @@ export async function run(ctx) {
     let m;
     // X35: a line that is not JSON-RPC could hide a tool call from the audit; it is logged and makes the run incomplete.
     try { m = JSON.parse(line); } catch { stdoutUnparseable++; msgLines.push(redact(line.slice(0, 500))); return; }
-    // (r8 delta) only JSON-RPC 2.0 objects with an id or a method count; any other JSON is unauditable too.
-    if (!m || typeof m !== "object" || Array.isArray(m) || m.jsonrpc !== "2.0" || (m.id === undefined && typeof m.method !== "string")) { stdoutUnparseable++; msgLines.push(redact(line.slice(0, 500))); return; }
+    // (r8 delta, A1/A3) only well-formed JSON-RPC 2.0 messages count: a request or notification with a non-empty string
+    // method, or a response (id, no method) with result or error. Any other JSON is unauditable too.
+    const wellFormed = m && typeof m === "object" && !Array.isArray(m) && m.jsonrpc === "2.0"
+      && (m.method === undefined ? m.id !== undefined && ("result" in m || "error" in m) : typeof m.method === "string" && m.method.length > 0);
+    if (!wellFormed) { stdoutUnparseable++; msgLines.push(redact(line.slice(0, 500))); return; }
     logMsg("in", m);
     if (m.id !== undefined && m.method === undefined) {
       const p = pending.get(m.id);

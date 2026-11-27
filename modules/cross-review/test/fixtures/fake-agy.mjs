@@ -19,7 +19,8 @@
 //   later update renames to update_steps), garbage: {turn: true} (a non-JSON stdout line before the reply, X35),
 //   escapeStdio: true (on stdin end, a detached descendant outside the group keeps stdout/stderr open for 6 s, X36),
 //   nonRpc: {turn: true} (a JSON line that is not a JSON-RPC 2.0 message), trailingStdout: "text" (written without a
-//   newline at stdin end, right before exit; A87; `__SID__` becomes the current session id).
+//   newline at stdin end, right before exit; A87; `__SID__` becomes the current session id), rawStdout: {turn: "line"}
+//   (one raw stdout line before the reply, e.g. a JSON-RPC object with an empty method, A1/A3).
 // Per-turn stderr is written (and flushed) before any stdout for that turn, so the parent always sees it first.
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -136,6 +137,7 @@ function answer(t, text, id) {
   if (cfg.updateTitle?.[t]) notify({ sessionUpdate: "tool_call_update", toolCallId: `t${t}`, title: cfg.updateTitle[t], status: "completed" });
   if (cfg.garbage?.[t]) process.stdout.write("garbled {\"jsonrpc\":\"2.0\",\"method\":\"session/update\"\n");
   if (cfg.nonRpc?.[t]) process.stdout.write(JSON.stringify({ garbledToolNotification: true }) + "\n");
+  if (cfg.rawStdout?.[t]) process.stdout.write(cfg.rawStdout[t] + "\n");
   const body = has(cfg.invalid, t) ? "not json" : JSON.stringify(review(text));
   notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: body } });
   if (has(cfg.permission, t)) send({ jsonrpc: "2.0", id: `perm${t}`, method: "session/request_permission", params: { sessionId: SID, toolCall: { title: "run_command", kind: "execute" }, options: [{ optionId: "allow", kind: "allow_once" }, { optionId: "reject", kind: "reject_once" }] } });

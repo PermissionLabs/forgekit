@@ -18,7 +18,7 @@ let tmp, repo, rev, policyPath, diffPath, briefPath, fakeCodex;
 const git = (...a) => execFileSync("git", ["-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "-C", repo, ...a], { encoding: "utf8" }).trim();
 const DIMS = ["correctness", "tests"];
 const review = (over = {}) => JSON.stringify({ verdict: "fix", coverage: { correctness: "checked", tests: "n/a:no tests in scope" }, findings: [{ id: "C1", sev: "med", loc: "src/a.ts:2", claim: "c", evidence: "e", check: "k" }], limits: [], ...over });
-const FAKE_KEYS = ["FAKE_NO_EFFORT_ON_RETRY", "FAKE_TIMEOUT_AFTER_OUTPUT", "FAKE_REVIEW", "FAKE_OUTPUTS", "FAKE_READ", "FAKE_WRITE", "FAKE_INIT_MODEL", "FAKE_USAGE_MODEL", "FAKE_TOOLS", "FAKE_REPORTED_MODEL", "FAKE_SANDBOX", "FAKE_COMMAND", "FAKE_ARGV_OUT", "FAKE_ENV_OUT", "FAKE_ESCAPE", "FAKE_NO_O", "FAKE_EMPTY_O", "FAKE_STDOUT", "FAKE_NO_EFFORT", "FAKE_PROMPT_ECHO", "FAKE_COMMAND_OUTPUT", "FAKE_APPROVAL", "FAKE_SANDBOX_NOOP", "FAKE_ASSISTANT_MODEL"];
+const FAKE_KEYS = ["FAKE_NO_EFFORT_ON_RETRY", "FAKE_TIMEOUT_AFTER_OUTPUT", "FAKE_REVIEW", "FAKE_OUTPUTS", "FAKE_READ", "FAKE_WRITE", "FAKE_INIT_MODEL", "FAKE_USAGE_MODEL", "FAKE_TOOLS", "FAKE_REPORTED_MODEL", "FAKE_SANDBOX", "FAKE_COMMAND", "FAKE_ARGV_OUT", "FAKE_ENV_OUT", "FAKE_ESCAPE", "FAKE_NO_O", "FAKE_EMPTY_O", "FAKE_STDOUT", "FAKE_NO_EFFORT", "FAKE_PROMPT_ECHO", "FAKE_COMMAND_OUTPUT", "FAKE_APPROVAL", "FAKE_SANDBOX_NOOP", "FAKE_ASSISTANT_MODEL", "FAKE_ASSISTANT_MODEL_ON_RETRY"];
 const setFake = (env) => { for (const k of FAKE_KEYS) delete process.env[k]; Object.assign(process.env, env); };
 
 before(() => {
@@ -436,6 +436,23 @@ test("claude: an assistant message from another model withholds the review; matc
   assert.equal(ok.status, "complete", ok.incompleteReasons.join());
   assert.equal(ok.matchesPinned, true);
   assert.deepEqual(ok.reported.assistantModels, ["claude-opus-5-5"]);
+});
+
+test("claude: an assistant event without a model withholds the review; matchesPinned is false (X1)", async () => {
+  setFake({ FAKE_REVIEW: review(), FAKE_ASSISTANT_MODEL: "", FAKE_USAGE_MODEL: "claude-opus-5-5,claude-sonnet-5-5" });
+  const ev = await runReview(opts("claude", "out-x1-nomodel"), policy(), policyPath);
+  assertWithheld(ev, /assistant_model_unconfirmed:1/);
+  assert.equal(ev.matchesPinned, false);
+});
+
+test("claude: evidence.reported is the final attempt's report, so a retry's mismatch is visible (A2/A4)", async () => {
+  setFake({ FAKE_OUTPUTS: `not json\n---\n${review()}`, FAKE_ASSISTANT_MODEL_ON_RETRY: "claude-sonnet-5-5" });
+  const ev = await runReview(opts("claude", "out-a2-retry"), policy(), policyPath);
+  assertWithheld(ev, /assistant_model_mismatch:claude-sonnet-5-5/);
+  assert.equal(ev.attempts.length, 2);
+  assert.deepEqual(ev.attempts[0].reported.assistantModels, ["claude-opus-5-5"]);
+  assert.deepEqual(ev.reported.assistantModels, ["claude-sonnet-5-5"]);
+  assert.equal(ev.matchesPinned, false);
 });
 
 test("run refuses an output directory holding a symlink before writing anything (X33)", async () => {

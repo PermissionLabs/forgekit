@@ -54,7 +54,7 @@ test("claude stream audit: extra tools, MCP, outside reads and wrong model make 
   const pin = hostPin(policy, "claude");
   const ok = [
     { type: "system", subtype: "init", model: pin.model, cwd: SNAP, tools: ["Read", "Grep", "Glob", "StructuredOutput"], mcp_servers: [], permissionMode: "dontAsk" },
-    { type: "assistant", message: { content: [{ type: "tool_use", id: "a", name: "Read", input: { file_path: `${SNAP}/src/a.ts` } }] } },
+    { type: "assistant", message: { model: pin.model, content: [{ type: "tool_use", id: "a", name: "Read", input: { file_path: `${SNAP}/src/a.ts` } }] } },
     { type: "result", subtype: "success", is_error: false, structured_output: { verdict: "pass" }, modelUsage: { [pin.model]: {}, "claude-haiku-5-5": {} }, permission_denials: [] },
   ];
   const lines = (xs) => xs.map((x) => JSON.stringify(x)).join("\n");
@@ -469,10 +469,30 @@ test("claude stream audit fails closed on parse errors, missing init fields and 
   const r = claude.auditStream(lines([{ type: "system", subtype: "init", model: pin.model, permissionMode: "dontAsk" }, "{not json", result]), SNAP, pin).reasons.join();
   for (const x of ["stream_parse_errors:1", "init_tools_unreported", "init_mcp_servers_unreported", "init_cwd_unreported"]) assert.ok(r.includes(x), x);
   const init = { type: "system", subtype: "init", model: pin.model, cwd: SNAP, tools: ["Glob"], mcp_servers: [], permissionMode: "dontAsk" };
-  const g = claude.auditStream(lines([init, { type: "assistant", message: { content: [{ type: "tool_use", id: "g", name: "Glob", input: { pattern: "../../../../etc/*" } }] } }, result]), SNAP, pin);
+  const g = claude.auditStream(lines([init, { type: "assistant", message: { model: pin.model, content: [{ type: "tool_use", id: "g", name: "Glob", input: { pattern: "../../../../etc/*" } }] } }, result]), SNAP, pin);
   assert.match(g.reasons.join(), /tool_read_outside_snapshot:\.\.\/\.\.\//);
-  const ok = claude.auditStream(lines([init, { type: "assistant", message: { content: [{ type: "tool_use", id: "g", name: "Glob", input: { pattern: "**/*.ts" } }] } }, result]), SNAP, pin);
+  const ok = claude.auditStream(lines([init, { type: "assistant", message: { model: pin.model, content: [{ type: "tool_use", id: "g", name: "Glob", input: { pattern: "**/*.ts" } }] } }, result]), SNAP, pin);
   assert.deepEqual(ok.reasons, []);
+});
+
+test("claude stream audit: every assistant event must name the pinned model (X1)", () => {
+  const pin = hostPin(policy, "claude");
+  const lines = (xs) => xs.map((x) => JSON.stringify(x)).join("\n");
+  const init = { type: "system", subtype: "init", model: pin.model, cwd: SNAP, tools: ["Read", "Grep", "Glob", "StructuredOutput"], mcp_servers: [], permissionMode: "dontAsk" };
+  const result = { type: "result", subtype: "success", is_error: false, structured_output: { verdict: "pass" }, modelUsage: { [pin.model]: {}, "claude-sonnet-5-5": {} }, permission_denials: [] };
+  const named = { type: "assistant", message: { model: pin.model, content: [{ type: "text", text: "x" }] } };
+  const unnamed = { type: "assistant", message: { content: [{ type: "tool_use", id: "s", name: "StructuredOutput", input: {} }] } };
+  const a = claude.auditStream(lines([init, named, unnamed, result]), SNAP, pin);
+  assert.match(a.reasons.join(), /assistant_model_unconfirmed:1/);
+  // A non-string model is unconfirmed too, not a mismatch to be joined.
+  const nonString = clone(unnamed); nonString.message.model = null;
+  assert.match(claude.auditStream(lines([init, nonString, result]), SNAP, pin).reasons.join(), /assistant_model_unconfirmed:1/);
+  // No assistant event at all: nothing confirms the answering model.
+  assert.match(claude.auditStream(lines([init, result]), SNAP, pin).reasons.join(), /no_assistant_event/);
+  // Every assistant event pinned: the other aggregate usage key stays a warning (host-internal step).
+  const ok = claude.auditStream(lines([init, named, result]), SNAP, pin);
+  assert.deepEqual(ok.reasons, []);
+  assert.match(ok.warnings.join(), /claude-sonnet-5-5/);
 });
 
 test("insideRoot: file: URI variants, percent-encoding, dangling symlinks (A4)", async () => {

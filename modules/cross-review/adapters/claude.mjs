@@ -118,14 +118,17 @@ const PATHISH = /^(\/|~)|(^|\/)\.\.(\/|$)/;
 
 /** Parse stream-json output into an audit record. Pure; used by tests with fixtures. */
 export function auditStream(stdout, snapshot, pin) {
-  const a = { init: null, toolUses: [], assistantModels: [], denials: [], result: null, parseErrors: 0, reasons: [], warnings: [] };
+  const a = { init: null, toolUses: [], assistantModels: [], assistantEvents: 0, assistantUnconfirmed: 0, denials: [], result: null, parseErrors: 0, reasons: [], warnings: [] };
   for (const line of stdout.split("\n")) {
     if (!line.trim()) continue;
     let m;
     try { m = JSON.parse(line); } catch { a.parseErrors++; continue; }
     if (m.type === "system" && m.subtype === "init") a.init = m;
     else if (m.type === "assistant") {
-      if (m.message?.model !== undefined) a.assistantModels.push(m.message.model);
+      a.assistantEvents++;
+      // X1: an event that does not name its model is unconfirmed, never skipped.
+      if (typeof m.message?.model === "string" && m.message.model) a.assistantModels.push(m.message.model);
+      else a.assistantUnconfirmed++;
       for (const c of m.message?.content ?? []) if (c.type === "tool_use") a.toolUses.push({ id: c.id, name: c.name, input: c.input });
     } else if (m.type === "result") a.result = m;
   }
@@ -186,9 +189,14 @@ export function auditStream(stdout, snapshot, pin) {
     assistantModels: [...new Set(a.assistantModels)],
   };
   if (r && !Object.keys(modelUsage).includes(pin.model)) a.reasons.push(`pinned_model_not_in_modelUsage:${Object.keys(modelUsage).join(",")}`);
-  // X31: every assistant message of the review session names its model; any other model answered part of the review.
+  // X31/X1: every assistant event of the review session must name the pinned model. Another model answered part of
+  // the review (mismatch); an event without a model, or no assistant event at all, leaves the answer unconfirmed.
+  if (r && !a.assistantEvents) a.reasons.push("no_assistant_event");
+  if (a.assistantUnconfirmed) a.reasons.push(`assistant_model_unconfirmed:${a.assistantUnconfirmed}`);
   const otherAssistant = [...new Set(a.assistantModels.filter((m) => m !== pin.model))];
   if (otherAssistant.length) a.reasons.push(`assistant_model_mismatch:${otherAssistant.join(",")}`);
+  // Aggregate usage may list other models: Claude Code runs a small model for internal steps (e.g. titles) that never
+  // appear as assistant events of the session. Only a warning, because the per-event check above is strict (X1).
   const others = Object.keys(modelUsage).filter((k) => k !== pin.model);
   if (others.length) a.warnings.push(`host also used ${others.join(", ")} for internal steps (not the review model)`);
   a.usage = r ? { ...(r.usage ?? {}), total_cost_usd: r.total_cost_usd ?? null, num_turns: r.num_turns ?? null } : null;
@@ -223,7 +231,9 @@ export async function run(ctx) {
     const rec = { label, code: p.code, signal: p.signal, timedOut: p.timedOut, durationMs: p.durationMs, spawnError: p.spawnError, pipesAbandoned: p.pipesAbandoned, leftoversKilled: p.leftoversKilled, signals: p.signals, auditReasons: a.reasons, warnings: a.warnings, usage: a.usage, reported: a.reported };
     out.attempts.push(rec);
     out.toolAudit.push({ attempt: label, initTools: a.init?.tools ?? null, mcpServers: a.init?.mcp_servers ?? null, permissionMode: a.init?.permissionMode ?? null, toolCalls: a.toolUses.map((t) => t.name), paths: a.paths });
-    if (!out.reported || a.reported.model !== pin.model) out.reported = a.reported; // a mismatch on any attempt stays visible
+    // A2/A4: the final attempt's report. Any audit or model failure ends the loop, so the final attempt is the one that
+    // carries a mismatch; every attempt's report also stays in attempts[].reported.
+    out.reported = a.reported;
     out.usage = sumUsage(out.attempts.map((x) => x.usage));
     out.warnings.push(...a.warnings);
     if (p.spawnError) { out.reasons.push(`spawn_error:${p.spawnError}`); break; }

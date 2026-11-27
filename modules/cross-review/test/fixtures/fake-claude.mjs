@@ -12,14 +12,16 @@ const model = args[args.indexOf("--model") + 1];
 const emit = (m) => process.stdout.write(JSON.stringify(m) + "\n");
 emit({ type: "system", subtype: "init", model: process.env.FAKE_INIT_MODEL ?? model, cwd: process.cwd(), tools: (process.env.FAKE_TOOLS ?? "Glob,Grep,Read,StructuredOutput").split(","), mcp_servers: [], permissionMode: "dontAsk" });
 const read = process.env.FAKE_READ ?? `${process.cwd()}/src/a.ts`;
-emit({ type: "assistant", message: { model: process.env.FAKE_ASSISTANT_MODEL ?? model, content: [{ type: "tool_use", id: "t1", name: "Read", input: { file_path: read } }] } });
+// FAKE_ASSISTANT_MODEL="" omits message.model; FAKE_ASSISTANT_MODEL_ON_RETRY applies to the corrective retry only.
+const asstModel = (retry ? process.env.FAKE_ASSISTANT_MODEL_ON_RETRY : undefined) ?? process.env.FAKE_ASSISTANT_MODEL ?? model;
+emit({ type: "assistant", message: { ...(asstModel ? { model: asstModel } : {}), content: [{ type: "tool_use", id: "t1", name: "Read", input: { file_path: read } }] } });
 if (process.env.FAKE_WRITE) { fs.chmodSync(`${process.cwd()}/src/a.ts`, 0o644); fs.writeFileSync(`${process.cwd()}/src/a.ts`, "tampered"); }
 const outs = (process.env.FAKE_OUTPUTS ?? process.env.FAKE_REVIEW).split("\n---\n");
 const text = outs[Math.min(retry ? 1 : 0, outs.length - 1)];
 let review;
 try { review = JSON.parse(text); } catch { review = text; }
 emit({ type: "result", subtype: "success", is_error: false, result: typeof review === "string" ? review : JSON.stringify(review), structured_output: typeof review === "string" ? undefined : review,
-  usage: { input_tokens: 10, output_tokens: 20 }, modelUsage: { [process.env.FAKE_USAGE_MODEL ?? model]: { inputTokens: 10 } }, total_cost_usd: 0.01, permission_denials: [] });
+  usage: { input_tokens: 10, output_tokens: 20 }, modelUsage: Object.fromEntries((process.env.FAKE_USAGE_MODEL ?? model).split(",").map((k) => [k, { inputTokens: 10 }])), total_cost_usd: 0.01, permission_denials: [] });
 // Valid output already written, then the host hangs past the runner's timeout (timeout draft case, X23).
 if (process.env.FAKE_TIMEOUT_AFTER_OUTPUT) setTimeout(() => {}, 30_000);
 // A setsid'd descendant that keeps stdout/stderr open after this process exits (pipe-abandon case).

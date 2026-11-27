@@ -159,7 +159,7 @@ another reviewer or model.
 | Guarantee | Claude (`claude -p`) | Codex (`codex exec`) | Antigravity (ACP) |
 | --- | --- | --- | --- |
 | Model / effort | `--model`, `--effort` from policy | `-m`, `-c model_reasoning_effort=` | `session/set_config_option` model + thinking level |
-| Reported model | stream `init.model`, every assistant `message.model`, `modelUsage` keys | stderr header `model:` (client-resolved) | `set_config_option` currentValue + per turn: runtime 1.5 session-database `gen_metadata` model (every generation), runtime ≤1.4 stderr proxy model |
+| Reported model | stream `init.model`; every assistant event must name the pin in `message.model` (a missing model, or no assistant event, is `incomplete`); the pin must be a `modelUsage` key (other keys are host-internal steps, warning only); `reported` is the final attempt's | stderr header `model:` (client-resolved) | `set_config_option` currentValue + per turn: runtime 1.5 session-database `gen_metadata` model (every generation), runtime ≤1.4 stderr proxy model |
 | No writes | `--tools Read,Grep,Glob`, `--restricted`, `--permission-mode dontAsk` | OS sandbox profile with no write entry (header must say `sandbox: read-only`), `approval_policy="never"` | fs/terminal capabilities false, permissions `reject_once`, session mode `default` (1.5); `enabledTools:["view_file"]` (≤1.4 only: 1.5 ignores it, so non-read tools are caught by the audit) |
 | Reads confined | `--restricted` confines file tools to cwd = snapshot; audit of every tool path, Glob patterns (each brace alternative; over 64 alternatives an automaton decides whether any alternative is absolute, `~` or has `..`: if so the run is `incomplete` with `tool_glob_unauditable`, otherwise it is a relative glob) and Grep `path`/`glob` (Grep's regex `pattern` is not a path); `~` paths are outside | **OS-enforced** (macOS Seatbelt, see below); the shell-command audit is evidence only (warnings) | audit of every `read_file`/`view_file` path (full `rawInput`/`args`, `tool_call_update` names and titles); any other tool except `update_steps` → `incomplete`; `~` paths are outside |
 | Code execution | none (no Bash) | interpreters / command substitution may run, always under the same OS sandbox; `hosts.codex.allow_code_execution` (default `true`) only decides whether node's package dir is granted; code execution is recorded as a warning | none (commands need a permission, always rejected; any command tool call → `incomplete`) |
@@ -271,8 +271,8 @@ group after cleanup started (a crash before cleanup, or a different signal), mak
 every row must be the pinned model at the pinned thinking level; ≤1.4: a `Proxy extracted model`
 line); finding ids continue
 across turns; a spawn failure or early server exit fails at once; a stdout line (also an
-unterminated last one, parsed when the pipe closes) that is not a JSON-RPC 2.0 message
-(`acp_stdout_unparseable`), or server pipes still open 2 s after its group is gone
+unterminated last one, parsed when the pipe closes) that is not a well-formed JSON-RPC 2.0 message
+(a non-empty string `method`, or an `id` with `result`/`error`; `acp_stdout_unparseable`), or server pipes still open 2 s after its group is gone
 (`pipes_abandoned`), makes the run `incomplete`.
 Turn split by runtime layout (`lib/turns.mjs` `layoutConfig`). Runtime 1.5 (`cli`, the policy's
 top-level values): ONE turn reviews every dimension (`groups: []`), and the scope is split into

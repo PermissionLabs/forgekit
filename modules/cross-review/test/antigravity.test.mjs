@@ -571,6 +571,15 @@ ctest("cli: a non-JSON stdout line makes the run incomplete (X35)", async () => 
   withheld(await goCli({ trailingStdout: late }), /non_view_file_tool_calls:1/);
 });
 
+ctest("cli: JSON-RPC objects with an empty or non-string method, or a response without result/error, are unparseable (A1/A3)", async () => {
+  for (const line of ['{"jsonrpc":"2.0","method":""}', '{"jsonrpc":"2.0","id":1,"method":null}', '{"jsonrpc":"2.0","id":1,"method":""}', '{"jsonrpc":"2.0","method":7}', '{"jsonrpc":"2.0","id":"x"}']) {
+    withheld(await goCli({ rawStdout: { 0: line } }), /acp_stdout_unparseable:1/);
+  }
+  // A response to an id the runner never sent stays a well-formed message (dropped, not counted).
+  const stray = await goCli({ rawStdout: { 0: '{"jsonrpc":"2.0","id":999,"result":{}}' } });
+  assert.equal(stray.status, "complete", stray.incompleteReasons.join());
+});
+
 ctest("cli: a descendant outside the group that keeps the pipes open makes the run incomplete (X36)", async () => {
   const ev = await goCli({ escapeStdio: true });
   withheld(ev, /pipes_abandoned/);
