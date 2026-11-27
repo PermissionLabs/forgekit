@@ -3,7 +3,7 @@
 // id is kept. Incomplete runs are listed but never merged (their review is withheld).
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { parseLoc, SEVS, VERDICTS } from "./schema.mjs";
+import { expectedVerdict, parseLoc, SEVS, VERDICTS } from "./schema.mjs";
 
 const STOP = new Set(["the", "and", "for", "with", "that", "this", "are", "not", "can", "when", "from", "into", "its", "but", "only", "any", "all", "has", "have", "was", "were", "will", "does", "than", "then", "also", "even", "which", "while", "their", "there", "been", "being", "each", "other"]);
 const words = (s) => new Set(String(s).toLowerCase().match(/[a-z0-9_$.]{3,}/g)?.filter((w) => !STOP.has(w)) ?? []);
@@ -37,9 +37,17 @@ export function reviewShapeProblems(review) {
     if (!f || typeof f !== "object" || Array.isArray(f)) { errs.push(`findings[${i}] is not an object`); return; }
     if (typeof f.id !== "string" || !f.id) errs.push(`findings[${i}].id missing`);
     if (!SEVS.includes(f.sev)) errs.push(`findings[${i}].sev must be one of ${SEVS.join("|")}`);
-    if (!parseLoc(f.loc)) errs.push(`findings[${i}].loc must be "file:line"`);
+    const loc = parseLoc(f.loc);
+    if (!loc) errs.push(`findings[${i}].loc must be "file:line"`);
+    else if (loc.a < 1 || loc.b < loc.a) errs.push(`findings[${i}].loc ${f.loc}: line range must start at 1 and not be reversed`);
     for (const k of ["claim", "evidence", "check"]) if (typeof f[k] !== "string" || !f[k].trim()) errs.push(`findings[${i}].${k} empty`);
   });
+  // X37: the verdict must agree with the findings and prior verification, as run's validator requires.
+  if (review.prior_verification !== undefined && !Array.isArray(review.prior_verification)) errs.push("prior_verification is not an array");
+  else if (VERDICTS.includes(review.verdict) && review.findings.every((f) => f && typeof f === "object")) {
+    const want = expectedVerdict(review.findings, review.prior_verification ?? []);
+    if (review.verdict !== want) errs.push(`verdict ${review.verdict} inconsistent with findings/prior_verification (expected ${want})`);
+  }
   return errs;
 }
 
@@ -57,7 +65,8 @@ export function loadReviewEntry(arg) {
   const given = readJson(file);
   let ev = given?.schema === "cross-review-evidence@1" ? given : readJson(path.join(dir, "evidence.json"));
   if (ev?.schema !== "cross-review-evidence@1") ev = null;
-  const review = ev ? ev.review ?? (given?.schema ? null : given) : given;
+  // A85: with evidence present, only its review counts; a separate review.json never stands in for a null one.
+  const review = ev ? ev.review ?? null : given;
   const reasons = [];
   if (given === undefined && !ev) reasons.push(`cannot read ${file}`);
   if (!ev) reasons.push("no evidence.json: run status unknown (merge needs a complete run's evidence)");

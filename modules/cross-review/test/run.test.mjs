@@ -7,7 +7,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadPolicy, defaultPolicyPath, policyProblems } from "../lib/policy.mjs";
-import { buildInput, readChecklist, removeSnapshot } from "../lib/inputs.mjs";
+import { buildInput, hashTree, readChecklist, removeSnapshot } from "../lib/inputs.mjs";
 import { runReview, summarize } from "../lib/run.mjs";
 import { SELF_TEST_KEYS } from "../lib/sandbox.mjs";
 
@@ -18,7 +18,7 @@ let tmp, repo, rev, policyPath, diffPath, briefPath, fakeCodex;
 const git = (...a) => execFileSync("git", ["-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "-C", repo, ...a], { encoding: "utf8" }).trim();
 const DIMS = ["correctness", "tests"];
 const review = (over = {}) => JSON.stringify({ verdict: "fix", coverage: { correctness: "checked", tests: "n/a:no tests in scope" }, findings: [{ id: "C1", sev: "med", loc: "src/a.ts:2", claim: "c", evidence: "e", check: "k" }], limits: [], ...over });
-const FAKE_KEYS = ["FAKE_NO_EFFORT_ON_RETRY", "FAKE_TIMEOUT_AFTER_OUTPUT", "FAKE_REVIEW", "FAKE_OUTPUTS", "FAKE_READ", "FAKE_WRITE", "FAKE_INIT_MODEL", "FAKE_USAGE_MODEL", "FAKE_TOOLS", "FAKE_REPORTED_MODEL", "FAKE_SANDBOX", "FAKE_COMMAND", "FAKE_ARGV_OUT", "FAKE_ENV_OUT", "FAKE_ESCAPE", "FAKE_NO_O", "FAKE_EMPTY_O", "FAKE_STDOUT", "FAKE_NO_EFFORT", "FAKE_PROMPT_ECHO", "FAKE_COMMAND_OUTPUT", "FAKE_APPROVAL", "FAKE_SANDBOX_NOOP"];
+const FAKE_KEYS = ["FAKE_NO_EFFORT_ON_RETRY", "FAKE_TIMEOUT_AFTER_OUTPUT", "FAKE_REVIEW", "FAKE_OUTPUTS", "FAKE_READ", "FAKE_WRITE", "FAKE_INIT_MODEL", "FAKE_USAGE_MODEL", "FAKE_TOOLS", "FAKE_REPORTED_MODEL", "FAKE_SANDBOX", "FAKE_COMMAND", "FAKE_ARGV_OUT", "FAKE_ENV_OUT", "FAKE_ESCAPE", "FAKE_NO_O", "FAKE_EMPTY_O", "FAKE_STDOUT", "FAKE_NO_EFFORT", "FAKE_PROMPT_ECHO", "FAKE_COMMAND_OUTPUT", "FAKE_APPROVAL", "FAKE_SANDBOX_NOOP", "FAKE_ASSISTANT_MODEL"];
 const setFake = (env) => { for (const k of FAKE_KEYS) delete process.env[k]; Object.assign(process.env, env); };
 
 before(() => {
@@ -419,4 +419,55 @@ test("empty dimensions are refused and never leak a snapshot (A21)", async () =>
   await assert.rejects(runReview(opts("claude", "out-nodims", { dimensions: undefined }), policy(), policyPath), /dimensions/);
   const after = fs.readdirSync(os.tmpdir()).filter((d) => d.startsWith("cross-review-snap-")).length;
   assert.ok(after <= before);
+});
+
+// ---------------------------------------------------------------- r8 full-PR review fixes
+test("claude: an assistant message from another model withholds the review; matchesPinned follows every model check (X31/A84)", async () => {
+  setFake({ FAKE_REVIEW: review(), FAKE_ASSISTANT_MODEL: "claude-sonnet-5-5", FAKE_USAGE_MODEL: "claude-opus-5-5" });
+  const ev = await runReview(opts("claude", "out-r8-asst"), policy(), policyPath);
+  assertWithheld(ev, /assistant_model_mismatch:claude-sonnet-5-5/);
+  assert.equal(ev.matchesPinned, false);
+  setFake({ FAKE_REVIEW: review(), FAKE_USAGE_MODEL: "claude-sonnet-5-5" });
+  const usage = await runReview(opts("claude", "out-r8-usage"), policy(), policyPath);
+  assertWithheld(usage, /pinned_model_not_in_modelUsage/);
+  assert.equal(usage.matchesPinned, false);
+  setFake({ FAKE_REVIEW: review() });
+  const ok = await runReview(opts("claude", "out-r8-ok"), policy(), policyPath);
+  assert.equal(ok.status, "complete", ok.incompleteReasons.join());
+  assert.equal(ok.matchesPinned, true);
+  assert.deepEqual(ok.reported.assistantModels, ["claude-opus-5-5"]);
+});
+
+test("run refuses an output directory holding a symlink before writing anything (X33)", async () => {
+  const sentinel = path.join(tmp, "sentinel.txt");
+  fs.writeFileSync(sentinel, "keep\n");
+  for (const [sub, name] of [["", "prompt.txt"], ["raw", "claude-messages.jsonl"]]) {
+    const out = path.join(tmp, `out-r8-link-${name}`);
+    fs.mkdirSync(path.join(out, sub), { recursive: true });
+    fs.symlinkSync(sentinel, path.join(out, sub, name));
+    setFake({ FAKE_REVIEW: review() });
+    await assert.rejects(runReview({ ...opts("claude", "x"), out }, policy(), policyPath), /symlink or special file/);
+    assert.equal(fs.readFileSync(sentinel, "utf8"), "keep\n");
+  }
+  const rawLink = path.join(tmp, "out-r8-rawlink");
+  fs.mkdirSync(rawLink);
+  fs.symlinkSync(tmp, path.join(rawLink, "raw"));
+  await assert.rejects(runReview({ ...opts("claude", "x"), out: rawLink }, policy(), policyPath), /raw\/ is not a plain directory/);
+});
+
+test("hashTree: a root file named __proto__ is hashed like any other (X38)", () => {
+  const d = fs.mkdtempSync(path.join(tmp, "proto-"));
+  fs.writeFileSync(path.join(d, "__proto__"), "one");
+  const a = hashTree(d);
+  assert.ok(Object.hasOwn(a, "__proto__"));
+  fs.writeFileSync(path.join(d, "__proto__"), "two");
+  assert.notEqual(JSON.stringify(hashTree(d)), JSON.stringify(a));
+});
+
+const caseInsensitive = () => { try { return fs.realpathSync.native(repo.toUpperCase()) === fs.realpathSync.native(repo); } catch { return false; } };
+test("checklist: an absolute in-repo path in another letter case is still read from the git object (A86)", { skip: !caseInsensitive() && "case-sensitive filesystem" }, () => {
+  const variant = path.join(path.dirname(repo), path.basename(repo).toUpperCase(), "docs", "check.md");
+  const c = readChecklist(repo, rev, variant);
+  assert.equal(c.source, `git:${rev}`);
+  assert.equal(c.text, "CHECKLIST AT REV\n");
 });

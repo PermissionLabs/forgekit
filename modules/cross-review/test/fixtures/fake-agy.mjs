@@ -16,11 +16,12 @@
 //   noDb: true (no session database at all), noTrajSid: true (trajectory metadata without the session id),
 //   lateGen: true (turn 0 commits a second generation during the next prompt), idless: {turn: true} (a read_file
 //   tool_call without toolCallId), namelessSteps: {turn: true} (a nameless "view_file" call without a path that a
-//   later update renames to update_steps).
+//   later update renames to update_steps), garbage: {turn: true} (a non-JSON stdout line before the reply, X35),
+//   escapeStdio: true (on stdin end, a detached descendant outside the group keeps stdout/stderr open for 6 s, X36).
 // Per-turn stderr is written (and flushed) before any stdout for that turn, so the parent always sees it first.
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 const cfg = JSON.parse(process.env.FAKE_AGY ?? "{}");
 const CLI = process.argv[2] === "acp";
@@ -131,6 +132,7 @@ function answer(t, text, id) {
   if (CLI) notify({ sessionUpdate: "tool_call", toolCallId: `t${t}`, name: cfg.toolName?.[t] ?? "read_file", title: `File ${path.basename(p)}`, kind: "read", status: "pending", args: { Path: p }, locations: [{ path: p }] });
   else notify({ sessionUpdate: "tool_call", toolCallId: `t${t}`, title: "view_file", kind: "read", status: "pending", rawInput: { AbsolutePath: p } });
   if (cfg.updateTitle?.[t]) notify({ sessionUpdate: "tool_call_update", toolCallId: `t${t}`, title: cfg.updateTitle[t], status: "completed" });
+  if (cfg.garbage?.[t]) process.stdout.write("garbled {\"jsonrpc\":\"2.0\",\"method\":\"session/update\"\n");
   const body = has(cfg.invalid, t) ? "not json" : JSON.stringify(review(text));
   notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: body } });
   if (has(cfg.permission, t)) send({ jsonrpc: "2.0", id: `perm${t}`, method: "session/request_permission", params: { sessionId: SID, toolCall: { title: "run_command", kind: "execute" }, options: [{ optionId: "allow", kind: "allow_once" }, { optionId: "reject", kind: "reject_once" }] } });
@@ -141,6 +143,7 @@ function answer(t, text, id) {
 process.stdin.on("end", () => {
   for (const handle of dbs) handle.close();
   if (cfg.signalOnStdinEnd) process.kill(process.pid, cfg.signalOnStdinEnd);
+  if (cfg.escapeStdio) spawn(process.execPath, ["-e", "setTimeout(()=>{},6000)"], { detached: true, stdio: ["ignore", "inherit", "inherit"] }).unref();
   const code = cfg.exitCode ?? 0;
   if (cfg.trailingStderr) process.stderr.write(cfg.trailingStderr, () => process.exit(code));
   else process.exit(code);

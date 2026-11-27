@@ -118,13 +118,14 @@ const PATHISH = /^(\/|~)|(^|\/)\.\.(\/|$)/;
 
 /** Parse stream-json output into an audit record. Pure; used by tests with fixtures. */
 export function auditStream(stdout, snapshot, pin) {
-  const a = { init: null, toolUses: [], denials: [], result: null, parseErrors: 0, reasons: [], warnings: [] };
+  const a = { init: null, toolUses: [], assistantModels: [], denials: [], result: null, parseErrors: 0, reasons: [], warnings: [] };
   for (const line of stdout.split("\n")) {
     if (!line.trim()) continue;
     let m;
     try { m = JSON.parse(line); } catch { a.parseErrors++; continue; }
     if (m.type === "system" && m.subtype === "init") a.init = m;
     else if (m.type === "assistant") {
+      if (m.message?.model !== undefined) a.assistantModels.push(m.message.model);
       for (const c of m.message?.content ?? []) if (c.type === "tool_use") a.toolUses.push({ id: c.id, name: c.name, input: c.input });
     } else if (m.type === "result") a.result = m;
   }
@@ -180,10 +181,14 @@ export function auditStream(stdout, snapshot, pin) {
   a.reported = {
     model: init?.model ?? null,
     effort: null,
-    source: "stream-json init.model; result.modelUsage keys",
+    source: "stream-json init.model; assistant message.model; result.modelUsage keys",
     modelUsageKeys: Object.keys(modelUsage),
+    assistantModels: [...new Set(a.assistantModels)],
   };
   if (r && !Object.keys(modelUsage).includes(pin.model)) a.reasons.push(`pinned_model_not_in_modelUsage:${Object.keys(modelUsage).join(",")}`);
+  // X31: every assistant message of the review session names its model; any other model answered part of the review.
+  const otherAssistant = [...new Set(a.assistantModels.filter((m) => m !== pin.model))];
+  if (otherAssistant.length) a.reasons.push(`assistant_model_mismatch:${otherAssistant.join(",")}`);
   const others = Object.keys(modelUsage).filter((k) => k !== pin.model);
   if (others.length) a.warnings.push(`host also used ${others.join(", ")} for internal steps (not the review model)`);
   a.usage = r ? { ...(r.usage ?? {}), total_cost_usd: r.total_cost_usd ?? null, num_turns: r.num_turns ?? null } : null;

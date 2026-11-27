@@ -111,7 +111,7 @@ before(() => {
   profileAcp = path.join(tmp, "profiles", "p1", "antigravity-acp");
   fs.mkdirSync(profileAcp, { recursive: true });
   const p = JSON.parse(JSON.stringify(basePolicy));
-  Object.assign(p.hosts.antigravity, { timeout_sec: 400, turn_timeout_sec: 120, retry_timeout_sec: 90, runtime: { runtime_root: runtimeRoot, profile_root: path.join(tmp, "profiles"), expect_agent_version: null } });
+  Object.assign(p.hosts.antigravity, { env_passthrough: ["FAKE_AGY"], timeout_sec: 400, turn_timeout_sec: 120, retry_timeout_sec: 90, runtime: { runtime_root: runtimeRoot, profile_root: path.join(tmp, "profiles"), expect_agent_version: null } });
   Object.assign(p.hosts.antigravity.par_layout, { turn_timeout_sec: 120, retry_timeout_sec: 90 });
   policyPath = path.join(tmp, "policy.json");
   fs.writeFileSync(policyPath, JSON.stringify(p));
@@ -559,4 +559,35 @@ ctest("cli layout: session files are kept when the database workspace is not thi
   assert.deepEqual(ev.extra.sessionCleanup.removed, []);
   assert.ok(fs.existsSync(path.join(profileAcp, "conversations", "11111111-1111-4111-8111-111111111111.db")));
   for (const item of ev.extra.sessionCleanups) fs.rmSync(path.join(profileAcp, "conversations", item.sessionId + ".db"));
+});
+
+// ---------------------------------------------------------------- r8 full-PR review fixes
+ctest("cli: a non-JSON stdout line makes the run incomplete (X35)", async () => {
+  withheld(await goCli({ garbage: { 0: true } }), /acp_stdout_unparseable:1/);
+});
+
+ctest("cli: a descendant outside the group that keeps the pipes open makes the run incomplete (X36)", async () => {
+  const ev = await goCli({ escapeStdio: true });
+  withheld(ev, /pipes_abandoned/);
+  assert.equal(ev.extra.process.pipesClosed, false);
+  const ok = await goCli();
+  assert.equal(ok.status, "complete", ok.incompleteReasons.join());
+  assert.equal(ok.extra.process.pipesClosed, true);
+});
+
+ctest("cli: matchesPinned is false when the per-generation model check fails (A84)", async () => {
+  const ev = await goCli({ genModel: "gemini-3.8-flash" });
+  withheld(ev, /generation_model_mismatch/);
+  assert.equal(ev.matchesPinned, false);
+  assert.equal((await goCli()).matchesPinned, true);
+});
+
+test("antigravity env: minimal allowlist plus env_passthrough; the credential denylist still wins (X34/A83)", () => {
+  const base = { PATH: "/bin", HOME: "/h", LC_ALL: "C", GITHUB_TOKEN: "s", ANTHROPIC_API_KEY: "sk", HTTPS_PROXY: "http://p", NODE_OPTIONS: "--require x", CLOUDSDK_AUTH_ACCESS_TOKEN: "t", KEEP_ME: "1", GEMINI_API_KEY: "k" };
+  const env = buildEnv(base, { geminiHome: "/iso", tmpDir: "/t", harness: "/h", layout: "cli", passthrough: ["KEEP_ME", "GEMINI_API_KEY"] });
+  for (const k of ["GITHUB_TOKEN", "ANTHROPIC_API_KEY", "HTTPS_PROXY", "NODE_OPTIONS", "CLOUDSDK_AUTH_ACCESS_TOKEN", "GEMINI_API_KEY"]) assert.equal(env[k], undefined, k);
+  assert.equal(env.KEEP_ME, "1");
+  assert.equal(env.PATH, "/bin");
+  assert.equal(env.LC_ALL, "C");
+  assert.equal(env.GEMINI_HOME, "/iso");
 });

@@ -55,13 +55,19 @@ complete, 1 otherwise. 2 is a usage error (including unknown or repeated options
 - `--out` (and `plan --out`, `merge --out`) must be outside every repository it could land in, or
   git-ignored there: the repository containing the output path itself and `--repo` (also accepted
   by `plan`/`merge`) are both checked. A tracked path, an output directory that holds tracked
-  (e.g. force-added) files, or anything under `.git/` is refused.
+  (e.g. force-added) files, or anything under `.git/` (in any letter case) is refused. Paths are
+  compared in their on-disk letter case (`realpath.native`), so a differently cased spelling of the
+  repository on a case-insensitive volume is still checked, and the path written is exactly the path
+  checked (a `link/..` spelling is never re-resolved through the symlink).
 - `run` writes `evidence.json`, `review.json`, `summary.txt` (the printed summary), `prompt.txt` and
-  `raw/` under `--out`.
+  `raw/` under `--out`; an `--out` or `raw/` that already holds a symlink or special file (or a `raw`
+  that is not a plain directory) is refused before anything is written.
 - `merge` groups findings from different hosts that point at the same file within `--line-window`
   lines and have similar claim+evidence wording (word Jaccard ≥ 0.2, ≥ 0.1 when the line ranges
   overlap); each group keeps every host's own id (e.g. `X1=A11`). Only runs whose `evidence.json`
-  says `status: complete` and whose review is a `{ verdict, findings[] }` object are merged; a bare
+  says `status: complete` and whose review is a `{ verdict, findings[] }` object (verdict consistent
+  with the findings and prior verification, line ranges starting at 1 and not reversed) are merged;
+  when evidence is present only its review counts (a separate `review.json` never replaces it); a bare
   `review.json` without evidence, an incomplete run, or any other JSON is listed as incomplete
   (also when an entry claims complete but its review is malformed: never shown as complete).
 
@@ -76,7 +82,8 @@ is built once by `lib/inputs.mjs` and its hash recorded; Antigravity runs it as 
 chunk, see Antigravity turns) but keeps the same rules. Each
 reviewer child gets a minimal environment (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM`,
 `LANG`, `LC_*`, `TZ`, `TMPDIR`, plus `CODEX_HOME` / `CLAUDE_CONFIG_DIR` and
-`hosts.<h>.env_passthrough`); Antigravity keeps its own provider-credential denylist.
+`hosts.<h>.env_passthrough`); for Antigravity the provider-credential denylist is applied on top and
+wins over `env_passthrough`.
 
 **Output.**
 
@@ -152,7 +159,7 @@ another reviewer or model.
 | Guarantee | Claude (`claude -p`) | Codex (`codex exec`) | Antigravity (ACP) |
 | --- | --- | --- | --- |
 | Model / effort | `--model`, `--effort` from policy | `-m`, `-c model_reasoning_effort=` | `session/set_config_option` model + thinking level |
-| Reported model | stream `init.model` + `modelUsage` keys | stderr header `model:` (client-resolved) | `set_config_option` currentValue + per turn: runtime 1.5 session-database `gen_metadata` model (every generation), runtime ≤1.4 stderr proxy model |
+| Reported model | stream `init.model`, every assistant `message.model`, `modelUsage` keys | stderr header `model:` (client-resolved) | `set_config_option` currentValue + per turn: runtime 1.5 session-database `gen_metadata` model (every generation), runtime ≤1.4 stderr proxy model |
 | No writes | `--tools Read,Grep,Glob`, `--restricted`, `--permission-mode dontAsk` | OS sandbox profile with no write entry (header must say `sandbox: read-only`), `approval_policy="never"` | fs/terminal capabilities false, permissions `reject_once`, session mode `default` (1.5); `enabledTools:["view_file"]` (≤1.4 only: 1.5 ignores it, so non-read tools are caught by the audit) |
 | Reads confined | `--restricted` confines file tools to cwd = snapshot; audit of every tool path, Glob patterns (each brace alternative; over 64 alternatives an automaton decides whether any alternative is absolute, `~` or has `..`: if so the run is `incomplete` with `tool_glob_unauditable`, otherwise it is a relative glob) and Grep `path`/`glob` (Grep's regex `pattern` is not a path); `~` paths are outside | **OS-enforced** (macOS Seatbelt, see below); the shell-command audit is evidence only (warnings) | audit of every `read_file`/`view_file` path (full `rawInput`/`args`, `tool_call_update` names and titles); any other tool except `update_steps` → `incomplete`; `~` paths are outside |
 | Code execution | none (no Bash) | interpreters / command substitution may run, always under the same OS sandbox; `hosts.codex.allow_code_execution` (default `true`) only decides whether node's package dir is granted; code execution is recorded as a warning | none (commands need a permission, always rejected; any command tool call → `incomplete`) |
@@ -263,7 +270,9 @@ group after cleanup started (a crash before cleanup, or a different signal), mak
 `incomplete`; each turn must carry a matching model record (1.5: at least one `gen_metadata` row, and
 every row must be the pinned model at the pinned thinking level; ≤1.4: a `Proxy extracted model`
 line); finding ids continue
-across turns; a spawn failure or early server exit fails at once.
+across turns; a spawn failure or early server exit fails at once; a stdout line that is not a
+JSON-RPC object (`acp_stdout_unparseable`), or server pipes still open 2 s after its group is gone
+(`pipes_abandoned`), makes the run `incomplete`.
 Turn split by runtime layout (`lib/turns.mjs` `layoutConfig`). Runtime 1.5 (`cli`, the policy's
 top-level values): ONE turn reviews every dimension (`groups: []`), and the scope is split into
 file chunks only above `max_files_per_turn` (32) / `max_bytes_per_turn` (400000). Measured on 1.5.18

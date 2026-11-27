@@ -61,12 +61,14 @@ const csv = (s) => (s ? s.split(",").map((x) => x.trim()).filter(Boolean) : []);
  * git-ignored (checked against the index, so a tracked file never passes), never under .git, and an output
  * directory must not contain tracked files (an ignored directory can still hold force-added ones).
  */
+// A82: a `.git` component in any letter case (case-insensitive volumes resolve `.GIT` to the git directory).
+const hasGitDir = (p) => p.split(path.sep).some((c) => c.toLowerCase() === ".git");
 export function checkOut(repo, out, { dir = true } = {}) {
   const abs = path.resolve(out);
   const realAbs = realish(abs);
   if (!realAbs) throw new Error(`--out ${out}: cannot resolve the path`);
   // Never under a .git directory, whether or not a work tree can be found for it (A10: `git rev-parse` fails inside .git).
-  if (abs.split(path.sep).includes(".git") || realAbs.split(path.sep).includes(".git")) throw new Error(`--out ${out} is inside a .git directory; use an untracked location (e.g. .context/ or a temp dir)`);
+  if (hasGitDir(abs) || hasGitDir(realAbs)) throw new Error(`--out ${out} is inside a .git directory; use an untracked location (e.g. .context/ or a temp dir)`);
   const git = (cwd, args) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
   const topOf = (d) => { try { return realish(git(d, ["rev-parse", "--show-toplevel"]).trim()); } catch { return null; } };
   let anc = realAbs;
@@ -77,7 +79,7 @@ export function checkOut(repo, out, { dir = true } = {}) {
   for (const realTop of tops) {
     if (realAbs !== realTop && !realAbs.startsWith(realTop + path.sep)) continue;
     const rel = path.relative(realTop, realAbs);
-    if (!rel || rel.split(path.sep).includes(".git")) throw bad();
+    if (!rel || hasGitDir(rel)) throw bad();
     try { execFileSync("git", ["-C", realTop, "check-ignore", "-q", "--", dir ? rel + "/" : rel], { stdio: "ignore" }); }
     catch { throw bad(); }
     let tracked = "";
@@ -101,7 +103,8 @@ export async function main(argv = process.argv.slice(2)) {
     if (o._cmd === "merge") {
       const entries = need(o, "review").map(loadReviewEntry);
       const m = mergeReviews(entries, { lineWindow: o["line-window"] ? positiveInt(o["line-window"], "line-window") : 3 });
-      if (o.out) { checkOut(o.repo ?? null, o.out, { dir: false }); fs.writeFileSync(o.out, JSON.stringify(m, null, 2)); }
+      // X32: write to the same lexically resolved path checkOut checked (never re-resolve `link/..` through a symlink).
+      if (o.out) { const outFile = path.resolve(o.out); checkOut(o.repo ?? null, outFile, { dir: false }); fs.writeFileSync(outFile, JSON.stringify(m, null, 2)); }
       console.log(m.text);
       return entries.every((e) => e.status === "complete") ? 0 : 1;
     }
@@ -113,13 +116,14 @@ export async function main(argv = process.argv.slice(2)) {
       const diffText = fs.readFileSync(need(o, "paths-from"), "utf8");
       const paths = pathsFromDiffText(diffText);
       const usage = o.usage ? JSON.parse(fs.readFileSync(o.usage, "utf8")) : null;
-      if (o.out) checkOut(o.repo ?? null, o.out, { dir: false });
+      const outFile = o.out ? path.resolve(o.out) : null; // X32: the checked path is the written path
+      if (outFile) checkOut(o.repo ?? null, outFile, { dir: false });
       // File sizes from the working tree (when present) so the Antigravity estimate splits by bytes like the run (A63).
       const repoDir = path.resolve(o.repo ?? ".");
       const files = paths.map((p) => { let bytes = 0; try { bytes = fs.statSync(path.join(repoDir, p)).size; } catch {} return { path: p, bytes }; });
       if (o.prior) fs.accessSync(o.prior, fs.constants.R_OK);
       const p = planForInstallation({ policy, author, dimensions: dims.length ? dims : policy.default_dimensions ?? [], paths, usage, noUser: !!o["no-user"], files, rereview: !!o.prior, diffBytes: /^diff --git /m.test(diffText) ? Buffer.byteLength(diffText) : Infinity });
-      if (o.out) fs.writeFileSync(o.out, JSON.stringify(p, null, 2));
+      if (outFile) fs.writeFileSync(outFile, JSON.stringify(p, null, 2));
       console.log(JSON.stringify(p, null, 2));
       return p.status === "ok" ? 0 : p.status === "ask" ? 3 : 4;
     }

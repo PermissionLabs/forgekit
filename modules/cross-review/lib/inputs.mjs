@@ -55,7 +55,8 @@ export function chmodTree(root, fileMode, dirMode) {
 }
 
 export function hashTree(root) {
-  const out = {};
+  // X38: a null-prototype object, so a file named __proto__ is an own entry like any other.
+  const out = Object.create(null);
   const walk = (d) => {
     for (const e of fs.readdirSync(d, { withFileTypes: true })) {
       const p = path.join(d, e.name);
@@ -202,13 +203,15 @@ export function redact(s) {
 /**
  * Real path of `p`, resolving the longest existing prefix (so not-yet-existing paths still compare correctly).
  * null when the path cannot be resolved (e.g. a dangling symlink on the way): callers treat that as outside.
+ * A82/A86: realpath.native returns the on-disk case on case-insensitive volumes (macOS APFS), so `/x/myrepo` and
+ * `/x/MyRepo` (or `.GIT` and `.git`) compare equal; the JS realpath keeps the caller's spelling.
  */
 export function realish(p) {
   let base = path.resolve(p);
   const rest = [];
   const present = (x) => { try { fs.lstatSync(x); return true; } catch { return false; } };
   while (!present(base) && path.dirname(base) !== base) { rest.unshift(path.basename(base)); base = path.dirname(base); }
-  try { return path.join(fs.realpathSync(base), ...rest); } catch { return null; }
+  try { return path.join(fs.realpathSync.native(base), ...rest); } catch { return null; }
 }
 
 /**

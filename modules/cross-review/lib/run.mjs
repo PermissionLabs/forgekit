@@ -27,6 +27,20 @@ export function checkReported(pin, reported, { effortReported = true } = {}) {
   return reasons;
 }
 
+/**
+ * X33: every file run writes lives directly in --out or --out/raw. A symlink (or other non-regular entry) already
+ * there would redirect a write past the --out check (e.g. prompt.txt -> a tracked file), so it is refused before
+ * anything is written; raw itself must be a real directory. Reviewers cannot write there (read-only hosts).
+ */
+export function assertNoLinks(out, rawDir) {
+  if (fs.lstatSync(rawDir).isSymbolicLink() || !fs.lstatSync(rawDir).isDirectory()) throw new Error(`--out ${out}: raw/ is not a plain directory`);
+  for (const dir of [out, rawDir]) for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (e.isSymbolicLink() || !(e.isFile() || e.isDirectory())) throw new Error(`--out ${out}: ${path.join(dir, e.name)} is a symlink or special file; use a fresh output directory`);
+  }
+}
+
+const MODEL_REASON = /model_mismatch|model_unconfirmed|model_pin_not_applied|pinned_model_not_in_modelUsage|reported_model|effort_mismatch|reported_effort/;
+
 const readJson = (p, what) => { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch (e) { throw new Error(`cannot read ${what} ${p}: ${e.message}`); } };
 
 /**
@@ -41,6 +55,7 @@ export async function runReview(opts, policy, policyPath) {
   fs.mkdirSync(opts.out, { recursive: true });
   const rawDir = path.join(opts.out, "raw");
   fs.mkdirSync(rawDir, { recursive: true });
+  assertNoLinks(opts.out, rawDir);
 
   // Re-review inputs are validated before anything runs.
   let prior = null, dispositions = null, priorIds = [];
@@ -116,7 +131,8 @@ async function reviewWithInput({ opts, adapter, pin, prefix, policyPath, prior, 
     warnings,
     pinned: { model: pin.model, effort: pin.effort, review_effort: pin.review_effort, policyFile: policyPath, policySha256: sha256(fs.readFileSync(policyPath)) },
     reported: res.reported ?? null,
-    matchesPinned: checkReported(pin, res.reported, { effortReported }).length === 0,
+    // A84: false as well when an adapter's own per-turn/per-message model check failed (generation, proxy, usage).
+    matchesPinned: checkReported(pin, res.reported, { effortReported }).length === 0 && !uniq.some((r) => MODEL_REASON.test(r)),
     effortCheck: effortReported ? "verified against host report" : "unreported (host does not report effort; pinned value only)",
     prompt: { sha256: sha256(prompt), chars: prompt.length, file: "prompt.txt", jsonSchemaSha256: sha256(JSON.stringify(jsonSchema)) },
     timeoutMs: res.timeoutMs ?? pin.timeoutMs,

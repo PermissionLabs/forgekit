@@ -171,6 +171,10 @@ flowchart TD
 
 ## Verification
 
+- After the r8 full-PR fixes (2026-11-27): `node --test modules/cross-review/test/*.test.mjs`: 159
+  tests pass (12 new). Run against the 4ac78e9 sources (new tests and fixtures, old code), all 12 new
+  tests fail there (X31–X38, A82, A84–A86). A82 also reproduced by hand on APFS before the fix (all four
+  case variants accepted) and refused after it.
 - After the r7 single-turn change (2026-11-27, now rebased onto forgekit PR #26 head 2a81372):
   `node --test modules/cross-review/test/*.test.mjs`: 147 tests pass. Mutation checks on scratch
   copies, each failing at least one test: `layoutConfig` ignoring the layout (13 fail), the adapter
@@ -378,6 +382,24 @@ the group split: run2 found the med finding (and two lows) run3 missed, run3 fou
 | 9 (r6) | Delta review of the Antigravity 1.5 adapter (7613dcc..f42edcb): Codex complete, verdict block, X26–X30 (2 high, 3 med); Antigravity incomplete (`total_timeout_before:group:correctness:files2/2`, 3 of 4 turns), draft A72–A81 (1 high, 5 med, 4 low) | All real except as noted in the r6 dispositions; fixed in the r6 commit with tests. |
 | 10 (r6b) | Confirmation of 2658948..d1ae18b (rebased onto 2253e59): Codex and Antigravity complete, no new findings (Antigravity: 2 turns, every `gen_metadata` row `gemini-4-neon-high`). Not verified: X30/A81 (the cli happy-path test used `test` instead of the `node:sqlite`-aware `ctest`) and, by Codex, X27/A76 (a row committed more than the 1.5 s window after its turn's reply still confirms the next turn) | X30/A81 fixed in the r6b commit. X27/A76 still open at r6b, addressed in the session-isolation follow-up below |
 | 11 (r7) | Delta review of the single-turn change (1b048ec..5e4bf66, correctness + security; prior X26–X30, A72–A81): Codex complete (`gpt-6.1-sol`/high, 223 s, 128K tokens), verdict fix with 0 findings (only A77 not verified: `lib/agy-session-db.mjs` was outside the snapshot); Antigravity complete (`gemini-4-neon`/high, ONE turn of 291 s, 1200 s budget, 555K tokens), verdict pass, 0 findings, every prior verified | No change needed. A77 stays fixed (r6 commit; the decoder file did not change in r7) |
+| 12 (r8) | FULL-PR review of `git diff 2a81372 4ac78e9` (all 34 files, correctness + security; no prior, new ids from X31/A82; `plan` skipped by human decision: always run Antigravity): Codex complete (`gpt-6.1-sol`/high, 410 s, 239K tokens), verdict block, X31–X38 (3 high, 5 med); Antigravity complete (`gemini-4-neon`/high, 2 scope chunks of 34 files / 511 KB diff, 668 s of a 1200 s budget, every `gen_metadata` row `gemini-4-neon-high`), verdict block, A82–A86 (1 high, 4 med); overlap X34 = A83 | Every finding real (severity adjusted below) and fixed with a regression test in the r8 commit; the delta rounds r1–r7 had missed all of them |
+
+### r8 dispositions
+
+| Id | Disposition | Ref |
+| --- | --- | --- |
+| A82 (high) | fixed | `realish` uses `realpath.native` (on-disk letter case), `checkOut` refuses `.git` in any case: `--out <repo>/.GIT/x` and `--out /x/myrepo/README.md` for `/x/MyRepo` were accepted (reproduced on APFS) |
+| A86 (med) | fixed | same `realish` change: a differently cased absolute in-repo checklist path is read from the git object, not the working tree |
+| X32 (high → med) | fixed | `plan --out` / `merge --out` write `path.resolve(out)`, the path `checkOut` checked; `ctx/link/../README.md` no longer reaches a tracked file through the symlink |
+| X33 (high → med) | fixed | `run` refuses an `--out` or `raw/` holding a symlink or special file, or a `raw` that is not a plain directory, before the first write (`assertNoLinks`) |
+| X31 (high → med) | fixed | Claude: every assistant `message.model` must equal the pin (`assistant_model_mismatch`); recorded as `reported.assistantModels` |
+| X34 (med) / A83 (med) | fixed | Antigravity child env is the `scrubEnv` allowlist + `hosts.antigravity.env_passthrough`, then the credential denylist (wins over passthrough); before, all of `process.env` except 19 keys was inherited |
+| X35 (med) | fixed | a non-JSON-RPC stdout line → `acp_stdout_unparseable` (no real run so far has produced one) |
+| X36 (med) | fixed | after the group is stopped both server pipes must close within 2 s, else `pipes_abandoned` and the pipes are dropped; `process.pipesClosed` in evidence |
+| X37 (med) | fixed | `merge` refuses a "complete" review whose verdict disagrees with its findings / prior verification, or a loc range below 1 or reversed |
+| A85 (med) | fixed | with evidence present, `merge` uses only its review; a separate `review.json` never stands in for a null one |
+| A84 (med → low) | fixed | `matchesPinned` is false when any model check failed (generation/proxy/usage/assistant), not only the header pin; status was already `incomplete` |
+| X38 (med → low) | fixed | `hashTree` uses a null-prototype object, so a root file named `__proto__` is hashed |
 
 The X27/A76 follow-up was checked against the code and security review checklists.
 The fake 1.5 server can commit a prior generation while the next split or retry

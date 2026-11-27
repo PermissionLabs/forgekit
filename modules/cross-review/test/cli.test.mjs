@@ -100,7 +100,7 @@ const EV = "cross-review-evidence@1";
 test("merge: same place + similar claim from two hosts -> one group keeping both ids (operator 3)", () => {
   const mk = (dir, host, findings) => {
     fs.mkdirSync(dir, { recursive: true });
-    const review = { verdict: "block", coverage: {}, findings, limits: [] };
+    const review = { verdict: findings.some((x) => x.sev === "high" || x.sev === "critical") ? "block" : findings.length ? "fix" : "pass", coverage: {}, findings, limits: [] };
     fs.writeFileSync(path.join(dir, "review.json"), JSON.stringify(review));
     fs.writeFileSync(path.join(dir, "evidence.json"), JSON.stringify({ schema: EV, reviewer: { host, idPrefix: findings[0]?.id[0] }, status: "complete", incompleteReasons: [], review }));
   };
@@ -209,4 +209,54 @@ test("run exit codes through the CLI: complete 0, incomplete 1, usage error 2 (A
   const usage = spawnSync(process.execPath, [CLI, "run", "--host", "codex", "--out", path.join(tmp, "cli-run-usage")], { cwd: tmp, encoding: "utf8" });
   assert.equal(usage.status, 2);
   assert.match(usage.stderr, /--rev is required|is required/);
+});
+
+// ---------------------------------------------------------------- r8 full-PR review fixes
+const completeDir = (dir, review, evReview = review) => {
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "review.json"), JSON.stringify(review));
+  fs.writeFileSync(path.join(dir, "evidence.json"), JSON.stringify({ schema: EV, reviewer: { host: "codex", idPrefix: "X" }, status: "complete", incompleteReasons: [], review: evReview }));
+  return dir;
+};
+const fx = (sev, loc = "a.mjs:1") => ({ id: "X1", sev, loc, claim: "c", evidence: "e", check: "k" });
+
+test("merge: a verdict inconsistent with the findings or a bad line range is never shown as complete (X37)", () => {
+  for (const [name, review] of [
+    ["pass-high", { verdict: "pass", findings: [fx("high")] }],
+    ["fix-high", { verdict: "fix", findings: [fx("high")] }],
+    ["pass-unverified", { verdict: "pass", findings: [], prior_verification: [{ id: "X0", verified: false, note: "n" }] }],
+    ["zero-line", { verdict: "fix", findings: [fx("med", "a.mjs:0-0")] }],
+    ["reversed", { verdict: "fix", findings: [fx("med", "a.mjs:9-3")] }],
+  ]) {
+    const e = loadReviewEntry(completeDir(path.join(tmp, "r8m", name), { coverage: {}, limits: [], ...review }));
+    assert.equal(e.status, "incomplete", name);
+    const m = mergeReviews([e]);
+    assert.equal(m.hosts[0].status, "incomplete", name);
+    assert.equal(m.groups.length, 0, name);
+  }
+  assert.equal(loadReviewEntry(completeDir(path.join(tmp, "r8m", "ok"), { verdict: "block", coverage: {}, limits: [], findings: [fx("high")] })).status, "complete");
+});
+
+test("merge: evidence with a null review is incomplete even when a separate review.json looks valid (A85)", () => {
+  const d = completeDir(path.join(tmp, "r8m", "nullrev"), { verdict: "pass", coverage: {}, findings: [], limits: [] }, null);
+  for (const arg of [d, path.join(d, "review.json"), path.join(d, "evidence.json")]) assert.equal(loadReviewEntry(arg).status, "incomplete", arg);
+});
+
+test("merge/plan --out: a symlink followed by .. writes where it was checked, never into a tracked file (X32)", () => {
+  fs.mkdirSync(path.join(repo, "ctx"), { recursive: true });
+  fs.symlinkSync("../src", path.join(repo, "ctx", "link"));
+  const rev = completeDir(path.join(tmp, "r8m", "x32"), { verdict: "pass", coverage: {}, findings: [], limits: [] });
+  const r = cli(["merge", "--review", rev, "--out", "ctx/link/../README.md"], repo);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(fs.readFileSync(path.join(repo, "README.md"), "utf8"), "# r\n");
+  assert.ok(fs.existsSync(path.join(repo, "ctx", "README.md")));
+});
+
+const caseInsensitive = () => { try { return fs.realpathSync.native(repo.toUpperCase()) === fs.realpathSync.native(repo); } catch { return false; } };
+test("checkOut: another letter case of the repository or of .git is still refused (A82)", { skip: !caseInsensitive() && "case-sensitive filesystem" }, () => {
+  const upper = path.join(path.dirname(repo), path.basename(repo).toUpperCase());
+  assert.throws(() => checkOut(repo, path.join(upper, "README.md"), { dir: false }), /tracked|not git-ignored/);
+  assert.throws(() => checkOut(null, path.join(upper, "README.md"), { dir: false }), /tracked|not git-ignored/);
+  assert.throws(() => checkOut(null, path.join(repo, ".GIT", "x.json"), { dir: false }), /\.git directory/);
+  assert.throws(() => checkOut(repo, path.join(repo, ".Git", "x.json"), { dir: false }), /\.git directory/);
 });

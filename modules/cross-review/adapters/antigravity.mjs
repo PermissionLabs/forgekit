@@ -35,7 +35,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { expandHome } from "../lib/policy.mjs";
 import { insideRoot, redact, sha256 } from "../lib/inputs.mjs";
-import { bypassFlags, groupMembers, ownedMembers, ownershipTimeMs } from "../lib/proc.mjs";
+import { bypassFlags, groupMembers, ownedMembers, ownershipTimeMs, scrubEnv } from "../lib/proc.mjs";
 import { TURN_DEFAULTS, groupsFor, layoutConfig, planTurns, runTurns, totalBudget } from "../lib/turns.mjs";
 import { countGenerations, sessionGenerations } from "../lib/agy-session-db.mjs";
 
@@ -72,11 +72,16 @@ export function sessionNewParams(cwd) {
   return { cwd, mcpServers: [], _meta: { antigravity: { enabledTools: ENABLED_TOOLS } } };
 }
 
-export function buildEnv(base, { geminiHome, tmpDir, harness, layout = "par", shimDir = null }) {
+/**
+ * Child environment (X34): the same minimal allowlist as every reviewer (scrubEnv: BASE_ENV, LC_*, and
+ * hosts.antigravity.env_passthrough), then the provider-credential denylist (it wins over passthrough), then the
+ * isolation variables below.
+ */
+export function buildEnv(base, { geminiHome, tmpDir, harness, layout = "par", shimDir = null, passthrough = [] }) {
   const q = (s) => `'${s.replaceAll("'", `'"'"'`)}'`;
   const helper = `process.stderr.on("error",()=>process.exit(0)).write("${BROWSER_MARKER}"+"\\n",()=>process.exit(0))`;
   const env = {};
-  for (const [k, v] of Object.entries(base)) if (v !== undefined && !REMOVED_ENV.has(k.toUpperCase())) env[k] = v;
+  for (const [k, v] of Object.entries(scrubEnv(base, passthrough))) if (!REMOVED_ENV.has(k.toUpperCase())) env[k] = v;
   Object.assign(env, {
     GEMINI_HOME: geminiHome,
     AGY_ACP_FORCE_FILE_STORAGE: "1",
@@ -296,7 +301,7 @@ export async function run(ctx) {
   let authRequired = false, nextId = 1, collecting = null, upstreamFailures = 0, upstreamInTurns = 0, cleanupStartedWall = null;
   let logFile = null, browserMarker = null, logOffset = 0, logBuf = "", logAll = "";
   const msgLines = [];
-  let errAll = "", errBuf = "";
+  let errAll = "", errBuf = "", stdoutUnparseable = 0;
   const pending = new Map();
   const agentErrors = [];
   const toolItems = [];
@@ -308,8 +313,9 @@ export async function run(ctx) {
   let psBefore = [];
   let resolveExited;
   const childExited = new Promise((res) => { resolveExited = res; });
-  let resolveErrClosed;
+  let resolveErrClosed, resolveOutClosed;
   const errClosed = new Promise((res) => { resolveErrClosed = res; });
+  const outClosed = new Promise((res) => { resolveOutClosed = res; });
   const failPending = (msg) => { for (const p of pending.values()) p.reject(new Error(msg)); pending.clear(); };
 
   const slim = (m) => (m?.method === "session/prompt" && Array.isArray(m.params?.prompt))
@@ -362,7 +368,9 @@ export async function run(ctx) {
     if (!line.trim()) return;
     if (line.startsWith(AUTH_PREFIX)) { authRequired = true; failPending("AUTH_REQUIRED"); return; }
     let m;
-    try { m = JSON.parse(line); } catch { msgLines.push(redact(line.slice(0, 500))); return; }
+    // X35: a line that is not JSON-RPC could hide a tool call from the audit; it is logged and makes the run incomplete.
+    try { m = JSON.parse(line); } catch { stdoutUnparseable++; msgLines.push(redact(line.slice(0, 500))); return; }
+    if (!m || typeof m !== "object" || Array.isArray(m)) { stdoutUnparseable++; return; }
     logMsg("in", m);
     if (m.id !== undefined && m.method === undefined) {
       const p = pending.get(m.id);
@@ -483,11 +491,11 @@ export async function run(ctx) {
     if (bypass.length) { reasons.push(`bypass_flags_in_argv:${bypass.join(",")} (refused before spawn)`); return; }
     out.isolation = { geminiHome: home, antigravityAcpLink: acpDir, cwd, clientCapabilities: CLIENT_CAPABILITIES, sessionMeta: { antigravity: { enabledTools: ENABLED_TOOLS } }, enabledToolsEnforcedBy: cli ? "audit only (1.5 ignores enabledTools)" : "runtime + audit", permissionPolicy: "reject_once", runtime: version, layout, browserShim: shimDir };
     psBefore = psList().filter((p) => isAgy(p.cmd, serverBin)).map((p) => p.pid);
-    const env = buildEnv(process.env, { geminiHome: home, tmpDir, harness: path.join(runtimeDir, "localharness_external"), layout, shimDir });
+    const env = buildEnv(process.env, { geminiHome: home, tmpDir, harness: path.join(runtimeDir, "localharness_external"), layout, shimDir, passthrough: pin.envPassthrough ?? pin.config.env_passthrough ?? [] });
     spawnedOwnershipMs = ownershipTimeMs();
     child = spawn(serverBin, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"], detached: true });
     child.on("exit", (code, signal) => { exitInfo = { code, signal, atMs: ms(), wall: Date.now(), ownershipMs: ownershipTimeMs(), duringCleanup: cleanupStartedWall !== null }; failPending(`agent exited (${code ?? signal})`); resolveExited(); });
-    child.on("error", (e) => { spawnFailed = e.message; reasons.push(`spawn_error:${e.message}`); failPending(`spawn failed: ${e.message}`); resolveExited(); resolveErrClosed(); });
+    child.on("error", (e) => { spawnFailed = e.message; reasons.push(`spawn_error:${e.message}`); failPending(`spawn failed: ${e.message}`); resolveExited(); resolveErrClosed(); resolveOutClosed(); });
     child.stdin.on("error", () => {});
     let buf = "";
     child.stdout.setEncoding("utf8").on("data", (chunk) => {
@@ -503,6 +511,7 @@ export async function run(ctx) {
       let nl;
       while ((nl = errBuf.indexOf("\n")) !== -1) { const line = errBuf.slice(0, nl); errBuf = errBuf.slice(nl + 1); onStderrLine(line); }
     });
+    child.stdout.on("close", () => resolveOutClosed());
     child.stderr.on("close", () => { if (errBuf) { onStderrLine(errBuf); errBuf = ""; } resolveErrClosed(); });
 
     const init = await request("initialize", { protocolVersion: 2, clientCapabilities: CLIENT_CAPABILITIES, clientInfo: { name: "zed", version: "0.0.0" } });
@@ -656,7 +665,13 @@ export async function run(ctx) {
         exited: () => exitInfo !== null, waitExit: (n) => Promise.race([childExited, sleep(n)]),
         members: groupMembers, kill: (p, s) => process.kill(p, s),
       });
-      await Promise.race([errClosed, sleep(2000)]);
+      // X36: both pipes must close once the group is gone; a descendant that left the group and still holds them
+      // could keep writing protocol lines the audit never sees, so the run is incomplete and the pipes are dropped.
+      const closed = await Promise.race([Promise.all([errClosed, outClosed]).then(() => true), sleep(2000).then(() => false)]);
+      if (!closed) {
+        reasons.push("pipes_abandoned: a process outside the server's group kept its stdout/stderr open; the transcript may be incomplete");
+        try { child.stdout.destroy(); child.stderr.destroy(); } catch {}
+      }
       // An unterminated last stderr line (e.g. RESOURCE_EXHAUSTED at exit) is flushed and checked here, before
       // the review can be accepted: any fatal agent error or upstream failure seen anywhere invalidates the run.
       if (errBuf) { onStderrLine(errBuf); errBuf = ""; }
@@ -670,7 +685,7 @@ export async function run(ctx) {
       // agy processes outside our group may belong to another session: reported, never signalled.
       const strays = psList().filter((p) => isAgy(p.cmd, serverBin) && p.pgid !== pid && !psBefore.includes(p.pid)).map((p) => p.pid);
       if (strays.length) out.warnings.push(`agy processes outside this run's process group (not signalled): ${strays.join(",")}`);
-      out.process = { exit: exitInfo, signals, straysOutsideGroup: strays.length };
+      out.process = { exit: exitInfo, signals, straysOutsideGroup: strays.length, pipesClosed: closed };
     }
     if (browserMarker && fs.existsSync(browserMarker)) authRequired = true; // a sign-in tried to open a browser
     out.sessionCleanups = [];
@@ -707,6 +722,8 @@ export async function run(ctx) {
     out.toolAudit.itemsWithoutCallId = idless;
     if (idless) reasons.push(`tool_calls_without_id:${idless}`);
     if (clientRequests.length) reasons.push(`unexpected_client_requests:${clientRequests.length}`);
+    out.toolAudit.stdoutUnparseableLines = stdoutUnparseable;
+    if (stdoutUnparseable) reasons.push(`acp_stdout_unparseable:${stdoutUnparseable} line(s) not JSON-RPC (a tool call may be missing from the audit)`);
     if (permissionRequests.length) out.warnings.push(`permission requests rejected (reject_once): ${permissionRequests.length}`);
     if (!cli) {
       // Per-turn model confirmation: every prompt turn must carry at least one matching proxy line.
