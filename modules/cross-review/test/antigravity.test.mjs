@@ -28,14 +28,20 @@ test("T3 discovery keeps runtime and profile together and respects explicit path
   const standard = installationRoots({}, home);
   const runtime = path.relative(path.join(home, ".t3"), standard.runtime);
   const custom = path.join(home, ".t3-custom");
-  fs.mkdirSync(path.join(custom, runtime), { recursive: true });
+  fs.mkdirSync(standard.runtime, { recursive: true });
+  const fakeInstall = root => {
+    const release = path.join(root, "1.4.0");
+    fs.mkdirSync(release, { recursive: true });
+    fs.writeFileSync(path.join(release, "agy_acp_server.par"), "fixture", { mode: 0o700 });
+  };
+  fakeInstall(path.join(custom, runtime));
   assert.deepEqual(installationRoots({}, home), {
     runtime: path.join(custom, runtime),
     profiles: path.join(custom, "userdata", "providers", "antigravity"),
   });
   assert.equal(installationRoots({ profile_root: "/explicit" }, home).runtime, standard.runtime);
   assert.equal(installationRoots({ runtime_root: "/explicit" }, home).profiles, standard.profiles);
-  fs.mkdirSync(standard.runtime, { recursive: true });
+  fakeInstall(standard.runtime);
   assert.deepEqual(installationRoots({}, home), standard);
 });
 

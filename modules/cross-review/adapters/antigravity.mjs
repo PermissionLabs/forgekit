@@ -116,9 +116,9 @@ export function installationRoots(settings, home = os.homedir()) {
   const profiles = path.join("userdata", "providers", "antigravity");
   let installation = path.join(home, ".t3");
   if (!settings.runtime_root && !settings.profile_root && !settings.profile &&
-      !fs.existsSync(path.join(installation, runtime))) {
+      !findRuntime(path.join(installation, runtime)).version) {
     const custom = path.join(home, ".t3-custom");
-    if (fs.existsSync(path.join(custom, runtime))) installation = custom;
+    if (findRuntime(path.join(custom, runtime)).version) installation = custom;
   }
   return {
     runtime: settings.runtime_root ?? path.join(installation, runtime),
@@ -182,7 +182,7 @@ export function runtimeEntry(root, name) {
 /** Runtime: `{platform}-{arch}` placeholders expanded; the highest version of either layout (runtimeEntry). */
 export function findRuntime(runtimeRootSetting) {
   const root = expandHome(String(runtimeRootSetting ?? "~/.t3/tools/antigravity-acp/{platform}-{arch}/versions").replaceAll("{platform}", process.platform).replaceAll("{arch}", process.arch));
-  if (!fs.existsSync(root)) return { root, version: null };
+  if (!fs.statSync(root, { throwIfNoEntry: false })?.isDirectory()) return { root, version: null };
   const cmp = (a, b) => {
     const pa = a.split(/[.\-+_]/), pb = b.split(/[.\-+_]/);
     for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
