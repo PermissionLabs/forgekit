@@ -12,9 +12,9 @@ const model = args[args.indexOf("--model") + 1];
 const emit = (m) => process.stdout.write(JSON.stringify(m) + "\n");
 emit({ type: "system", subtype: "init", model: process.env.FAKE_INIT_MODEL ?? model, cwd: process.cwd(), tools: (process.env.FAKE_TOOLS ?? "Glob,Grep,Read,StructuredOutput").split(","), mcp_servers: [], permissionMode: "dontAsk" });
 const read = process.env.FAKE_READ ?? `${process.cwd()}/src/a.ts`;
-// FAKE_ASSISTANT_MODEL="" omits message.model; FAKE_ASSISTANT_MODEL_ON_RETRY applies to the corrective retry only.
+// FAKE_ASSISTANT_MODEL="" omits message.model, FAKE_NO_ASSISTANT omits the assistant event; FAKE_ASSISTANT_MODEL_ON_RETRY applies to the corrective retry only.
 const asstModel = (retry ? process.env.FAKE_ASSISTANT_MODEL_ON_RETRY : undefined) ?? process.env.FAKE_ASSISTANT_MODEL ?? model;
-emit({ type: "assistant", message: { ...(asstModel ? { model: asstModel } : {}), content: [{ type: "tool_use", id: "t1", name: "Read", input: { file_path: read } }] } });
+if (!process.env.FAKE_NO_ASSISTANT) emit({ type: "assistant", message: { ...(asstModel ? { model: asstModel } : {}), content: [{ type: "tool_use", id: "t1", name: "Read", input: { file_path: read } }] } });
 if (process.env.FAKE_WRITE) { fs.chmodSync(`${process.cwd()}/src/a.ts`, 0o644); fs.writeFileSync(`${process.cwd()}/src/a.ts`, "tampered"); }
 const outs = (process.env.FAKE_OUTPUTS ?? process.env.FAKE_REVIEW).split("\n---\n");
 const text = outs[Math.min(retry ? 1 : 0, outs.length - 1)];

@@ -39,7 +39,7 @@ export function assertNoLinks(out, rawDir) {
   }
 }
 
-const MODEL_REASON = /model_mismatch|model_unconfirmed|model_pin_not_applied|pinned_model_not_in_modelUsage|reported_model|effort_mismatch|reported_effort/;
+const MODEL_REASON = /model_mismatch|model_unconfirmed|no_assistant_event|model_pin_not_applied|pinned_model_not_in_modelUsage|reported_model|effort_mismatch|reported_effort/;
 
 const readJson = (p, what) => { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch (e) { throw new Error(`cannot read ${what} ${p}: ${e.message}`); } };
 

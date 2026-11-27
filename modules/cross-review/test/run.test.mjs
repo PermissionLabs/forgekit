@@ -18,7 +18,7 @@ let tmp, repo, rev, policyPath, diffPath, briefPath, fakeCodex;
 const git = (...a) => execFileSync("git", ["-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "-C", repo, ...a], { encoding: "utf8" }).trim();
 const DIMS = ["correctness", "tests"];
 const review = (over = {}) => JSON.stringify({ verdict: "fix", coverage: { correctness: "checked", tests: "n/a:no tests in scope" }, findings: [{ id: "C1", sev: "med", loc: "src/a.ts:2", claim: "c", evidence: "e", check: "k" }], limits: [], ...over });
-const FAKE_KEYS = ["FAKE_NO_EFFORT_ON_RETRY", "FAKE_TIMEOUT_AFTER_OUTPUT", "FAKE_REVIEW", "FAKE_OUTPUTS", "FAKE_READ", "FAKE_WRITE", "FAKE_INIT_MODEL", "FAKE_USAGE_MODEL", "FAKE_TOOLS", "FAKE_REPORTED_MODEL", "FAKE_SANDBOX", "FAKE_COMMAND", "FAKE_ARGV_OUT", "FAKE_ENV_OUT", "FAKE_ESCAPE", "FAKE_NO_O", "FAKE_EMPTY_O", "FAKE_STDOUT", "FAKE_NO_EFFORT", "FAKE_PROMPT_ECHO", "FAKE_COMMAND_OUTPUT", "FAKE_APPROVAL", "FAKE_SANDBOX_NOOP", "FAKE_ASSISTANT_MODEL", "FAKE_ASSISTANT_MODEL_ON_RETRY"];
+const FAKE_KEYS = ["FAKE_NO_EFFORT_ON_RETRY", "FAKE_TIMEOUT_AFTER_OUTPUT", "FAKE_REVIEW", "FAKE_OUTPUTS", "FAKE_READ", "FAKE_WRITE", "FAKE_INIT_MODEL", "FAKE_USAGE_MODEL", "FAKE_TOOLS", "FAKE_REPORTED_MODEL", "FAKE_SANDBOX", "FAKE_COMMAND", "FAKE_ARGV_OUT", "FAKE_ENV_OUT", "FAKE_ESCAPE", "FAKE_NO_O", "FAKE_EMPTY_O", "FAKE_STDOUT", "FAKE_NO_EFFORT", "FAKE_PROMPT_ECHO", "FAKE_COMMAND_OUTPUT", "FAKE_APPROVAL", "FAKE_SANDBOX_NOOP", "FAKE_ASSISTANT_MODEL", "FAKE_ASSISTANT_MODEL_ON_RETRY", "FAKE_NO_ASSISTANT"];
 const setFake = (env) => { for (const k of FAKE_KEYS) delete process.env[k]; Object.assign(process.env, env); };
 
 before(() => {
@@ -443,6 +443,11 @@ test("claude: an assistant event without a model withholds the review; matchesPi
   const ev = await runReview(opts("claude", "out-x1-nomodel"), policy(), policyPath);
   assertWithheld(ev, /assistant_model_unconfirmed:1/);
   assert.equal(ev.matchesPinned, false);
+  // r1 X1 follow-up: no assistant event at all is a model failure too, at evidence level.
+  setFake({ FAKE_REVIEW: review(), FAKE_NO_ASSISTANT: "1" });
+  const none = await runReview(opts("claude", "out-x1-noasst"), policy(), policyPath);
+  assertWithheld(none, /no_assistant_event/);
+  assert.equal(none.matchesPinned, false);
 });
 
 test("claude: evidence.reported is the final attempt's report, so a retry's mismatch is visible (A2/A4)", async () => {
