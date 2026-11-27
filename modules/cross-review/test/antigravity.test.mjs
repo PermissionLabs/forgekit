@@ -10,7 +10,7 @@ import { loadPolicy, defaultPolicyPath } from "../lib/policy.mjs";
 import { runReview } from "../lib/run.mjs";
 import { buildEnv, exitReason, findRuntime, installationRoots, isAgy, launchArgs, planTurns, stopGroup, totalBudget } from "../adapters/antigravity.mjs";
 import { countGenerations, decodeGeneration, normalizeModelName, protoFields } from "../lib/agy-session-db.mjs";
-import { plan } from "../lib/plan.mjs";
+import { plan, planForInstallation } from "../lib/plan.mjs";
 import { PAR_LAYOUT_DEFAULTS, TURN_DEFAULTS, layoutConfig, runTurns } from "../lib/turns.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -35,6 +35,9 @@ test("T3 discovery keeps runtime and profile together and respects explicit path
     fs.writeFileSync(path.join(release, "agy_acp_server.par"), "fixture", { mode: 0o700 });
   };
   fakeInstall(path.join(custom, runtime));
+  const review = planForInstallation({ policy: basePolicy, author: "codex", dimensions: ["security", "tests"], paths: ["src/a.ts"], usage: null }, home);
+  assert.equal(review.hosts.antigravity.budget.layout, "par");
+  assert.equal(review.hosts.antigravity.budget.estimatedTurns, 2);
   assert.deepEqual(installationRoots({}, home), {
     runtime: path.join(custom, runtime),
     profiles: path.join(custom, "userdata", "providers", "antigravity"),
@@ -516,6 +519,13 @@ ctest("cli layout: tool audit keeps a call's name across title-only updates, and
 ctest("cli layout: the top-level turn_timeout_sec bounds the single turn (r7)", async () => {
   withheld(await goCli({}, { turn_timeout_sec: 1 }), /total_timeout_before:group:correctness\+tests/);
   assert.equal((await goCli({}, par({ turn_timeout_sec: 1 }))).status, "complete");
+});
+
+ctest("a native retry gets the whole turn budget while a legacy correction honors its shorter cap", async () => {
+  const native = await goCli({ invalid: [0] }, { retry_timeout_sec: 1 });
+  assert.equal(native.status, "complete", native.incompleteReasons.join());
+  assert.equal(native.attempts.length, 2);
+  withheld(await go({ invalid: [0] }, par({ retry_timeout_sec: 1 })), /total_timeout_before_retry/);
 });
 
 ctest("cli layout: session files are kept when the database has no session id (X26/A77)", async () => {

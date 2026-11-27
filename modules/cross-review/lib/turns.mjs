@@ -10,7 +10,7 @@
 // par_layout (defaults PAR_LAYOUT_DEFAULTS) over the top-level values for that layout.
 
 /** Code defaults for keys the policy leaves out (runtime 1.5 "cli"). */
-export const TURN_DEFAULTS = Object.freeze({ max_files_per_turn: 32, max_bytes_per_turn: 400_000, turn_timeout_sec: 1200, retry_timeout_sec: 600 });
+export const TURN_DEFAULTS = Object.freeze({ max_files_per_turn: 32, max_bytes_per_turn: 400_000, turn_timeout_sec: 1200 });
 
 /** The <= 1.4 "par" runtime's split (300 s proxy first-byte wall); policy par_layout keys override these. */
 export const PAR_LAYOUT_DEFAULTS = Object.freeze({

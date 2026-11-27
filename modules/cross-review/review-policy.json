@@ -65,7 +65,6 @@
       "rereview_note": "Speed knob for a layout with groups (par_layout): a re-review (prior findings given) whose diff is at most rereview_single_group_max_diff_bytes runs one group with every dimension per file chunk instead of one turn per dimension group. plan --prior estimates the same way. No effect with groups [] (already one group).",
       "budget_note": "Total run budget = per_turn_budget_sec x planned turns, at least min_total_sec (default turn_timeout_sec), capped by max_total_sec (timeout_sec applies only when per_turn_budget_sec is absent). Runtime 1.5.18 (2026-11-27): a one-turn review of the full PR #26 (24 files, 215 KB) took 495 s, so one turn gets min_total_sec 1200 and turn_timeout_sec 1200.",
       "turn_timeout_sec": 1200,
-      "retry_timeout_sec": 600,
       "groups": [],
       "max_files_per_turn": 32,
       "max_bytes_per_turn": 400000,

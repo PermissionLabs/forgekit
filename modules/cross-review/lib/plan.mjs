@@ -1,5 +1,6 @@
-// `plan`: review grade, reviewer selection and pace. Pure functions; no network, no token files.
+// `plan`: review grade, reviewer selection and pace. Only planForInstallation reads local runtime metadata.
 // Usage data is whatever the caller saved from the T3 MCP tool `provider_usage_limits`.
+import { findRuntime, installationRoots } from "../adapters/antigravity.mjs";
 import { HOSTS } from "./policy.mjs";
 import { parseDiffPaths } from "./diff.mjs";
 import { groupsFor, layoutConfig, runTurns, totalBudget } from "./turns.mjs";
@@ -142,6 +143,18 @@ export function antigravityBudget(policyHost, dimensions, files, { rereview = fa
   const b = { ...base, perTurnSec: per, floorSec: tb.floorSec, capSec: tb.capSec, totalSec: tb.totalMs / 1000 };
   if (tb.capped) b.warning = `antigravity: about ${turns} turns x ${per} s = ${per * turns} s exceeds max_total_sec ${tb.capSec} s; later turns may not run (split the review or raise the cap)`;
   return b;
+}
+
+/** Estimate with the same installed runtime and profile selection used when starting a review. */
+export function planForInstallation(options, home) {
+  let antigravityLayout = "cli";
+  try {
+    const roots = installationRoots(options.policy.hosts.antigravity?.runtime ?? {}, home);
+    antigravityLayout = findRuntime(roots.runtime).layout ?? "cli";
+  } catch {
+    // Planning remains available on machines without a readable local runtime.
+  }
+  return plan({ ...options, antigravityLayout });
 }
 
 // ---------------------------------------------------------------- selection
