@@ -171,6 +171,13 @@ flowchart TD
 
 ## Verification
 
+- After the rebase onto main 9fecd93 (2026-11-27): `node --test modules/cross-review/test/*.test.mjs`:
+  166 tests, 165 pass, 1 skipped (Linux-only boot-time case), 0 fail. Real Antigravity smoke `run`
+  (1 file, `lib/merge.mjs`, correctness): complete, `gemini-4-neon`/high reported, both
+  `gen_metadata` rows `gemini-4-neon-high`, `matchesPinned: true`, `pipesClosed: true`, one owned
+  session cleaned. Its one finding (`prior_verification` entries not shape-checked in merge; a
+  `verified: "false"` entry read as verified) was fixed with a test (fails without the fix).
+  Evidence: `stem-d/reviews/r9/smoke/out/`.
 - After the r8 delta follow-up (2026-11-27): 161 tests pass; the 3 new/extended tests (X35/A87, A84,
   A86) fail on the c764be6 sources. Every incoming message in all saved real Antigravity runs (r2–r8,
   smoke) is a JSON-RPC 2.0 object, so the stricter stdout check has no known false positive.
@@ -325,6 +332,28 @@ runtime directory listing. Code defaults for missing keys: `TURN_DEFAULTS` (32 f
 1200 s, retry 600 s, budget floor 1200 s). The single-turn review loses the per-dimension focus of
 the group split: run2 found the med finding (and two lows) run3 missed, run3 found three other lows
 (the `.gitignore` race, a stale doc bullet, the alias guard); both found the `cd` issue. See Residuals.
+
+### Rebase onto main (MacBook runner fixes, 2026-11-27)
+
+`agent/cross-review-runner` was rebased from 2a81372 onto main 9fecd93, which already held the runner
+through r7 (5e4bf66) plus the MacBook fixes a30c7de..0661fd8 (T3 runtime/profile discovery incl.
+`~/.t3-custom`, per-prompt evidence isolation, session-table init tolerance, native retry budgets,
+managed install selection, Linux ownership by boot time). The 17 patch-equivalent commits dropped;
+the r7 docs and the two r8 commits remain. Conflicts and how they were joined:
+
+- `adapters/antigravity.mjs`: main's per-session cleanup (`sessionCleanups`), `sessionGenerations`
+  and `ownershipTimeMs` kept as is; our X34 env allowlist (`scrubEnv` + `env_passthrough`, denylist on
+  top), X35/A87 strict JSON-RPC stdout parse with the close-time flush, and X36 pipe closure
+  (`pipesClosed`, `pipes_abandoned`) applied on top. The spawn-error path also settles `outClosed`.
+- `cross-review.mjs` `plan`: main's `planForInstallation` (installed layout from the discovered
+  installation) with our X32 rule (the checked `--out` path is the written one).
+- Docs: main's r6b row and X27/A76 session-isolation note kept; our r7 row placed after it.
+- Nothing from either side dropped. One test adapted: the A87 late `tool_call` line now carries the
+  fake server's current session id (`__SID__`), since main's isolation rejects a session-less update
+  as `session_update_id_mismatch` (still withheld, but the test asserts the audit path).
+- X34 vs discovery: runtime/profile discovery runs in the runner process (`os.homedir()`, the policy),
+  not the child, so the allowlist does not affect it; the child keeps `HOME`/`PATH`/`USER`/`TMPDIR`
+  (overridden), and the smoke below ran with `env_passthrough: []`. No passthrough entry was needed.
 
 ## Review Cycles
 

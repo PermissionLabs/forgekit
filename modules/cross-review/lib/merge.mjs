@@ -43,7 +43,10 @@ export function reviewShapeProblems(review) {
     for (const k of ["claim", "evidence", "check"]) if (typeof f[k] !== "string" || !f[k].trim()) errs.push(`findings[${i}].${k} empty`);
   });
   // X37: the verdict must agree with the findings and prior verification, as run's validator requires.
-  if (review.prior_verification !== undefined && !Array.isArray(review.prior_verification)) errs.push("prior_verification is not an array");
+  const pv = review.prior_verification;
+  if (pv !== undefined && !Array.isArray(pv)) errs.push("prior_verification is not an array");
+  // (r9 smoke) each entry an object with a string id and a boolean verified, so "false" or null never reads as verified.
+  else if (pv?.some((p) => !p || typeof p !== "object" || Array.isArray(p) || typeof p.id !== "string" || !p.id || typeof p.verified !== "boolean")) errs.push("prior_verification entries need a string id and a boolean verified");
   else if (VERDICTS.includes(review.verdict) && review.findings.every((f) => f && typeof f === "object")) {
     const want = expectedVerdict(review.findings, review.prior_verification ?? []);
     if (review.verdict !== want) errs.push(`verdict ${review.verdict} inconsistent with findings/prior_verification (expected ${want})`);

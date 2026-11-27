@@ -227,6 +227,8 @@ test("merge: a verdict inconsistent with the findings or a bad line range is nev
     ["pass-unverified", { verdict: "pass", findings: [], prior_verification: [{ id: "X0", verified: false, note: "n" }] }],
     ["zero-line", { verdict: "fix", findings: [fx("med", "a.mjs:0-0")] }],
     ["reversed", { verdict: "fix", findings: [fx("med", "a.mjs:9-3")] }],
+    ["pv-null", { verdict: "pass", findings: [], prior_verification: [null] }],
+    ["pv-string-verified", { verdict: "pass", findings: [], prior_verification: [{ id: "X0", verified: "false", note: "n" }] }],
   ]) {
     const e = loadReviewEntry(completeDir(path.join(tmp, "r8m", name), { coverage: {}, limits: [], ...review }));
     assert.equal(e.status, "incomplete", name);
