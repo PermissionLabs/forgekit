@@ -171,7 +171,7 @@ flowchart TD
 
 ## Verification
 
-- After the r7 single-turn change (2026-11-27, rebased onto forgekit PR #26 head 2a899d0):
+- After the r7 single-turn change (2026-11-27, now rebased onto forgekit PR #26 head 2a81372):
   `node --test modules/cross-review/test/*.test.mjs`: 147 tests pass. Mutation checks on scratch
   copies, each failing at least one test: `layoutConfig` ignoring the layout (13 fail), the adapter
   using the raw policy instead of `layoutConfig` (9), `TURN_DEFAULTS.max_files_per_turn` dropped (1),
@@ -377,6 +377,7 @@ the group split: run2 found the med finding (and two lows) run3 missed, run3 fou
 | 8 (r5) | Confirmation re-review of 481a88c..aa873f3: Codex complete (198 s, 128,037 tokens; self-test ok, 7 probes incl. `/private/var/tmp`), verdict fix, 1 med X25; Antigravity complete (4 turns = plan estimate, one re-review group, 582 s of a 720 s budget), verdict fix, 1 med + 4 low A67–A71; both hosts verified 12/12 priors (A50 and A53 now verified by Codex); merge grouped X25=A70 | No high/critical. X25/A70 (med) new sandbox tests assumed macOS paths (`/private/var/tmp`, `/tmp`→`/private/tmp`) and failed on Linux; A71 the A60 regression test let `path.join` normalise `bin/..` away; A69 the `turn_timeout_sec` floor branch was not exercised and a comment misnamed the floor; A68 `budget.singleGroup` shown whenever one group resulted; A67 README `plan` budget text was the r3 formula | All five fixed test/doc/display-only (no sandbox/argv/status logic change); suite also run on Linux (node:22 container: 126 pass, 6 macOS-only skipped, 0 fail) |
 | 9 (r6) | Delta review of the Antigravity 1.5 adapter (7613dcc..f42edcb): Codex complete, verdict block, X26–X30 (2 high, 3 med); Antigravity incomplete (`total_timeout_before:group:correctness:files2/2`, 3 of 4 turns), draft A72–A81 (1 high, 5 med, 4 low) | All real except as noted in the r6 dispositions; fixed in the r6 commit with tests. |
 | 10 (r6b) | Confirmation of 2658948..d1ae18b (rebased onto 2253e59): Codex and Antigravity complete, no new findings (Antigravity: 2 turns, every `gen_metadata` row `gemini-4-neon-high`). Not verified: X30/A81 (the cli happy-path test used `test` instead of the `node:sqlite`-aware `ctest`) and, by Codex, X27/A76 (a row committed more than the 1.5 s window after its turn's reply still confirms the next turn) | X30/A81 fixed in the r6b commit. X27/A76 still open at r6b, addressed in the session-isolation follow-up below |
+| 11 (r7) | Delta review of the single-turn change (1b048ec..5e4bf66, correctness + security; prior X26–X30, A72–A81): Codex complete (`gpt-6.1-sol`/high, 223 s, 128K tokens), verdict fix with 0 findings (only A77 not verified: `lib/agy-session-db.mjs` was outside the snapshot); Antigravity complete (`gemini-4-neon`/high, ONE turn of 291 s, 1200 s budget, 555K tokens), verdict pass, 0 findings, every prior verified | No change needed. A77 stays fixed (r6 commit; the decoder file did not change in r7) |
 
 The X27/A76 follow-up was checked against the code and security review checklists.
 The fake 1.5 server can commit a prior generation while the next split or retry
