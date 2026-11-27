@@ -171,6 +171,12 @@ flowchart TD
 
 ## Verification
 
+- After the r7 single-turn change (2026-11-27, rebased onto forgekit PR #26 head 2a899d0):
+  `node --test modules/cross-review/test/*.test.mjs`: 147 tests pass. Mutation checks on scratch
+  copies, each failing at least one test: `layoutConfig` ignoring the layout (13 fail), the adapter
+  using the raw policy instead of `layoutConfig` (9), `TURN_DEFAULTS.max_files_per_turn` dropped (1),
+  `plan` ignoring the layout (2), `par_layout` applied under `PAR_LAYOUT_DEFAULTS` instead of over it
+  (3), the per-turn timeout read from the top level instead of the layout config (1).
 - After the r4 fixes (2026-11-26): `node --test modules/cross-review/test/*.test.mjs`: 132 tests pass
   (8 files; the real-codex `codex sandbox` self-test ran, not skipped). Run against the 481a88c
   sources (new tests, old code), 10 tests fail there (adapters.test.mjs fails at load: `tomlKey` does
@@ -273,7 +279,7 @@ database workspace matched the probe cwd).
 | Tool allowlist | `enabledTools:["view_file"]` honoured | ignored (probe: `run_command`, `update_steps` offered with `enabledTools:["read_file"]`); read tool is `read_file` with ACP `name`/`args` | audit by `name`: `read_file`/`view_file` (paths audited), `update_steps` (no path); anything else → `non_view_file_tool_calls`. Commands still need a permission (probe: `run_command` asked, `reject_once`, failed). Session must start in mode `default` |
 | Session cleanup | `.meta` cwd | no `.meta`; `trajectory_metadata_blob` session id + workspace URIs | delete `.db*`, `brain/<id>`, `annotations/<id>.pbtxt` only when the DB's session id matches and every workspace URI realpath equals the snapshot |
 | Process match | `agy_acp_server`/`localharness_external` | `…/antigravity acp …` | `isAgy` also matches `antigravity acp` and this run's executable (ps args kept to 1000 chars) |
-| 300 s TTFB wall | local proxy | no proxy (none observed) | turn/chunk budgeting unchanged (still bounds each turn) |
+| 300 s TTFB wall | local proxy | no proxy (none observed) | r7: one turn for every dimension on 1.5 (split only above 32 files / 400 KB); ≤1.4 keeps the group/chunk split (`par_layout`) |
 
 Safety properties kept: isolated GEMINI_HOME with only `antigravity-acp/` linked, runner as ACP
 client with fs/terminal off and `reject_once` for every permission, process-group cleanup, pinned vs
@@ -287,6 +293,31 @@ Smoke (1.5.18, 7613dcc, `lib/plan.mjs` 4-line diff, correctness): `complete`, ve
 1 `read_file` call inside the snapshot, 0 permission requests, exit 0, session `.db`/`-wal`/`-shm`,
 `brain/`, `annotations/` removed by workspace match, no leftover runtime process. Evidence:
 `stem-d/reviews/smoke-agy15/out/`.
+
+### Antigravity single turn on 1.5 (r7, 2026-11-27)
+
+Measured on runtime 1.5.18 (`f7727631…/scratchpad/m/`, `SUMMARY.md`, runs 1–3 with `review.json`,
+`evidence.json`; policy `policy-single.json`: `groups: []`, no file chunks, 3600 s):
+
+| Run | Input | Turns | Total s | Longest turn s | Max silent gap s | Status | Tokens |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| r11b (old evidence) | 8 files, 135 KB | 2 (file chunks) | 255 | 231 | 10.8 | complete, pass | 314K |
+| run1 | r11b input, one turn | 1 | 226 | 222 | 19.9 | complete, pass | 188K |
+| run2 | full PR #26: 24 files, 215 KB, diff 160 KB | 1 | 498 | 495 | 12.7 | complete, fix (1 med, 3 low) | 516K |
+| run3 | full PR #26, the old default split | 6 (2 groups × 3 chunks) | 726 | 268 | 11.0 | complete, fix (6 low) | 1835K |
+| r9 (runtime ≤1.4) | 8 files, 121 KB | 2 | 396 | 351 | **295.2** | complete | – |
+
+No 4xx/5xx or upstream failure; the pinned model matched on every turn. So on 1.5 the policy's
+top-level values now run ONE turn for every dimension (`groups: []`), split into file chunks only
+above `max_files_per_turn` 32 / `max_bytes_per_turn` 400000, with `turn_timeout_sec` 1200,
+`min_total_sec` 1200, `per_turn_budget_sec` 600, `max_total_sec` 3600, `retry_timeout_sec` 600.
+The ≤1.4 `par` runtime (300 s proxy first-byte wall; r9 saw a 295 s silent gap) keeps the old split
+through `par_layout` (and `PAR_LAYOUT_DEFAULTS` in code): the adapter picks it from the discovered
+runtime layout (`lib/turns.mjs` `layoutConfig`), and `plan` reads the installed layout from the
+runtime directory listing. Code defaults for missing keys: `TURN_DEFAULTS` (32 files, 400 KB, turn
+1200 s, retry 600 s, budget floor 1200 s). The single-turn review loses the per-dimension focus of
+the group split: run2 found the med finding (and two lows) run3 missed, run3 found three other lows
+(the `.gitignore` race, a stale doc bullet, the alias guard); both found the `cd` issue. See Residuals.
 
 ## Review Cycles
 
@@ -479,13 +510,14 @@ Smoke (1.5.18, 7613dcc, `lib/plan.mjs` 4-line diff, correctness): `complete`, ve
 | r1 R3 | Merge grouping is a word-overlap heuristic (Jaccard 0.2, 0.1 on overlapping lines, ±3 lines) | `filed_followup` | Calibrate on more cycles; every host id stays visible, so a missed grouping only duplicates a line |
 | r1 R4 / X6 | A tool-like line (`mcp …`, `tool …`) at a paragraph start inside command output is still flagged | `accepted_with_reason` | Plain mode has no output delimiters; flagging errs toward incomplete; prompt echo, mid-paragraph lines and stray `exec` lines (r2) are not |
 | r1 R5 / A30 | `ps -eo` path verified on macOS only | `filed_followup` | POSIX syntax; run the suite on Linux CI (procps / BusyBox) |
-| r1 R6 | Expected cost per window and turn-split limits (8 files / 120 KB) are provisional | `filed_followup` | Calibrate from recorded runs (Follow-ups); r2 seeds recorded in the policy |
+| r1 R6 | Expected cost per window and turn-split limits are provisional | `filed_followup` | Calibrate from recorded runs (Follow-ups); r2 seeds recorded in the policy; r7 set the 1.5 limits (one turn, 32 files / 400 KB) from the 1.5.18 measurements |
 | Design | Codex read-only sandbox does not confine reads to the snapshot | `fixed` (r2) | Runner-generated Seatbelt permission profile, self-tested per run |
 | r2 A46 (part) | Multi-turn `prior_verification` merging / last-turn mustCover through the ACP stub | `filed_followup` | Covered by schema/validator unit tests; stub needs prior-aware replies |
 | Design | Claude effort level is not reported by the host | `accepted_with_reason` | Recorded as pinned only; listed in `hostLimits` |
 | Design | Antigravity session persistence cannot be disabled | `accepted_with_reason` | Files deleted after the run when `.meta` cwd (≤1.4) or the session database's workspace (1.5) matches (same as T3); 1.5 also keeps a summary row in the profile's `conversation_summaries.db`, which is not touched |
 | Runtime 1.5 | `enabledTools` is ignored by the runtime, so a non-read tool (e.g. `search_web`, `invoke_subagent`) could run before the audit sees it | `accepted_with_reason` | Edits and commands still need a permission (always `reject_once`); any other tool makes the run `incomplete`; the prompt names `read_file` as the only allowed tool |
-| r6 X27/A76 | A generation committed after the next prompt was sent cannot be told apart from that turn's own (no timestamp/turn id in `gen_metadata`) | `accepted_with_reason` | Count re-read before every prompt and a 1.5 s stability window after every turn; a misattribution can only hide a missing record, never a different model (every row must match the pin) |
+| r6 X27/A76 | A generation committed after the next prompt was sent cannot be told apart from that turn's own (no timestamp/turn id in `gen_metadata`) | `accepted_with_reason` | Count re-read before every prompt and a 1.5 s stability window after every turn; a misattribution can only hide a missing record, never a different model (every row must match the pin). Since r7 a 1.5 review is usually one turn, so there is no next turn to misattribute a late row to and the gap mostly disappears; it remains for a scope split above 32 files / 400 KB (and for explicit groups). The check is kept unchanged |
+| r7 single turn | One 1.5 turn reviews every dimension at once (less per-dimension focus than one turn per group); its timeout is one 1200 s window instead of several shorter ones | `accepted_with_reason` | Measured: faster and about 3.5x fewer tokens, no first-byte wall on 1.5; the full-PR single turn found the one med finding the split run missed. `groups` (and file-chunk limits) in the policy restore a split; ≤1.4 keeps it automatically |
 | Runtime 1.5 | The model check depends on the undocumented `gen_metadata` protobuf layout (fields 1/19/21, as decoded by T3) | `accepted_with_reason` | A layout change yields an unreadable or mismatching record → `incomplete`, never a silent pass |
 | Runtime 1.5 | Sign-in comes from the OS keyring; if T3 later forces file storage (`SSH_CONNECTION`, `antigravity-oauth-token`) the keyring may be stale | `accepted_with_reason` | Fails closed as `auth_required`; the runner never opens a browser (PATH shims) |
 | antigravity-host-support C6 | Shared review contract and per-host adapters | `fixed` | This change |

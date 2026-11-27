@@ -18,6 +18,7 @@ import { pathsFromDiffText, plan } from "./lib/plan.mjs";
 import { readList, realish } from "./lib/inputs.mjs";
 import { runReview, summarize } from "./lib/run.mjs";
 import { loadReviewEntry, mergeReviews } from "./lib/merge.mjs";
+import { findRuntime } from "./adapters/antigravity.mjs";
 
 // Flags per command: value flags, repeatable value flags, boolean flags. Anything else is a usage error.
 export const SPEC = {
@@ -118,7 +119,10 @@ export async function main(argv = process.argv.slice(2)) {
       const repoDir = path.resolve(o.repo ?? ".");
       const files = paths.map((p) => { let bytes = 0; try { bytes = fs.statSync(path.join(repoDir, p)).size; } catch {} return { path: p, bytes }; });
       if (o.prior) fs.accessSync(o.prior, fs.constants.R_OK);
-      const p = plan({ policy, author, dimensions: dims.length ? dims : policy.default_dimensions ?? [], paths, usage, noUser: !!o["no-user"], files, rereview: !!o.prior, diffBytes: /^diff --git /m.test(diffText) ? Buffer.byteLength(diffText) : Infinity });
+      // The installed Antigravity runtime's layout (directory listing only) picks the turn split the estimate uses.
+      let antigravityLayout = "cli";
+      try { antigravityLayout = findRuntime(policy.hosts.antigravity?.runtime?.runtime_root).layout ?? "cli"; } catch {}
+      const p = plan({ policy, author, dimensions: dims.length ? dims : policy.default_dimensions ?? [], paths, usage, noUser: !!o["no-user"], files, rereview: !!o.prior, diffBytes: /^diff --git /m.test(diffText) ? Buffer.byteLength(diffText) : Infinity, antigravityLayout });
       if (o.out) fs.writeFileSync(o.out, JSON.stringify(p, null, 2));
       console.log(JSON.stringify(p, null, 2));
       return p.status === "ok" ? 0 : p.status === "ask" ? 3 : 4;

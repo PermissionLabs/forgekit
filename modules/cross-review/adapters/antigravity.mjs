@@ -19,10 +19,11 @@
 //    "par": the stderr "Proxy extracted model from path: <model>-<thinking>" line;
 //    "cli": the session database's gen_metadata rows (lib/agy-session-db.mjs), each of which must name the pinned
 //    model and thinking level. A turn without a confirming record, or an unreadable database -> incomplete.
-//  - "par": the local proxy aborts a model call whose first byte takes > 300 s (HTTP 502). The review is split into
-//    one turn per dimension group, and a large scope is further split into file chunks per turn
-//    (max_files_per_turn / max_bytes_per_turn), in the same session, then merged (kept for "cli": it bounds each
-//    turn's budget). The first upstream failure cancels the run.
+//  - Turns (lib/turns.mjs layoutConfig): "cli" (1.5) has no first-byte wall (measured 2026-11-27: longest silent
+//    gap 20 s, a 495 s turn succeeded), so it runs ONE turn for every dimension and splits only a scope above
+//    max_files_per_turn / max_bytes_per_turn (32 files / 400 KB). "par": the local proxy aborts a model call whose
+//    first byte takes > 300 s (HTTP 502), so par_layout keeps one turn per dimension group and 8-file / 120 KB
+//    chunks. Turns run in the same session, then merged. The first upstream failure cancels the run.
 //  - Every turn (first and retry) is checked for timeout, upstream failure, RPC error, non-end_turn stop reason,
 //    fatal agent errors and auth prompts before its text is used; any of them withholds the review.
 //  - Per-turn schema validation with contiguous ids across turns and at most one corrective re-ask.
@@ -35,10 +36,10 @@ import * as path from "node:path";
 import { expandHome } from "../lib/policy.mjs";
 import { insideRoot, redact, sha256 } from "../lib/inputs.mjs";
 import { bypassFlags, groupMembers, ownedMembers } from "../lib/proc.mjs";
-import { groupsFor, planTurns, runTurns, totalBudget } from "../lib/turns.mjs";
+import { TURN_DEFAULTS, groupsFor, layoutConfig, planTurns, runTurns, totalBudget } from "../lib/turns.mjs";
 import { countGenerations, readGenerations, readTrajectoryOwner } from "../lib/agy-session-db.mjs";
 
-export { groupsFor, planTurns, totalBudget }; // re-exported for callers/tests of the adapter
+export { groupsFor, layoutConfig, planTurns, totalBudget }; // re-exported for callers/tests of the adapter
 
 export const ENABLED_TOOLS = ["view_file"];
 export const CLIENT_CAPABILITIES = { fs: { readTextFile: false, writeTextFile: false }, terminal: false, session: { notices: {} } };
@@ -221,8 +222,7 @@ export async function stopGroup({ pid, spawnedAt = 0, exitedAt = () => Date.now(
 
 export async function run(ctx) {
   const { input, pin, validateGroup, log, prefix, idStart, priorIds, dimensions } = ctx;
-  const cfg = pin.config;
-  const rt = cfg.runtime ?? {};
+  const rt = pin.config.runtime ?? {};
   const out = { attempts: [], reasons: [], warnings: [], toolAudit: null, reported: { model: null, effort: null, source: null, proxyModels: [], generationModels: [] } };
   const reasons = out.reasons;
   const t0 = Date.now();
@@ -230,20 +230,23 @@ export async function run(ctx) {
   const thinking = pin.effort;
   const expectedProxyModel = `${pin.model}-${thinking}`;
   const scopeFiles = input.files.filter((f) => f.kind === "scope");
-  // The same helper plan() uses for its estimate (A63); a small re-review may use one group (rereview_single_group).
+
+  // ---- runtime + profile (directory names only; files inside are never opened, except a session's .meta/.db)
+  const runtime = findRuntime(rt.runtime_root);
+  const { root: runtimeRoot, version, layout } = runtime;
+  if (!version) { reasons.push(`runtime_not_found:${runtimeRoot}`); return out; }
+  // Turn split and timings for this runtime layout: one turn on 1.5 "cli", the old per-group split on <= 1.4 "par"
+  // (300 s proxy first-byte wall). plan() estimates with the same helpers (A63).
+  const cfg = layoutConfig(pin.config, layout);
+  // A small re-review may use one group (rereview_single_group) when the layout has groups.
   const { groups, turns } = runTurns(cfg, dimensions, scopeFiles, { rereview: priorIds.length > 0, diffBytes: Buffer.byteLength(input.diffText ?? "") });
   out.groups = groups;
   out.turns = turns.map((t) => t.label);
   // The total budget scales with the planned turns (per_turn_budget_sec x turns, capped by max_total_sec).
   const budget = totalBudget(cfg, turns.length, pin.timeoutMs);
   out.timeoutMs = budget.totalMs;
-  out.budget = { turns: turns.length, ...budget };
+  out.budget = { turns: turns.length, layout, ...budget };
   if (budget.capped) out.warnings.push(`time budget capped: ${turns.length} turns x ${budget.perTurnSec} s > max_total_sec ${budget.capSec} s`);
-
-  // ---- runtime + profile (directory names only; files inside are never opened, except a session's .meta/.db)
-  const runtime = findRuntime(rt.runtime_root);
-  const { root: runtimeRoot, version, layout } = runtime;
-  if (!version) { reasons.push(`runtime_not_found:${runtimeRoot}`); return out; }
   const runtimeDir = runtime.dir;
   const serverBin = runtime.executable;
   const cli = layout === "cli";
@@ -484,8 +487,8 @@ export async function run(ctx) {
 
     const deadline = t0 + budget.totalMs;
     const remaining = () => deadline - Date.now();
-    const turnMs = (cfg.turn_timeout_sec ?? 600) * 1000;
-    const retryMs = (cfg.retry_timeout_sec ?? 280) * 1000;
+    const turnMs = (cfg.turn_timeout_sec ?? TURN_DEFAULTS.turn_timeout_sec) * 1000;
+    const retryMs = (cfg.retry_timeout_sec ?? TURN_DEFAULTS.retry_timeout_sec) * 1000;
     const fileList = input.files.map((f) => `${path.join(cwd, f.path)}  (${f.lines} lines${f.kind === "context" ? ", context only" : ""})`).join("\n");
     const tool = cli ? "read_file" : "view_file";
     const toolNote = cli

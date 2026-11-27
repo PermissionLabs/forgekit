@@ -11,7 +11,7 @@ import { runReview } from "../lib/run.mjs";
 import { buildEnv, exitReason, findRuntime, isAgy, launchArgs, planTurns, stopGroup, totalBudget } from "../adapters/antigravity.mjs";
 import { decodeGeneration, normalizeModelName, protoFields } from "../lib/agy-session-db.mjs";
 import { plan } from "../lib/plan.mjs";
-import { runTurns } from "../lib/turns.mjs";
+import { PAR_LAYOUT_DEFAULTS, TURN_DEFAULTS, layoutConfig, runTurns } from "../lib/turns.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const { policy: basePolicy } = loadPolicy(defaultPolicyPath());
@@ -77,6 +77,7 @@ before(() => {
   fs.mkdirSync(profileAcp, { recursive: true });
   const p = JSON.parse(JSON.stringify(basePolicy));
   Object.assign(p.hosts.antigravity, { timeout_sec: 400, turn_timeout_sec: 120, retry_timeout_sec: 90, runtime: { runtime_root: runtimeRoot, profile_root: path.join(tmp, "profiles"), expect_agent_version: null } });
+  Object.assign(p.hosts.antigravity.par_layout, { turn_timeout_sec: 120, retry_timeout_sec: 90 });
   policyPath = path.join(tmp, "policy.json");
   fs.writeFileSync(policyPath, JSON.stringify(p));
   diffPath = path.join(tmp, "pr.patch");
@@ -87,6 +88,8 @@ before(() => {
 after(() => { delete process.env.FAKE_AGY; fs.rmSync(tmp, { recursive: true, force: true }); });
 
 const policy = (over = {}) => { const p = JSON.parse(fs.readFileSync(policyPath, "utf8")); Object.assign(p.hosts.antigravity, over); return p; };
+// Overrides for the <= 1.4 "par" fixture runtime go into par_layout (layoutConfig puts it over the top level).
+const par = (over) => ({ par_layout: { ...policy().hosts.antigravity.par_layout, ...over } });
 let n = 0;
 const go = async (fake = {}, over = {}, extra = {}) => {
   process.env.FAKE_AGY = JSON.stringify(fake);
@@ -98,10 +101,11 @@ const withheld = (ev, re) => {
   assert.match(ev.incompleteReasons.join("\n"), re);
 };
 
-test("happy path: one turn per group, contiguous ids, proxy model per turn, session files and isolation cleaned", async () => {
+test("happy path (<= 1.4 par): one turn per group, contiguous ids, proxy model per turn, session files and isolation cleaned", async () => {
   const ev = await go();
   assert.equal(ev.status, "complete", ev.incompleteReasons.join());
   assert.deepEqual(ev.review.findings.map((f) => f.id), ["A1", "A2"]);
+  // The par runtime keeps the per-group split (300 s proxy first-byte wall): par_layout groups, not the top level's [].
   assert.deepEqual(ev.extra.groups, [["correctness"], ["tests"]]);
   assert.ok(ev.attempts.every((a) => a.proxyModels.length === 1));
   assert.equal(ev.reported.model, "gemini-4-neon");
@@ -143,7 +147,7 @@ test("ids continue across turns; a turn restarting at A1 is rejected (A13)", asy
 });
 
 test("large scope is split into file chunks per turn (operator 5)", async () => {
-  const ev = await go({}, { max_files_per_turn: 1 });
+  const ev = await go({}, par({ max_files_per_turn: 1 }));
   assert.equal(ev.status, "complete", ev.incompleteReasons.join());
   assert.equal(ev.attempts.length, 4);
   assert.deepEqual(ev.attempts.map((a) => a.label), ["group:correctness:files1/2", "group:correctness:files2/2", "group:tests:files1/2", "group:tests:files2/2"]);
@@ -222,38 +226,78 @@ test("~-prefixed tool paths are outside the snapshot (A47)", async () => {
 });
 
 test("the total budget scales with the planned turns, with a floor and a cap (A63)", async () => {
-  assert.deepEqual(totalBudget({ per_turn_budget_sec: 180, max_total_sec: 3600 }, 16, 1_500_000), { totalMs: 2_880_000, perTurnSec: 180, floorSec: 600, capSec: 3600, capped: false });
+  assert.deepEqual(totalBudget({ per_turn_budget_sec: 180, max_total_sec: 3600 }, 16, 1_500_000), { totalMs: 2_880_000, perTurnSec: 180, floorSec: 1200, capSec: 3600, capped: false });
   assert.equal(totalBudget({ per_turn_budget_sec: 180, max_total_sec: 3600 }, 30, 1).totalMs, 3_600_000);
   assert.equal(totalBudget({ per_turn_budget_sec: 180, max_total_sec: 3600 }, 30, 1).capped, true);
   assert.equal(totalBudget({}, 16, 1_500_000).totalMs, 1_500_000);
   // A63: a 1-turn run is never squeezed below one turn's timeout (was 180 s; 89 s made turn 0 time out before it ran).
-  // Floor precedence (A69): min_total_sec, else turn_timeout_sec, else 600.
+  // Floor precedence (A69): min_total_sec, else turn_timeout_sec, else TURN_DEFAULTS.turn_timeout_sec (1200 s since r7).
   assert.equal(totalBudget({ per_turn_budget_sec: 180, max_total_sec: 3600, turn_timeout_sec: 700 }, 1, 1).totalMs, 700_000);
   assert.equal(totalBudget({ per_turn_budget_sec: 180, max_total_sec: 3600, turn_timeout_sec: 700, min_total_sec: 900 }, 1, 1).totalMs, 900_000);
-  assert.equal(totalBudget({ per_turn_budget_sec: 89, max_total_sec: 3600 }, 1, 1).totalMs, 600_000);
+  assert.equal(totalBudget({ per_turn_budget_sec: 89, max_total_sec: 3600 }, 1, 1).totalMs, 1_200_000);
   assert.equal(totalBudget({ per_turn_budget_sec: 180, min_total_sec: 900, max_total_sec: 3600 }, 2, 1).totalMs, 900_000);
   assert.equal(totalBudget({ per_turn_budget_sec: 180, min_total_sec: 900, max_total_sec: 700 }, 2, 1).totalMs, 700_000);
-  const ev = await go({}, { per_turn_budget_sec: 100, max_total_sec: 1000, min_total_sec: 150 });
+  const ev = await go({}, par({ per_turn_budget_sec: 100, max_total_sec: 1000, min_total_sec: 150 }));
   assert.equal(ev.status, "complete", ev.incompleteReasons.join());
   assert.equal(ev.timeoutMs, 200_000); // 2 turns x 100 s
-  const ev2 = await go({}, { per_turn_budget_sec: 30, max_total_sec: 1000 });
+  const ev2 = await go({}, par({ per_turn_budget_sec: 30, max_total_sec: 1000 }));
   assert.equal(ev2.status, "complete", ev2.incompleteReasons.join());
-  assert.equal(ev2.timeoutMs, 600_000); // floor: min_total_sec (600, from the shipped policy), not turn_timeout_sec
+  assert.equal(ev2.timeoutMs, 600_000); // floor: par_layout min_total_sec (600, from the shipped policy), not turn_timeout_sec
+  // Top-level values do not reach the par runtime (r7): only par_layout does.
+  assert.equal((await go({}, { per_turn_budget_sec: 100, min_total_sec: 150 })).timeoutMs, 600_000);
+  // Without min_total_sec / turn_timeout_sec the floor is TURN_DEFAULTS.turn_timeout_sec (1200 s).
+  assert.equal(totalBudget({ per_turn_budget_sec: 100 }, 1, 1).totalMs, TURN_DEFAULTS.turn_timeout_sec * 1000);
+});
+
+test("the per-turn timeout comes from the runtime layout: par_layout for <= 1.4, the top level for 1.5 (r7)", async () => {
+  // A turn budget below 60 s is refused before the prompt (total_timeout_before), so a 1 s turn timeout shows
+  // which value the run used. par: par_layout's value applies, the top-level one does not.
+  withheld(await go({}, par({ turn_timeout_sec: 1 })), /total_timeout_before:group:correctness/);
+  assert.equal((await go({}, { turn_timeout_sec: 1 })).status, "complete");
+});
+
+test("layouts (r7): 1.5 cli runs one turn up to 32 files / 400 KB; <= 1.4 par keeps the per-group 8-file / 120 KB split", () => {
+  const dims = ["security", "correctness", "tests", "contract_docs"];
+  const files = (n, bytes = 1000) => Array.from({ length: n }, (_, i) => ({ path: `f${i}`, bytes, kind: "scope" }));
+  const cli = layoutConfig(basePolicy.hosts.antigravity, "cli");
+  assert.equal(cli, basePolicy.hosts.antigravity);
+  assert.deepEqual(runTurns(cli, dims, files(32)).turns.map((t) => t.label), ["group:security+correctness+tests+contract_docs"]);
+  assert.equal(runTurns(cli, dims, files(33)).turns.length, 2);
+  assert.equal(runTurns(cli, dims, files(4, 150_000)).turns.length, 2); // 600 KB > 400 KB
+  // The shipped budget for one cli turn: min_total_sec 1200 (per_turn_budget_sec 600 x 1 is below the floor).
+  assert.deepEqual(totalBudget(cli, 1, 1), { totalMs: 1_200_000, perTurnSec: 600, floorSec: 1200, capSec: 3600, capped: false });
+  assert.equal(cli.turn_timeout_sec, 1200);
+  const parCfg = layoutConfig(basePolicy.hosts.antigravity, "par");
+  assert.equal(runTurns(parCfg, dims, files(32)).turns.length, 3 * 4);
+  assert.equal(parCfg.turn_timeout_sec, 600);
+  assert.equal(parCfg.retry_timeout_sec, 280);
+  // Code defaults: a policy without the keys still gets one cli turn up to 32 files, and the par split.
+  assert.equal(runTurns({}, dims, files(32)).turns.length, 1);
+  assert.equal(runTurns({}, dims, files(33)).turns.length, 2);
+  assert.equal(runTurns(layoutConfig({}, "par"), dims, files(9)).turns.length, 3 * 2);
+  assert.deepEqual(layoutConfig({ max_files_per_turn: 99 }, "par").max_files_per_turn, PAR_LAYOUT_DEFAULTS.max_files_per_turn);
+  assert.equal(layoutConfig({ par_layout: { max_files_per_turn: 2 } }, "par").max_files_per_turn, 2);
 });
 
 test("plan() estimates Antigravity turns like the adapter (leftover group, byte chunks) and warns only when antigravity reviews (A63/A65/A66)", () => {
   const dims = ["security", "correctness", "tests", "contract_docs", "portability"];
-  const hp = basePolicy.hosts.antigravity;
-  // r4: 23 scope files; 4 groups (portability is the leftover group); bytes split them into 4 chunks -> 16 turns.
   const files = Array.from({ length: 23 }, (_, i) => ({ path: `f${i}.mjs`, bytes: 20_000 }));
   const scopeFiles = files.map((f) => ({ ...f, kind: "scope" }));
-  const actual = runTurns(hp, dims, scopeFiles).turns.length;
-  const p = plan({ policy: basePolicy, author: "claude", dimensions: dims, paths: files.map((f) => f.path), usage: null, files });
-  assert.equal(p.hosts.antigravity.budget.estimatedTurns, actual);
-  assert.equal(actual, 4 * Math.ceil(23 / Math.floor(hp.max_bytes_per_turn / 20_000)));
-  // Without sizes the estimate is the lower bound by file count (still including the leftover group).
-  const lb = plan({ policy: basePolicy, author: "claude", dimensions: dims, paths: files.map((f) => f.path), usage: null });
-  assert.equal(lb.hosts.antigravity.budget.estimatedTurns, 4 * Math.ceil(23 / hp.max_files_per_turn));
+  for (const layout of ["cli", "par"]) {
+    const hp = layoutConfig(basePolicy.hosts.antigravity, layout);
+    const nGroups = layout === "par" ? 4 : 1; // par: portability is the leftover group; cli: one group
+    const actual = runTurns(hp, dims, scopeFiles).turns.length;
+    const p = plan({ policy: basePolicy, author: "claude", dimensions: dims, paths: files.map((f) => f.path), usage: null, files, antigravityLayout: layout });
+    assert.equal(p.hosts.antigravity.budget.estimatedTurns, actual, layout);
+    assert.equal(p.hosts.antigravity.budget.layout, layout);
+    // r4 (par): 23 files of 20 KB, 6 per 120 KB chunk -> 4 chunks x 4 groups = 16 turns; cli: 20 per 400 KB -> 2.
+    assert.equal(actual, nGroups * Math.ceil(23 / Math.floor(hp.max_bytes_per_turn / 20_000)), layout);
+    // Without sizes the estimate is the lower bound by file count (still including the leftover group).
+    const lb = plan({ policy: basePolicy, author: "claude", dimensions: dims, paths: files.map((f) => f.path), usage: null, antigravityLayout: layout });
+    assert.equal(lb.hosts.antigravity.budget.estimatedTurns, nGroups * Math.ceil(23 / hp.max_files_per_turn), layout);
+  }
+  // The default estimate is the 1.5 cli layout.
+  assert.equal(plan({ policy: basePolicy, author: "claude", dimensions: dims, paths: files.map((f) => f.path), usage: null, files }).hosts.antigravity.budget.estimatedTurns, 2);
   // A66: plan() itself carries the cap warning ...
   const many = Array.from({ length: 200 }, (_, i) => `f${i}.js`);
   const big = plan({ policy: basePolicy, author: "claude", dimensions: ["security", "correctness", "tests"], paths: many, usage: null });
@@ -268,7 +312,8 @@ test("plan() estimates Antigravity turns like the adapter (leftover group, byte 
 
 test("re-review speed knob: a small re-review runs one group per file chunk; large diffs and the knob off keep the groups", () => {
   const dims = ["security", "correctness", "tests", "contract_docs", "portability"];
-  const hp = basePolicy.hosts.antigravity;
+  // The knob matters only for a layout with groups: the <= 1.4 par layout.
+  const hp = layoutConfig(basePolicy.hosts.antigravity, "par");
   const files = Array.from({ length: 10 }, (_, i) => ({ path: `f${i}`, bytes: 1000, kind: "scope" }));
   assert.equal(hp.rereview_single_group, true);
   const small = runTurns(hp, dims, files, { rereview: true, diffBytes: 50_000 });
@@ -277,16 +322,16 @@ test("re-review speed knob: a small re-review runs one group per file chunk; lar
   assert.equal(runTurns(hp, dims, files, { rereview: false, diffBytes: 50_000 }).turns.length, 8);
   assert.equal(runTurns(hp, dims, files, { rereview: true, diffBytes: 500_000 }).turns.length, 8);
   assert.equal(runTurns({ ...hp, rereview_single_group: false }, dims, files, { rereview: true, diffBytes: 1 }).turns.length, 8);
-  const p = plan({ policy: basePolicy, author: "claude", dimensions: dims, paths: files.map((f) => f.path), usage: null, files, rereview: true, diffBytes: 50_000 });
+  const p = plan({ policy: basePolicy, author: "claude", dimensions: dims, paths: files.map((f) => f.path), usage: null, files, rereview: true, diffBytes: 50_000, antigravityLayout: "par" });
   assert.equal(p.hosts.antigravity.budget.estimatedTurns, 2);
   assert.match(p.hosts.antigravity.budget.singleGroup, /re-review/);
   // singleGroup is shown only when the collapse applied (A68): not for a large diff, the knob off, or one natural group.
-  const big = plan({ policy: basePolicy, author: "claude", dimensions: dims, paths: files.map((f) => f.path), usage: null, files, rereview: true, diffBytes: 500_000 });
+  const big = plan({ policy: basePolicy, author: "claude", dimensions: dims, paths: files.map((f) => f.path), usage: null, files, rereview: true, diffBytes: 500_000, antigravityLayout: "par" });
   assert.equal(big.hosts.antigravity.budget.singleGroup, undefined);
   const off = { ...basePolicy, hosts: { ...basePolicy.hosts, antigravity: { ...hp, rereview_single_group: false } } };
-  assert.equal(plan({ policy: off, author: "claude", dimensions: dims, paths: files.map((f) => f.path), usage: null, files, rereview: true, diffBytes: 1 }).hosts.antigravity.budget.singleGroup, undefined);
+  assert.equal(plan({ policy: off, author: "claude", dimensions: dims, paths: files.map((f) => f.path), usage: null, files, rereview: true, diffBytes: 1, antigravityLayout: "par" }).hosts.antigravity.budget.singleGroup, undefined);
   const oneGroup = hp.groups.find((g) => g.length > 1);
-  assert.equal(plan({ policy: basePolicy, author: "claude", dimensions: oneGroup, paths: files.map((f) => f.path), usage: null, files, rereview: true, diffBytes: 1 }).hosts.antigravity.budget.singleGroup, undefined);
+  assert.equal(plan({ policy: basePolicy, author: "claude", dimensions: oneGroup, paths: files.map((f) => f.path), usage: null, files, rereview: true, diffBytes: 1, antigravityLayout: "par" }).hosts.antigravity.budget.singleGroup, undefined);
 });
 
 test("a non-zero server exit after the last prompt invalidates the review (X12)", async () => {
@@ -325,6 +370,8 @@ test("planTurns and findRuntime", () => {
 const noSqlite = await import("node:sqlite").then(() => false, () => "node:sqlite unavailable (Node < 22.13)");
 const ctest = (name, fn) => test(name, { skip: noSqlite }, fn);
 const goCli = (fake = {}, over = {}) => go(fake, { runtime: { ...policy().hosts.antigravity.runtime, runtime_root: cliRoot }, ...over });
+// Two cli turns (explicit groups) for the per-turn checks; the shipped cli policy runs one turn.
+const goCli2 = (fake = {}, over = {}) => goCli(fake, { groups: [["correctness"], ["tests"]], ...over });
 
 ctest("cli layout: findRuntime reads .install-complete.json, picks the highest valid version, skips bad records", () => {
   const r = findRuntime(cliRoot);
@@ -367,13 +414,18 @@ ctest("session database decoding: generation model and display name, normalisati
   assert.throws(() => protoFields(Buffer.from([0x0a, 0x05, 0x61])), /truncated/);
 });
 
-ctest("cli layout happy path: argv, per-turn generation model, read_file audit, session files removed by workspace", async () => {
+ctest("cli layout happy path: one turn, argv, per-turn generation model, read_file audit, session files removed by workspace", async () => {
   const ev = await goCli({ steps: true });
   assert.equal(ev.status, "complete", ev.incompleteReasons.join());
   assert.equal(ev.extra.runtime.layout, "cli");
   assert.equal(ev.isolation.runtime, "1.5.18");
+  // r7: one turn reviews every dimension on 1.5 (no first-byte wall).
+  assert.deepEqual(ev.extra.groups, [DIMS]);
+  assert.deepEqual(ev.attempts.map((a) => a.label), ["group:correctness+tests"]);
+  assert.equal(ev.timeoutMs, 1_200_000);
   assert.deepEqual(ev.argv.slice(1, 6), ["acp", "--gemini-dir", ev.isolation.geminiHome, "--app-data-dir", "antigravity-acp"]);
-  assert.deepEqual(ev.attempts.map((a) => a.generationModels), [["gemini-4-neon/gemini-4-neon-high"], ["gemini-4-neon/gemini-4-neon-high"]]);
+  assert.deepEqual(ev.attempts.map((a) => a.generationModels), [["gemini-4-neon/gemini-4-neon-high"]]);
+  assert.deepEqual((await goCli2({ steps: true })).attempts.map((a) => a.generationModels), [["gemini-4-neon/gemini-4-neon-high"], ["gemini-4-neon/gemini-4-neon-high"]]);
   assert.equal(ev.reported.model, "gemini-4-neon");
   assert.deepEqual(ev.toolAudit.nonViewFileCalls, []);
   assert.deepEqual(ev.toolAudit.callsWithoutAuditablePath, []);
@@ -384,20 +436,22 @@ ctest("cli layout happy path: argv, per-turn generation model, read_file audit, 
 });
 
 ctest("cli layout: a turn without a generation record, a different model or level, or no database -> incomplete", async () => {
-  withheld(await goCli({ noGen: [1] }), /model_unconfirmed:group:tests/);
+  withheld(await goCli2({ noGen: [1] }), /model_unconfirmed:group:tests/);
+  withheld(await goCli({ noGen: [0] }), /model_unconfirmed:group:correctness\+tests/);
   withheld(await goCli({ genDisplay: "Gemini 4 Neon (Low)" }), /generation_model_mismatch:gemini-4-neon\/gemini-4-neon-low/);
   withheld(await goCli({ genModel: "gemini-3.8-flash" }), /generation_model_mismatch:gemini-3\.8-flash/);
-  withheld(await goCli({ noGen: [0, 1] }), /model_unconfirmed:group:correctness/);
+  withheld(await goCli2({ noGen: [0, 1] }), /model_unconfirmed:group:correctness/);
   const nodb = await goCli({ noDb: true });
   withheld(nodb, /model_unconfirmed:session database unreadable/);
   assert.equal(nodb.extra.sessionCleanup.skipped, ".meta and session database missing");
 });
 
 ctest("cli layout: a late generation of one turn never confirms a later turn without its own (X27/A76)", async () => {
-  const ev = await goCli({ lateGen: true, noGen: [1] });
+  // Needs two turns (explicit groups or a split scope); the default single cli turn has no later turn.
+  const ev = await goCli2({ lateGen: true, noGen: [1] });
   withheld(ev, /model_unconfirmed:group:tests/);
   assert.equal(ev.attempts[0].generationModels.length, 2);
-  assert.equal((await goCli({ lateGen: true })).status, "complete");
+  assert.equal((await goCli2({ lateGen: true })).status, "complete");
 });
 
 ctest("cli layout: tool audit keeps a call's name across title-only updates, and refuses idless or nameless-then-renamed calls (X29/A78)", async () => {
@@ -405,6 +459,11 @@ ctest("cli layout: tool audit keeps a call's name across title-only updates, and
   assert.equal(ok.status, "complete", ok.incompleteReasons.join());
   withheld(await goCli({ idless: { 0: true } }), /tool_calls_without_id:1/);
   withheld(await goCli({ namelessSteps: { 0: true } }), /unauditable_tool_calls:1/);
+});
+
+ctest("cli layout: the top-level turn_timeout_sec bounds the single turn (r7)", async () => {
+  withheld(await goCli({}, { turn_timeout_sec: 1 }), /total_timeout_before:group:correctness\+tests/);
+  assert.equal((await goCli({}, par({ turn_timeout_sec: 1 }))).status, "complete");
 });
 
 ctest("cli layout: session files are kept when the database has no session id (X26/A77)", async () => {

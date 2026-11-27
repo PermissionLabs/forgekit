@@ -50,12 +50,19 @@ export function policyProblems(policy) {
       if (h.os_sandbox !== "required") errs.push(`hosts.${name}.os_sandbox must be "required" (audit-only mode was removed: without an OS sandbox the run is incomplete)`);
       else if (name !== "codex") errs.push(`hosts.${name}.os_sandbox: only codex runs model commands under the OS sandbox`);
     }
-    if (h?.rereview_single_group !== undefined && typeof h.rereview_single_group !== "boolean") errs.push(`hosts.${name}.rereview_single_group must be a boolean`);
-    for (const k of ["per_turn_budget_sec", "max_total_sec", "min_total_sec", "rereview_single_group_max_diff_bytes"]) if (h?.[k] !== undefined && !(typeof h[k] === "number" && h[k] > 0)) errs.push(`hosts.${name}.${k} must be a positive number`);
     if (h?.env_passthrough !== undefined && (!Array.isArray(h.env_passthrough) || !h.env_passthrough.every((k) => typeof k === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(k))))
       errs.push(`hosts.${name}.env_passthrough must be an array of variable names`);
     for (const [k, v] of Object.entries(h?.expected_cost ?? {})) if (typeof v !== "number" || !(v >= 0 && v <= 1)) errs.push(`hosts.${name}.expected_cost.${k} must be a fraction in [0, 1]`);
-    for (const k of ["max_files_per_turn", "max_bytes_per_turn"]) if (h?.[k] !== undefined && !(Number.isInteger(h[k]) && h[k] > 0)) errs.push(`hosts.${name}.${k} must be a positive integer`);
+    turnKeyProblems(h, `hosts.${name}`, errs);
+    if (h?.par_layout !== undefined) {
+      if (name !== "antigravity") errs.push(`hosts.${name}.par_layout: only antigravity has runtime layouts`);
+      else if (!h.par_layout || typeof h.par_layout !== "object" || Array.isArray(h.par_layout)) errs.push(`hosts.${name}.par_layout must be an object`);
+      else {
+        const allowed = new Set(["groups", "max_files_per_turn", "max_bytes_per_turn", "per_turn_budget_sec", "min_total_sec", "max_total_sec", "turn_timeout_sec", "retry_timeout_sec", "rereview_single_group", "rereview_single_group_max_diff_bytes", "note"]);
+        for (const k of Object.keys(h.par_layout)) if (!allowed.has(k)) errs.push(`hosts.${name}.par_layout.${k}: unknown key`);
+        turnKeyProblems(h.par_layout, `hosts.${name}.par_layout`, errs);
+      }
+    }
   }
   const p = policy.pace;
   if (p) {
@@ -66,6 +73,17 @@ export function policyProblems(policy) {
   const r = policy.grade?.reviewers;
   if (r && (!Number.isInteger(r.standard) || !Number.isInteger(r.high) || r.standard < 1 || r.high < 1)) errs.push("grade.reviewers.{standard,high} must be positive integers");
   return errs;
+}
+
+// Turn-split keys shared by a host and its par_layout: positive numbers / integers, groups an array of
+// non-empty string arrays (an empty groups array means one turn for every dimension).
+function turnKeyProblems(h, at, errs) {
+  if (!h) return;
+  if (h.rereview_single_group !== undefined && typeof h.rereview_single_group !== "boolean") errs.push(`${at}.rereview_single_group must be a boolean`);
+  for (const k of ["per_turn_budget_sec", "max_total_sec", "min_total_sec", "turn_timeout_sec", "retry_timeout_sec", "rereview_single_group_max_diff_bytes"]) if (h[k] !== undefined && !(typeof h[k] === "number" && h[k] > 0)) errs.push(`${at}.${k} must be a positive number`);
+  for (const k of ["max_files_per_turn", "max_bytes_per_turn"]) if (h[k] !== undefined && !(Number.isInteger(h[k]) && h[k] > 0)) errs.push(`${at}.${k} must be a positive integer`);
+  if (h.groups !== undefined && !(Array.isArray(h.groups) && h.groups.every((g) => Array.isArray(g) && g.length && g.every((d) => typeof d === "string" && d))))
+    errs.push(`${at}.groups must be an array of non-empty arrays of dimension names`);
 }
 
 export function loadPolicy(file) {

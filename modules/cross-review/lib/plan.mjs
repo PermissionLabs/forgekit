@@ -2,7 +2,7 @@
 // Usage data is whatever the caller saved from the T3 MCP tool `provider_usage_limits`.
 import { HOSTS } from "./policy.mjs";
 import { parseDiffPaths } from "./diff.mjs";
-import { groupsFor, runTurns, totalBudget } from "./turns.mjs";
+import { groupsFor, layoutConfig, runTurns, totalBudget } from "./turns.mjs";
 
 // ---------------------------------------------------------------- globs
 /** Glob -> RegExp over a repo-relative POSIX path. `**` spans directories, `*` and `?` do not. */
@@ -126,14 +126,16 @@ const fmt = (n) => (Number.isFinite(n) ? n.toFixed(2) : String(n));
  * Estimated Antigravity turns and budget, counted by the adapter's own helper (lib/turns.mjs, A63): groups
  * (including the leftover group, or a single group for a small re-review) x file chunks by max_files_per_turn
  * and, when file sizes are known ({ path, bytes } entries), max_bytes_per_turn. A bare count of paths gives a
- * lower bound (sizes unknown). warning is set when the estimate exceeds max_total_sec.
+ * lower bound (sizes unknown). warning is set when the estimate exceeds max_total_sec. layout is the runtime
+ * layout the run will use ("cli" for 1.5, the default: one turn; "par" for <= 1.4: par_layout split).
  */
-export function antigravityBudget(hp, dimensions, files, { rereview = false, diffBytes = Infinity } = {}) {
+export function antigravityBudget(policyHost, dimensions, files, { rereview = false, diffBytes = Infinity, layout = "cli" } = {}) {
+  const hp = layoutConfig(policyHost, layout);
   const list = typeof files === "number" ? Array.from({ length: files }, (_, i) => ({ path: `f${i}`, bytes: 0 })) : files.map((f) => (typeof f === "string" ? { path: f, bytes: 0 } : f));
   const sizesKnown = typeof files !== "number" && list.some((f) => f.bytes > 0);
   const { groups, turns: t } = runTurns(hp, dimensions, list, { rereview, diffBytes });
   const turns = t.length;
-  const base = { estimatedTurns: turns, groups: groups.length, sizesKnown, ...(groups.length === 1 && groupsFor(dimensions, hp?.groups).length > 1 ? { singleGroup: "re-review with a small diff (rereview_single_group)" } : {}) };
+  const base = { estimatedTurns: turns, groups: groups.length, sizesKnown, layout, ...(groups.length === 1 && groupsFor(dimensions, hp?.groups).length > 1 ? { singleGroup: "re-review with a small diff (rereview_single_group)" } : {}) };
   const per = hp.per_turn_budget_sec;
   if (!(per > 0)) return { ...base, totalSec: hp.timeout_sec ?? null, note: "fixed timeout_sec (no per_turn_budget_sec)" };
   const tb = totalBudget(hp, turns, null);
@@ -144,11 +146,11 @@ export function antigravityBudget(hp, dimensions, files, { rereview = false, dif
 
 // ---------------------------------------------------------------- selection
 /**
- * plan({policy, author, dimensions, paths, usage, noUser, files?, rereview?, diffBytes?}) ->
+ * plan({policy, author, dimensions, paths, usage, noUser, files?, rereview?, diffBytes?, antigravityLayout?}) ->
  *   { status: "ok"|"ask"|"blocked", grade, gradeReasons, required, selected[], hosts{}, questions[], reason }
  * The author host is never a reviewer; selected hosts are distinct; the runner never substitutes a host silently.
  */
-export function plan({ policy, author, dimensions, paths, usage, noUser = false, files = null, rereview = false, diffBytes = Infinity }) {
+export function plan({ policy, author, dimensions, paths, usage, noUser = false, files = null, rereview = false, diffBytes = Infinity, antigravityLayout = "cli" }) {
   if (!HOSTS.includes(author)) throw new Error(`--author must be one of ${HOSTS.join(", ")}`);
   const { grade, reasons, required } = gradeOf(policy, dimensions, paths);
   const order = [...new Set(policy.host_order ?? Object.keys(policy.hosts))].filter((h) => policy.hosts[h]);
@@ -169,7 +171,7 @@ export function plan({ policy, author, dimensions, paths, usage, noUser = false,
   const warnings = [];
   // A65: no budget (and no warning) when antigravity is the author, i.e. never a reviewer in this plan.
   if (hosts.antigravity && hosts.antigravity.decision !== "excluded" && policy.hosts.antigravity) {
-    hosts.antigravity.budget = antigravityBudget(policy.hosts.antigravity, dimensions, files ?? paths.length, { rereview, diffBytes });
+    hosts.antigravity.budget = antigravityBudget(policy.hosts.antigravity, dimensions, files ?? paths.length, { rereview, diffBytes, layout: antigravityLayout });
     if (hosts.antigravity.budget.warning) warnings.push(hosts.antigravity.budget.warning);
   }
   const base = { grade, gradeReasons: reasons, required, author, dimensions, hosts, selected, warnings };

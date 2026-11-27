@@ -515,9 +515,27 @@ test("antigravity env: isolated GEMINI_HOME, provider credentials stripped", () 
 });
 
 test("antigravity turn groups follow the policy and cover every run dimension once", () => {
-  assert.deepEqual(ag.groupsFor(["correctness", "tests", "contract_docs"], policy.hosts.antigravity.groups), [["correctness"], ["tests", "contract_docs"]]);
-  assert.deepEqual(ag.groupsFor(["security", "perf"], policy.hosts.antigravity.groups), [["security"], ["perf"]]);
+  // Runtime 1.5 ("cli", top-level policy): no groups, one turn for every dimension (r7).
+  assert.deepEqual(policy.hosts.antigravity.groups, []);
+  assert.deepEqual(ag.groupsFor(["correctness", "tests", "contract_docs"], policy.hosts.antigravity.groups), [["correctness", "tests", "contract_docs"]]);
+  // Runtime <= 1.4 ("par"): the par_layout groups.
+  const par = ag.layoutConfig(policy.hosts.antigravity, "par").groups;
+  assert.deepEqual(ag.groupsFor(["correctness", "tests", "contract_docs"], par), [["correctness"], ["tests", "contract_docs"]]);
+  assert.deepEqual(ag.groupsFor(["security", "perf"], par), [["security"], ["perf"]]);
   assert.deepEqual(ag.groupsFor(["x"], undefined), [["x"]]);
+});
+
+test("antigravity par_layout is validated: object, known keys, groups shape, antigravity only (r7)", () => {
+  const withAg = (over) => ({ ...policy, hosts: { ...policy.hosts, antigravity: { ...policy.hosts.antigravity, ...over } } });
+  assert.deepEqual(policyProblems(policy), []);
+  assert.match(policyProblems(withAg({ par_layout: [] })).join(), /par_layout must be an object/);
+  assert.match(policyProblems(withAg({ par_layout: { max_files: 8 } })).join(), /par_layout\.max_files: unknown key/);
+  assert.match(policyProblems(withAg({ par_layout: { groups: [[]] } })).join(), /par_layout\.groups must be an array/);
+  assert.match(policyProblems(withAg({ par_layout: { turn_timeout_sec: 0 } })).join(), /par_layout\.turn_timeout_sec must be a positive number/);
+  assert.match(policyProblems(withAg({ groups: "security" })).join(), /antigravity\.groups must be an array/);
+  assert.match(policyProblems(withAg({ retry_timeout_sec: -1 })).join(), /antigravity\.retry_timeout_sec must be a positive number/);
+  const codexPar = { ...policy, hosts: { ...policy.hosts, codex: { ...policy.hosts.codex, par_layout: {} } } };
+  assert.match(policyProblems(codexPar).join(), /codex\.par_layout: only antigravity/);
 });
 
 test("antigravity model and thinking level come from the policy", () => {

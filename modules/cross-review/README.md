@@ -71,8 +71,9 @@ complete, 1 otherwise. 2 is a usage error (including unknown or repeated options
 dirs / `0400` files, owner only, outside the repository) of the scope and context files at `--rev`,
 built with `git ls-tree`/`git show` from git objects only (symlinks and submodules are refused, the
 working tree is never read), plus `__review__/diff.patch`, `brief.md` and `checklist.md`. The prompt
-is built once by `lib/inputs.mjs` and its hash recorded; Antigravity splits it into turns (one per
-dimension group, and per scope-file chunk when the scope is large) but keeps the same rules. Each
+is built once by `lib/inputs.mjs` and its hash recorded; Antigravity runs it as one turn on runtime
+1.5 (split into scope-file chunks only for a large scope; on ≤1.4, one turn per dimension group and
+chunk, see Antigravity turns) but keeps the same rules. Each
 reviewer child gets a minimal environment (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM`,
 `LANG`, `LC_*`, `TZ`, `TMPDIR`, plus `CODEX_HOME` / `CLAUDE_CONFIG_DIR` and
 `hosts.<h>.env_passthrough`); Antigravity keeps its own provider-credential denylist.
@@ -135,12 +136,13 @@ another reviewer or model.
   (waiting for the reset is an option), unless another window fails its cost or pace: every window
   is evaluated and skip beats ask.
 - Antigravity budget (not reported when Antigravity is the author): `plan` estimates its turns with
-  the adapter's own helper (`lib/turns.mjs`): dimension groups (policy groups + the leftover group, or
-  one group for a small `--prior` re-review, then `budget.singleGroup` says so) × scope-file chunks by
-  `max_files_per_turn` and, with sizes read from the working tree, `max_bytes_per_turn` (without sizes
-  it is a lower bound). `hosts.antigravity.budget.totalSec` = `per_turn_budget_sec` × turns, at least
-  `min_total_sec` (else `turn_timeout_sec`, else 600), capped by `max_total_sec`; when the cap cuts it,
-  `warnings[]` says so (see Antigravity turns below).
+  the adapter's own helper (`lib/turns.mjs`), for the layout of the installed runtime
+  (`budget.layout`; `cli` when none is found): dimension groups (none on 1.5; on ≤1.4 the `par_layout`
+  groups + the leftover group, or one group for a small `--prior` re-review, then `budget.singleGroup`
+  says so) × scope-file chunks by `max_files_per_turn` and, with sizes read from the working tree,
+  `max_bytes_per_turn` (without sizes it is a lower bound). `hosts.antigravity.budget.totalSec` =
+  `per_turn_budget_sec` × turns, at least `min_total_sec` (else `turn_timeout_sec`, else 1200),
+  capped by `max_total_sec`; when the cap cuts it, `warnings[]` says so (see Antigravity turns below).
 - pace ≥ `use_at_or_above` (1.0): use. Between `high_only_at_or_above` (0.6) and 1.0: use only for
   high grade. Below 0.6: skip with a one-line question. Usage unavailable: `ask`. `--no-user` turns
   `ask` into `blocked`. Thresholds and cost estimates are provisional (`pace.provisional`).
@@ -255,9 +257,17 @@ group after cleanup started (a crash before cleanup, or a different signal), mak
 `incomplete`; each turn must carry a matching model record (1.5: at least one `gen_metadata` row, and
 every row must be the pinned model at the pinned thinking level; ≤1.4: a `Proxy extracted model`
 line); finding ids continue
-across turns; a spawn failure or early server exit fails at once. `max_files_per_turn` (8) and
-`max_bytes_per_turn` (120000) split each dimension group into scope-file chunks so a turn stays well
-under the ≤1.4 proxy's 300 s first-byte wall (kept for 1.5, which has no proxy, to bound each turn).
+across turns; a spawn failure or early server exit fails at once.
+Turn split by runtime layout (`lib/turns.mjs` `layoutConfig`). Runtime 1.5 (`cli`, the policy's
+top-level values): ONE turn reviews every dimension (`groups: []`), and the scope is split into
+file chunks only above `max_files_per_turn` (32) / `max_bytes_per_turn` (400000). Measured on 1.5.18
+(2026-11-27): no first-byte wall (longest silent gap 20 s; a single 495 s turn over the full 24-file,
+215 KB PR #26 succeeded), and one turn was faster (498 s vs 726 s) and used about 3.5x fewer tokens
+(516K vs 1835K) than the 6-turn group/chunk split. Runtime ≤1.4 (`par`): its local proxy aborts a
+model call whose first byte takes > 300 s, so `par_layout` (over the top-level values, defaults in
+`PAR_LAYOUT_DEFAULTS`) keeps one turn per dimension group (`security`, `correctness`, `tests` +
+`contract_docs`) and 8-file / 120 KB chunks with the old timings. Keys missing from the policy fall
+back to `TURN_DEFAULTS` (32 files, 400000 bytes, `turn_timeout_sec` 1200, `retry_timeout_sec` 600).
 `runtime_root` accepts `{platform}-{arch}`; the highest valid version of either layout is used:
 1.5 directories hold `.install-complete.json` naming the executable (a regular executable file of the
 recorded size, run as `antigravity acp --gemini-dir <isolated home> --app-data-dir antigravity-acp
@@ -265,15 +275,18 @@ recorded size, run as `antigravity acp --gemini-dir <isolated home> --app-data-d
 hold `agy_acp_server.par`. On 1.5, `open`/`xdg-open` on the child's `PATH` are shims that record a
 browser launch as `auth_required` instead of opening a sign-in URL. Leftover agy processes outside
 the run's group are reported, never signalled.
-The total budget is `per_turn_budget_sec` (180) × planned turns, at least `min_total_sec` (600;
-default `turn_timeout_sec`) so a 1–3 turn run is never squeezed below one turn's timeout, capped by
-`max_total_sec` (3600) (`timeout_sec` applies only without `per_turn_budget_sec`); r3's 16-turn plan
-died at the old fixed 1500 s after 11 turns. `plan` estimates the turns with the adapter's own helper
-(`lib/turns.mjs`: policy groups + the leftover group, file chunks by count and, with sizes from the
-working tree, by bytes) and reports no Antigravity budget when Antigravity is the author.
-Speed knob: a re-review (`--prior`) whose diff is at most `rereview_single_group_max_diff_bytes`
-(120000) runs one group with every dimension per file chunk (`rereview_single_group`, default `true`),
-cutting the turns by the number of groups; `plan --prior` estimates the same way.
+The total budget is `per_turn_budget_sec` × planned turns, at least `min_total_sec` (default
+`turn_timeout_sec`) so a short run is never squeezed below one turn's timeout, capped by
+`max_total_sec` (3600) (`timeout_sec` applies only without `per_turn_budget_sec`). 1.5: 600 s per
+turn, floor 1200 s, `turn_timeout_sec` 1200, so one turn gets 1200 s and a 2–6 chunk run 1200–3600 s.
+≤1.4: 180 s per turn, floor 600 s, `turn_timeout_sec` 600 (r3's 16-turn plan died at the old fixed
+1500 s after 11 turns). `plan` estimates the turns with the adapter's own helper (`lib/turns.mjs`:
+groups + the leftover group, file chunks by count and, with sizes from the working tree, by bytes)
+and reports no Antigravity budget when Antigravity is the author.
+Speed knob (only for a layout with groups, i.e. ≤1.4): a re-review (`--prior`) whose diff is at most
+`rereview_single_group_max_diff_bytes` (120000) runs one group with every dimension per file chunk
+(`rereview_single_group`, default `true`), cutting the turns by the number of groups; `plan --prior`
+estimates the same way.
 
 Known gaps (also written into each run's `hostLimits`):
 
@@ -288,8 +301,8 @@ Known gaps (also written into each run's `hostLimits`):
   steps (recorded as a warning; the pinned model must appear in `modelUsage`).
 - Antigravity cannot disable session persistence; the model per response is only visible in the
   session database (1.5) or the local proxy's stderr (≤1.4), whose formats may change between
-  runtime versions. The ≤1.4 proxy's 300 s per-call time-to-first-byte limit is why reviews run in
-  dimension-group turns.
+  runtime versions. The ≤1.4 proxy's 300 s per-call time-to-first-byte limit is why reviews on that
+  runtime run in dimension-group turns; 1.5 has no such wall and runs one turn.
 - Antigravity 1.5 ignores the `enabledTools` allowlist: the tool restriction is the audit (after the
   fact) plus rejected permissions for edits and commands. 1.5 signs in through the OS keyring entry T3
   uses, not through files in the linked profile.
