@@ -208,8 +208,11 @@ preserve_mode() {
 # is that of the regular file being replaced (so a 0600 or 0755 file keeps
 # it), or the umask default for a new file or a replaced link. An existing
 # symlink at $1 is removed first: mv onto a link to a directory would move
-# the file into that directory. On failure FORGEKIT_TMP is kept set so the
-# EXIT trap (forgekit_tmp_cleanup) removes the temp file.
+# the file into that directory. mv -f: without it, mv asks before replacing
+# a destination without write permission (0444/0555) when stdin is a
+# terminal, and a "no" leaves the old file and an orphaned temp while mv
+# still exits 0. On failure FORGEKIT_TMP is kept set so the EXIT trap
+# (forgekit_tmp_cleanup) removes the temp file.
 commit_sibling_tmp() {
   local dst="$1"
   if [ -f "$dst" ] && [ ! -L "$dst" ]; then
@@ -220,7 +223,7 @@ commit_sibling_tmp() {
   if [ -L "$dst" ]; then
     rm -f "$dst"
   fi
-  mv "$FORGEKIT_TMP" "$dst" || return 1
+  mv -f "$FORGEKIT_TMP" "$dst" || return 1
   FORGEKIT_TMP=""
 }
 
