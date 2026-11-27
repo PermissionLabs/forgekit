@@ -245,9 +245,12 @@ export function buildPrompt(input, { prefix, idStart, dimensions = input.dimensi
 // ---------------------------------------------------------------- redaction (raw logs are local, still scrubbed)
 // r8: the sign-in URL ends at a JSON string boundary (`"`, `\`, whitespace), so a redacted line of
 // raw/antigravity-messages.jsonl stays valid JSON. JSON escapes that may sit inside the URL itself
-// (`\uXXXX`, e.g. Go's `\u0026` for `&`, and `\/`) are consumed whole, so the query after them is
-// still removed; any other escape (`\"`, `\n`, `\\`) ends the URL and stays intact.
-const AUTH_URL = /https:\/\/accounts\.google\.com\/(?:[^\s"\\]|\\u[0-9A-Fa-f]{4}|\\\/)*/g;
+// (`\uXXXX`, e.g. Go's `\u0026` for `&`, and `\/`) are consumed whole, also at any nesting depth (a JSON
+// string inside a JSON string doubles the backslashes: `\\u0026`, X1), so the query after them is still
+// removed. A match starts after a non-backslash and swallows the whole backslash run of each escape, so it never
+// splits one. The prefix accepts escaped slashes too (`https:\/\/accounts.google.com\/`). Any other escape
+// (`\"`, `\n`, `\\` before anything but `u`/`/`) ends the URL and stays intact.
+const AUTH_URL = /https:(?:\\*\/){2}accounts\.google\.com\\*\/(?:[^\s"\\]|\\+u[0-9A-Fa-f]{4}|\\+\/)*/g;
 export function redact(s) {
   return String(s)
     .replace(/ya29\.[A-Za-z0-9_\-.]+/g, "[REDACTED]")

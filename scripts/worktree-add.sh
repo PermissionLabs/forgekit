@@ -111,7 +111,7 @@ cleanup_incomplete_worktree() {
   git -C "$REPO_ROOT" branch -D "$BRANCH" >/dev/null 2>&1 || true
 }
 
-if ! ABS_WORKTREE="$(cd "$WORKTREE_PATH" && pwd -P)"; then
+if ! ABS_WORKTREE="$(CDPATH='' cd -- "$WORKTREE_PATH" && pwd -P)"; then
   cleanup_incomplete_worktree
   exit 1
 fi

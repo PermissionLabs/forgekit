@@ -45,6 +45,28 @@ export const ENABLED_TOOLS = ["view_file"];
 // The adapter builds its own text block per turn and applies hosts.antigravity.max_prompt_text_bytes to each one
 // (run.mjs then leaves the common prompt unbudgeted for this host and records res.promptBudget).
 export const promptBudget = "per_turn";
+
+/** The rule appended to a turn's first text block (dimensions, files, id start, prior coverage). */
+export function turnRule({ dims, files }, { prefix, turnStart, last, mustCover = [], priorIds = [] }) {
+  return `THIS TURN covers only these dimensions: ${dims.join(", ")}. Report only findings for them; coverage keys are exactly these.` +
+    (files ? ` THIS TURN reviews only these scope files (other listed files may be read for context): ${files.join(", ")}.` : "") +
+    ` New finding ids in this turn start at ${prefix}${turnStart} and continue in order.` +
+    (priorIds.length ? (last ? ` THIS IS THE LAST TURN: prior_verification must cover every earlier id not reported in previous turns (${mustCover.join(", ") || "none left"}).` : " prior_verification may be [] in this turn if no earlier finding concerns these dimensions or files.") : "");
+}
+
+/** Digit growth allowed for a later turn's id start before the in-loop build may exceed the pre-check. */
+export const ID_GROWTH_DIGITS = 4;
+/**
+ * Bytes the pre-check reserves on top of a turn's core built at the run's idStart (X3): the longest turn rule the
+ * loop can build for this turn (last or not, every prior id still due or "none left", the id start grown by
+ * ID_GROWTH_DIGITS digits) plus the growth of the id-start digits in the core itself. The id start appears in the
+ * core's rules ("ids are P<n>, P<n+1>") and schema text; 8 occurrences x ID_GROWTH_DIGITS bytes covers both.
+ */
+export function preflightReserve(turn, { prefix, idStart, priorIds = [] }) {
+  const grown = Number(`${idStart}${"9".repeat(ID_GROWTH_DIGITS)}`);
+  const variants = [false, true].flatMap((last) => [priorIds, []].map((mustCover) => turnRule(turn, { prefix, turnStart: grown, last, mustCover, priorIds })));
+  return Math.max(...variants.map((r) => Buffer.byteLength(`\n\n${r}`))) + 8 * ID_GROWTH_DIGITS;
+}
 export const CLIENT_CAPABILITIES = { fs: { readTextFile: false, writeTextFile: false }, terminal: false, session: { notices: {} } };
 const ALLOWED_TOOL_TITLE = /^(Running |Ran )?view_file\b/;
 /** "cli" tool names (ACP `name`): read tools whose paths are audited, and bookkeeping tools without a path. */
@@ -302,23 +324,24 @@ export async function run(ctx) {
   const toolNote = cli
     ? `Use ONLY the ${tool} tool. Read files with ${tool} using the absolute paths listed below (snapshot root ${cwd}); read only those files, in several small steps. Any other tool (commands, edits, web search, subagents, questions) invalidates the review. No shell, no web, no writes.`
     : `You have exactly ONE tool: view_file. Read files with view_file using the absolute paths listed below (snapshot root ${cwd}); read only those files, in several small steps. No shell, no web, no writes.`;
-  const turnRuleFor = ({ dims, files }, turnStart, last, mustCover) => `THIS TURN covers only these dimensions: ${dims.join(", ")}. Report only findings for them; coverage keys are exactly these.` +
-    (files ? ` THIS TURN reviews only these scope files (other listed files may be read for context): ${files.join(", ")}.` : "") +
-    ` New finding ids in this turn start at ${prefix}${turnStart} and continue in order.` +
-    (priorIds.length ? (last ? ` THIS IS THE LAST TURN: prior_verification must cover every earlier id not reported in previous turns (${mustCover.join(", ") || "none left"}).` : " prior_verification may be [] in this turn if no earlier finding concerns these dimensions or files.") : "");
+  const turnRuleFor = (turn, turnStart, last, mustCover) => turnRule(turn, { prefix, turnStart, last, mustCover, priorIds });
   // r8: the first text block of a turn (rules, brief, earlier findings, dispositions, checklist + turn rule) is
   // bounded by max_prompt_text_bytes; only the checklist is cut to fit. Checked for every planned turn before the
   // server starts (with the longest turn rule and a larger id start), so a prompt whose prior blocks alone do not
   // fit fails as incomplete without a model call.
   const maxPromptBytes = pin.config.max_prompt_text_bytes ?? null;
   out.promptBudget = { maxBytes: maxPromptBytes, turns: [] };
-  const coreFor = (turn, turnStart, turnRule) => {
+  const coreFor = (turn, turnStart, rule, reserveBytes = Buffer.byteLength(`\n\n${rule}`)) => {
     const meta = {};
-    const text = ctx.promptFor({ dimensions: turn.dims, toolNote, includeDiff: false, idStart: turnStart, maxBytes: maxPromptBytes, reserveBytes: Buffer.byteLength(`\n\n${turnRule}`), meta });
-    return { text: `${text}\n\n${turnRule}`, meta };
+    const text = ctx.promptFor({ dimensions: turn.dims, toolNote, includeDiff: false, idStart: turnStart, maxBytes: maxPromptBytes, reserveBytes, meta });
+    return { text: `${text}\n\n${rule}`, meta };
   };
   try {
-    for (const [ti, turn] of turns.entries()) if (cli || ti === 0) coreFor(turn, idStart + 999, turnRuleFor(turn, idStart + 999, true, priorIds));
+    // X3: the pre-check reserves at least what any later build of the same turn can need (preflightReserve).
+    for (const [ti, turn] of turns.entries()) if (cli || ti === 0) {
+      const r = preflightReserve(turn, { prefix, idStart, priorIds });
+      coreFor(turn, idStart, turnRuleFor(turn, idStart, true, priorIds), r);
+    }
   } catch (e) {
     if (!(e instanceof PromptBudgetError)) throw e;
     out.promptBudget.overBudget = e.detail;

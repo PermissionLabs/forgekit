@@ -587,6 +587,10 @@ test("redact: the sign-in URL stops at a JSON string boundary, so redacted JSONL
     `{"m":{"message":"${url.replaceAll("&", "\\u0026")}","n":1}}`,
     // The URL inside a JSON string that is itself JSON (escaped quotes) and before an escaped newline.
     JSON.stringify({ m: { data: JSON.stringify({ url }), text: `${url}\nnext line` } }),
+    // X1: nested JSON whose inner URL carries a Go-style \u0026 (doubled to \\u0026 by the outer encoding).
+    JSON.stringify({ m: { data: `{"url":"${url.replaceAll("&", "\\u0026")}","k":2}` } }),
+    // Three levels deep (\\\\u0026 after two more encodings) with every slash escaped, the prefix included.
+    JSON.stringify({ a: JSON.stringify({ b: `{"u":"${url.replaceAll("/", "\\/").replaceAll("&", "\\u0026")}"}` }) }),
   ];
   for (const line of lines) {
     const out = redact(line);
@@ -598,6 +602,8 @@ test("redact: the sign-in URL stops at a JSON string boundary, so redacted JSONL
   assert.equal(JSON.parse(redact(lines[1])).after, true);
   assert.equal(JSON.parse(redact(lines[3])).m.text, "[auth-url-redacted]\nnext line");
   assert.deepEqual(JSON.parse(JSON.parse(redact(lines[3])).m.data), { url: "[auth-url-redacted]" });
+  assert.deepEqual(JSON.parse(JSON.parse(redact(lines[4])).m.data), { url: "[auth-url-redacted]", k: 2 });
+  assert.deepEqual(JSON.parse(JSON.parse(JSON.parse(redact(lines[5])).a).b), { u: "[auth-url-redacted]" });
   // Plain text (stderr) keeps the old behaviour: the URL up to whitespace is removed.
   assert.equal(redact(`Open the following link: ${url} now`), "Open the following link: [auth-url-redacted] now");
 });

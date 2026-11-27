@@ -665,6 +665,20 @@ capture bash -c 'cd "$1" && CDPATH=. exec bash scripts/worktree-add.sh "$2" -b c
 expect_rc 0
 [ "$(jq -r .branch "$TMP_DIR/cdpath-wt/.context/workflow-state.json")" = "cdpath-task" ] \
   || fail "worktree not created or state not seeded"
+# X2 (r1 of the follow-ups review): a relative worktree path is resolved with
+# CDPATH cleared too (ABS_WORKTREE); a two-line path would seed state into a
+# directory whose name contains a newline.
+LABEL="worktree-add ignores an exported CDPATH (relative worktree path)"
+CASES=$((CASES + 1))
+capture bash -c 'cd "$1" && CDPATH=. exec bash scripts/worktree-add.sh cdpath-rel-wt -b cdpath-rel HEAD' _ \
+  "$cdpath_repo"
+expect_rc 0
+[ "$(jq -r .branch "$cdpath_repo/cdpath-rel-wt/.context/workflow-state.json")" = "cdpath-rel" ] \
+  || fail "relative worktree not seeded"
+if find "$cdpath_repo" "$TMP_DIR" -maxdepth 2 -name "*
+*" | grep . >/dev/null; then
+  fail "a path containing a newline was created"
+fi
 
 # 17d. PR #25: a managed destination that exists but is not a regular file
 #      (a directory) is refused by both writers.

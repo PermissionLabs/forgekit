@@ -8,7 +8,8 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadPolicy, defaultPolicyPath } from "../lib/policy.mjs";
 import { runReview } from "../lib/run.mjs";
-import { buildEnv, exitReason, findRuntime, installationRoots, isAgy, launchArgs, planTurns, stopGroup, totalBudget } from "../adapters/antigravity.mjs";
+import { buildEnv, exitReason, findRuntime, installationRoots, isAgy, launchArgs, planTurns, preflightReserve, stopGroup, totalBudget, turnRule } from "../adapters/antigravity.mjs";
+import { buildPrompt } from "../lib/inputs.mjs";
 import { countGenerations, decodeGeneration, normalizeModelName, protoFields } from "../lib/agy-session-db.mjs";
 import { plan, planForInstallation } from "../lib/plan.mjs";
 import { PAR_LAYOUT_DEFAULTS, TURN_DEFAULTS, layoutConfig, runTurns } from "../lib/turns.mjs";
@@ -641,4 +642,19 @@ ctest("r8: earlier findings + dispositions that alone exceed the budget make the
   assert.deepEqual(ev.attempts, []);
   assert.equal(ev.argv, null);
   assert.ok(ev.prompt.budget.overBudget.sizes.earlier_findings > 20_000);
+});
+
+test("r8/X3: the pre-check reserve covers every turn rule and id start the loop can build", () => {
+  const input = { snapshot: "/s", scope: ["src/a.ts"], files: [{ path: "src/a.ts", kind: "scope", lines: 1 }], dimensions: DIMS, briefText: "b", diffText: "d", checklist: [], prior: [], dispositions: [] };
+  const bytes = (s) => Buffer.byteLength(s);
+  for (const priorIds of [[], ["A999"], ["X1", "C22", "A999"]]) for (const idStart of [1, 9, 1000]) for (const turn of [{ dims: ["security"], files: null }, { dims: ["correctness", "tests"], files: ["src/a.ts", "src/b.ts"] }]) {
+    const prefix = "A";
+    const core = (start) => buildPrompt({ ...input, prior: priorIds.map((id) => ({ id })), dispositions: priorIds.map((id) => ({ id })) }, { prefix, idStart: start, dimensions: turn.dims, priorIds, includeDiff: false });
+    const budget = bytes(core(idStart)) + preflightReserve(turn, { prefix, idStart, priorIds });
+    // Codex X3: a sole prior already verified ("none left") and a later id start with more digits.
+    for (const start of [idStart, idStart + 9, idStart * 10 + 99, idStart + 999]) for (const last of [false, true]) for (const mustCover of [priorIds, []]) {
+      const actual = bytes(core(start)) + bytes(`\n\n${turnRule(turn, { prefix, turnStart: start, last, mustCover, priorIds })}`);
+      assert.ok(actual <= budget, `${JSON.stringify({ priorIds, idStart, start, last, mustCover })}: ${actual} > ${budget}`);
+    }
+  }
 });
