@@ -935,6 +935,33 @@ for writer in update-harness bootstrap; do
   ro_check "$repo"
 done
 
+# 21d. r12 (Codex on A18): with a terminal on stdin, mv without -f asks
+#      before replacing a destination without write permission; answering
+#      "n" left the old 0444/0555 file and an orphaned temp, and the run went
+#      on. Run under a pty (script(1)) that answers "n" to any prompt.
+in_pty() {
+  if [ "$(uname)" = Darwin ]; then
+    (trap '' PIPE; sleep 2; printf 'n\nn\nn\n' 2>/dev/null || true) | script -q /dev/null "$@"
+  else
+    (trap '' PIPE; sleep 2; printf 'n\nn\nn\n' 2>/dev/null || true) | script -qec "$(printf '%q ' "$@")" /dev/null
+  fi
+}
+if command -v script >/dev/null 2>&1 && in_pty true >/dev/null 2>&1; then
+  repo="$(new_repo readonly-tty)"
+  printf '\nlocal edit\n' >> "$repo/CLAUDE.md"
+  printf '\n# local edit\n' >> "$repo/scripts/worktree-add.sh"
+  chmod 444 "$repo/CLAUDE.md"
+  chmod 555 "$repo/scripts/worktree-add.sh"
+  LABEL="update-harness --force on a terminal replaces read-only files without a prompt"
+  CASES=$((CASES + 1))
+  capture in_pty bash "$ROOT/scripts/update-harness.sh" "$repo" --force
+  expect_lacks "not overwritten"
+  same_entry_body "$repo/CLAUDE.md" "$ROOT/templates/CLAUDE.md" || fail "CLAUDE.md body not updated"
+  cmp -s "$repo/scripts/worktree-add.sh" "$ROOT/scripts/worktree-add.sh" || fail "worktree-add.sh not updated"
+  [ "$(mode_of "$repo/CLAUDE.md")" = "444" ] || fail "CLAUDE.md mode $(mode_of "$repo/CLAUDE.md"), want 444"
+  expect_no_tmp "$repo"
+fi
+
 # A new file copied by safe_copy_file gets the umask default (not the temp
 # file's 0600); the helper script then gets +x.
 dir="$TMP_DIR/new-copy-mode"
@@ -1313,8 +1340,20 @@ exec "$real_chmod" "\$@"
 SHIM
 "$real_chmod" +x "$TMP_DIR/race-chmod-shim/chmod"
 mkdir -p "$TMP_DIR/term-mv-marker-shim"
-printf '#!/bin/sh\n: > "%s"\nkill -TERM "$PPID"\nexit 1\n' "$TMP_DIR/term-mv-reached" \
-  > "$TMP_DIR/term-mv-marker-shim/mv"
+# Only the .gitignore rename is interrupted (r12 A29): since every managed
+# write is a rename, an unconditional TERM stopped bootstrap at AGENTS.md,
+# before the race shim and the .gitignore step ran.
+real_mv="$(command -v mv)"
+cat > "$TMP_DIR/term-mv-marker-shim/mv" <<SHIM
+#!/bin/sh
+for a in "\$@"; do last="\$a"; done
+case "\$last" in */.gitignore)
+  : > "$TMP_DIR/term-mv-reached"
+  kill -TERM "\$PPID"
+  exit 1 ;;
+esac
+exec "$real_mv" "\$@"
+SHIM
 chmod +x "$TMP_DIR/term-mv-marker-shim/mv"
 
 repo="$(new_repo a7-boot-trap)"

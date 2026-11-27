@@ -235,8 +235,9 @@ else
     cleanup_incomplete_worktree
     exit 1
   fi
+  # mv -f: never an interactive overwrite prompt (commit_sibling_tmp, r12).
   if ! chmod "$(printf '%o' $((0666 & ~0$(umask))))" "$STATE_TMP" \
-    || ! mv "$STATE_TMP" "$STATE_FILE"; then
+    || ! mv -f "$STATE_TMP" "$STATE_FILE"; then
     cleanup_state_tmp
     cleanup_incomplete_worktree
     exit 1
